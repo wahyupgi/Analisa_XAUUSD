@@ -1,0 +1,31 @@
+{
+  "waktu_simpan": "2026-11-06 16:13:29",
+  "sinyal": {
+    "arah": "BUY",
+    "lo": 4065.5,
+    "hi": 4069.0,
+    "sl": 4059.5,
+    "tp1": 4078.5,
+    "tp2": 4095.0
+  },
+  "sinyal_sebelumnya": {
+    "arah": "BUY",
+    "lo": 4048.0,
+    "hi": 4051.0,
+    "sl": 4049.8,
+    "tp1": 4056.0,
+    "tp2": 4064.0,
+    "ket": "TP1 Tercapai \u2014 SL Geser ke BEP+ (Runner ke TP2)"
+  },
+  "atas": [
+    4097.76,
+    4106.99,
+    4118.05
+  ],
+  "bawah": [
+    4058.71,
+    4066.09,
+    4052.9
+  ],
+  "catatan": "Startup Awal"
+}

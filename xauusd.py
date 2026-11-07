@@ -14,7 +14,7 @@ import MetaTrader5 as mt5
 import pandas as pd
 from google import genai
 
-API_KEY = ""
+API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Nama simbol bisa berbeda tiap broker (XAUUSD, XAUUSDm, GOLD, XAUUSD.a, dll.)
 SYMBOL = "XAUUSDc"
@@ -2117,9 +2117,13 @@ def _aktifkan_zona_valid_berikutnya(otomatis, sudah_notif_masuk, arah_cari, bata
         print("   • STATUS SISTEM      : Zona/Sinyal saat ini MASIH BERJALAN. Ini HANYA peta cadangan darurat jika lantai jebol!")
         label_setup = "Rencana Setup Cadangan"
     else:
+        print(f"   [❌ STATUS SETUP SEBELUMNYA: GAGAL / SUDAH BATAL KENA SL]")
+        print(f"   • Fakta Lapangan     : {alasan_jebol}")
+        print(f"   • PERINGATAN KERAS   : DILARANG ENTRY DI SETUP LAMA! Setup tersebut sudah gugur/tidak berlaku.")
+        print("   " + "─" * 70)
         print(f"   [⏳ ZONA {lbl_jenis} BERIKUTNYA DISIAGAKAN — WATCHLIST (Menunggu Harga Menjemput)]")
         label_setup = "Setup Sinyal Baru"
-    print(f"   • Pemicu             : {alasan_jebol}")
+    print(f"   • Pemicu Watchlist   : Mencari pijakan zona aman berikutnya pasca-SL jebol")
     print(f"   • Zona Rekomendasi   : {utama['lo']:.2f} - {utama['hi']:.2f} (Jarak ~{utama['jarak']:.2f} pt dari harga {harga_skrg:.2f})")
     print(f"   • Kategori Zona      : {utama.get('tipe_strategi', 'Valid')}")
     print(f"   • Dasar Konfluensi   : {utama['sumber']}")
@@ -2217,7 +2221,9 @@ def _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_baru, alasan
             print(f"   • BATAS KERAS (SAFETY)     : DILARANG pasang lot > {mm['lot_max']:.2f} lot (Batas risiko maks 2.0% modal)!")
             print("   " + "─" * 66)
     else:
-        print("   • Sinyal Baru      : WAIT / DIBATALKAN (Menunggu setup/konfirmasi baru yang aman)")
+        print("   • Status Sinyal Baru : ⏳ WAIT / NETRAL (TIDAK ADA SINYAL ENTRY SEKARANG)")
+        print("   • Status Setup Lama  : ❌ GAGAL / KENA SL (RESMI DIBATALKAN & DIBERSIHKAN)")
+        print("   • Tindakan Trader    : JANGAN ENTRY! Tunggu harga menjemput zona baru dengan konfirmasi valid.")
     print("   " + "=" * 66)
 
 
@@ -2267,10 +2273,14 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
     if sig_prev_pantau and isinstance(sig_prev_pantau, dict) and sig_prev_pantau.get("lo"):
         st_prev, al_prev = evaluasi_validitas_sinyal(sig_prev_pantau, harga_awal_pantau)
         lbl_eks_prev, _, info_eks_prev = cek_status_eksekusi_sinyal(sig_prev_pantau, pos_awal, orders_awal)
+        is_gagal_prev = "BATAL" in st_prev or "JEBOL" in st_prev or "SL" in st_prev
+        tag_prev = "❌ [SETUP GAGAL / KENA SL]" if is_gagal_prev else f"📌 [{lbl_eks_prev}]"
         print("─" * 70)
-        print(f"  📜 RIWAYAT SINYAL SEBELUMNYA [{lbl_eks_prev}]:")
-        print(f"     {sig_prev_pantau['arah']} @ {sig_prev_pantau['lo']:.2f} - {sig_prev_pantau['hi']:.2f} | SL {sig_prev_pantau['sl']:.2f} | TP1 {sig_prev_pantau['tp1']:.2f} | TP2 {sig_prev_pantau.get('tp2', sig_prev_pantau['tp1']):.2f}")
+        print(f"  📜 RIWAYAT SINYAL SEBELUMNYA — {tag_prev}:")
+        print(f"     Setup : {sig_prev_pantau['arah']} @ {sig_prev_pantau['lo']:.2f} - {sig_prev_pantau['hi']:.2f} | SL {sig_prev_pantau['sl']:.2f} | TP1 {sig_prev_pantau['tp1']:.2f} | TP2 {sig_prev_pantau.get('tp2', sig_prev_pantau['tp1']):.2f}")
         print(f"     Status: [{st_prev}] -> {al_prev}")
+        if is_gagal_prev:
+            print("     ⚠️ CATATAN: Setup di atas SUDAH TIDAK BERLAKU (gugur). Jangan dijadikan acuan entry!")
         print(f"     Sumber: {sig_prev_pantau.get('ket', '-')}")
         print("─" * 70)
 
@@ -3411,17 +3421,25 @@ if sig_sebelumnya and isinstance(sig_sebelumnya, dict):
         print(f"     Alasan: {al_riwayat}")
         print("─" * 70)
 
-    print(f"• Setup Sinyal Aktif: {sig_sebelumnya['arah']} @ {sig_sebelumnya['lo']:.2f} - {sig_sebelumnya['hi']:.2f}")
-    print(f"• Stop Loss & TP    : SL {sig_sebelumnya['sl']:.2f} | TP1 {sig_sebelumnya['tp1']:.2f} | TP2 {sig_sebelumnya.get('tp2', sig_sebelumnya['tp1']):.2f}")
-    print(f"• Status Validitas  : [{status_lama}]")
-    print(f"• Keterangan Fakta  : {alasan_lama}")
+    is_gagal_start = "BATAL" in status_lama or "JEBOL" in status_lama or "SL" in status_lama
+    if is_gagal_start:
+        print(f"• STATUS SINYAL LAMA : ❌ [SETUP GAGAL / BATAL KENA SL] (SUDAH TIDAK BERLAKU!)")
+        print(f"• Rincian Yang Batal : {sig_sebelumnya['arah']} @ {sig_sebelumnya['lo']:.2f} - {sig_sebelumnya['hi']:.2f} | SL {sig_sebelumnya['sl']:.2f} | TP1 {sig_sebelumnya['tp1']:.2f}")
+        print(f"• Status Validitas   : [{status_lama}]")
+        print(f"• Keterangan Fakta   : {alasan_lama}")
+        print("• PANDUAN TRADER     : ⚠️ JANGAN ENTRY DI AREA INI! Setup ini sudah tewas/gugur.")
+    else:
+        print(f"• Setup Sinyal Aktif : {sig_sebelumnya['arah']} @ {sig_sebelumnya['lo']:.2f} - {sig_sebelumnya['hi']:.2f}")
+        print(f"• Stop Loss & TP     : SL {sig_sebelumnya['sl']:.2f} | TP1 {sig_sebelumnya['tp1']:.2f} | TP2 {sig_sebelumnya.get('tp2', sig_sebelumnya['tp1']):.2f}")
+        print(f"• Status Validitas   : [{status_lama}]")
+        print(f"• Keterangan Fakta   : {alasan_lama}")
     kat_start, ket_r_start = tentukan_klasifikasi_risiko_sinyal(sig_sebelumnya)
     tag_start = "⚠️ [HIGH RISK]" if kat_start == "HIGH RISK" else ("🛡️ [LOW RISK]" if kat_start == "LOW RISK" else "⚡ [MEDIUM RISK]")
-    print(f"• Tingkat Risiko    : {tag_start} ({ket_r_start})")
+    print(f"• Tingkat Risiko     : {tag_start} ({ket_r_start})")
     if kat_start == "HIGH RISK":
-        print("  -> Panduan Trader : Sinyal dadakan LTF. Anda bebas mempertimbangkan untuk ambil atau skip!")
-    print(f"• Status di Akun MT5: [{lbl_eks_start}] ({info_eks_start})")
-    print(f"• Sumber Setup      : {sig_sebelumnya.get('ket', '-')}")
+        print("  -> Panduan Trader  : Sinyal dadakan LTF. Anda bebas mempertimbangkan untuk ambil atau skip!")
+    print(f"• Status di Akun MT5 : [{lbl_eks_start}] ({info_eks_start})")
+    print(f"• Sumber Setup       : {sig_sebelumnya.get('ket', '-')}")
     print("=" * 70 + "\n")
 
     _riwayat_teks = ""
@@ -3538,12 +3556,16 @@ while True:
         if sig_lama and isinstance(sig_lama, dict) and sig_lama.get("lo"):
             st_lama, al_lama = evaluasi_validitas_sinyal(sig_lama, bid_now)
             lbl_eks_lama, _, info_lama = cek_status_eksekusi_sinyal(sig_lama)
+            is_gagal_lama = "BATAL" in st_lama or "JEBOL" in st_lama or "SL" in st_lama
+            tag_lama = "❌ [SETUP GAGAL / KENA SL]" if is_gagal_lama else f"📌 [{lbl_eks_lama}]"
             print("\n" + "─" * 70)
-            print(f"1. 📌 SINYAL SEBELUMNYA (SESI LALU) — [{lbl_eks_lama}]:")
+            print(f"1. {tag_lama} SINYAL SEBELUMNYA (SESI LALU):")
             print(f"   • Setup Sinyal   : {sig_lama['arah']} @ {sig_lama['lo']:.2f} - {sig_lama['hi']:.2f}")
             print(f"   • Stop Loss & TP : SL {sig_lama['sl']:.2f} | TP1 {sig_lama['tp1']:.2f} | TP2 {sig_lama.get('tp2', sig_lama['tp1']):.2f}")
-            print(f"   • STATUS VALID   : [{st_lama}]")
+            print(f"   • STATUS VALID   : [{st_lama}]" + (" ❌ SUDAH TIDAK BERLAKU!" if is_gagal_lama else " ✅ MASIH VALID"))
             print(f"   • Keterangan     : {al_lama}")
+            if is_gagal_lama:
+                print("   • PERINGATAN     : ⚠️ Setup ini sudah gugur. JANGAN jadikan acuan entry!")
             print(f"   • Status di Akun : {lbl_eks_lama} ({info_lama})")
             print(f"   • Sumber Setup   : {sig_lama.get('ket', '-')}")
         else:

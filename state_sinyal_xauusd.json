@@ -1,32 +1,38 @@
 {
-  "waktu_simpan": "2026-11-07 06:23:44",
+  "waktu_simpan": "2026-11-09 14:10:13",
   "sinyal": {
-    "arah": "SELL",
-    "lo": 4062.88,
-    "hi": 4072.55,
-    "sl": 4081.25,
-    "tp1": 4033.49,
-    "tp2": 4007.77,
-    "ket": "Reaksi Zona Supply Atas (Menunggu Trigger M5)"
+    "arah": "BUY",
+    "lo": 4076.81,
+    "hi": 4078.65,
+    "sl": 4078.03,
+    "tp1": 4104.34,
+    "tp2": 4134.26,
+    "lo_asli": 4076.81,
+    "hi_asli": 4078.65,
+    "t_buat": 1794207851,
+    "harga_buat": 4106.136,
+    "ket": "TP1 Tercapai \u2014 SL Geser ke BEP+ (Runner ke TP2)"
   },
   "sinyal_sebelumnya": {
     "arah": "BUY",
-    "lo": 4047.0,
-    "hi": 4051.5,
-    "sl": 4049.55,
-    "tp1": 4067.5,
-    "tp2": 4082.0,
-    "ket": "TP1 Tercapai \u2014 SL Geser ke BEP+ (Runner ke TP2)"
+    "lo": 4112.4,
+    "hi": 4119.2,
+    "sl": 4108.23,
+    "tp1": 4136.75,
+    "tp2": 4152.11,
+    "ket": "Reaksi Zona Demand Bawah (Menunggu Trigger M5)",
+    "t_buat": 1794203161,
+    "harga_buat": 4119.02
   },
   "atas": [
-    4062.88,
-    4072.55,
-    4081.25
+    4139.22,
+    4142.22,
+    4147.24
   ],
   "bawah": [
-    4026.72,
-    4035.6,
-    4021.07
+    4076.81,
+    4078.65,
+    4071.8
   ],
-  "catatan": "Harga Masuk Zona Supply Atas (4062.88-4072.55)"
+  "catatan": "TP1 (4104.34) Tercapai -> SL Sinyal Aktif dikunci ke BEP+ (4078.03)"
 }

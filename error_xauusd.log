@@ -1,0 +1,18 @@
+[2026-11-09 21:04:22] _ambil_events_berita: <HTTPError 429: 'Too Many Requests'>
+Traceback (most recent call last):
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\xauusd1.py", line 1647, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+  File "C:\laragon\bin\python\python-3.10\lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+  File "C:\laragon\bin\python\python-3.10\lib\urllib\request.py", line 525, in open
+    response = meth(req, response)
+  File "C:\laragon\bin\python\python-3.10\lib\urllib\request.py", line 634, in http_response
+    response = self.parent.error(
+  File "C:\laragon\bin\python\python-3.10\lib\urllib\request.py", line 563, in error
+    return self._call_chain(*args)
+  File "C:\laragon\bin\python\python-3.10\lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+  File "C:\laragon\bin\python\python-3.10\lib\urllib\request.py", line 643, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 429: Too Many Requests
+

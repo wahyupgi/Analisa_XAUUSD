@@ -79,6 +79,8 @@ MAKS_RUGI_HARIAN_PCT = 3.0         # batas rugi tertutup hari ini (hari server) 
 LEBAR_CLUSTER_MAKS = 8.0           # lebar maksimal zona Golden Confluence (poin)
 FILTER_TREND_AKTIF = True          # True = hanya sinyal searah trend HTF; False = matikan filter
 IZINKAN_COUNTER_TREND_MEDIUM = False  # True = counter-trend boleh bila sinyal MEDIUM RISK
+FILTER_SESI_AKTIF = True           # True = hanya sinyal di sesi London & New York (UTC); False = semua jam
+SESI_DIIZINKAN_UTC = [(7, 16), (12, 21)]  # London (07:00-16:00 UTC) dan New York (12:00-21:00 UTC)
 BIAS_MIN_SKOR = 2                  # skor minimal (-5..+5) agar bias dianggap BULLISH/BEARISH
 JARAK_CONFLUENCE_MAKS = 100.0      # confluence yang lebih jauh dari ini tidak ditampilkan
 FILE_JURNAL_SINYAL = os.path.join(_DIR_SCRIPT, "jurnal_sinyal_xauusd.csv")
@@ -1518,37 +1520,100 @@ def _info_tipe_pending(tipe):
 
 
 def cek_posisi_terbuka_mt5(harga_skrg):
-    """Membaca posisi trading yang sedang running (floating) DAN Pending Order (Buy Limit / Sell Limit) di MT5."""
-    out = ["\n===== POSISI RUNNING & PENDING ORDER (BUY/SELL LIMIT) DI AKUN MT5 ANDA ====="]
+    """Membaca identitas akun real, posisi trading yang sedang running (floating), Pending Order, & riwayat deal hari ini di MT5."""
+    out = ["\n===== FAKTA AKUN REAL MT5, POSISI RUNNING & PENDING ORDER ANDA (DATA ASLI LIVE) ====="]
+    acc = mt5.account_info()
+    tick = mt5.symbol_info_tick(SYMBOL)
+    cur = acc.currency if acc else "USD"
+    eq = float(acc.equity if acc and acc.equity > 0 else (acc.balance if acc else 0.0))
+    bid_live = float(tick.bid) if tick and tick.bid > 0 else float(harga_skrg)
+    ask_live = float(tick.ask) if tick and tick.ask > 0 else float(harga_skrg)
+
+    if acc:
+        mode_akun = "REAL ACCOUNT" if getattr(acc, "trade_mode", 0) == getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2) else "DEMO/CONTEST"
+        out.append(
+            f"  [IDENTITAS AKUN MT5]: Login #{acc.login} ({acc.name} | Server: {acc.server} | Tipe: {mode_akun}) | "
+            f"Mata Uang: {cur} (JANGAN sebut USD/$ jika tertulis {cur}!) | "
+            f"Balance: {acc.balance:,.2f} {cur} | Equity: {acc.equity:,.2f} {cur} | Floating Total: {acc.profit:+,.2f} {cur} | Free Margin: {acc.margin_free:,.2f} {cur}"
+        )
+
     pos = mt5.positions_get(symbol=SYMBOL)
     orders = mt5.orders_get(symbol=SYMBOL)
 
     if not pos and not orders:
-        out.append("  - Tidak ada posisi running maupun pending order (Buy/Sell Limit) pada simbol ini saat ini.")
-        return "\n".join(out) + "\n"
+        out.append("  - POSISI & PENDING ORDER: Tidak ada posisi running maupun pending order (Buy/Sell Limit) pada simbol ini saat ini.")
+    else:
+        if pos:
+            out.append(f"  [POSISI RUNNING / FLOATING SAAT INI — TOTAL {len(pos)} POSISI AKTIF (WAJIB DIKAWAL, JANGAN DIABAIKAN!)]:")
+            for p in pos:
+                arah = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
+                harga_tutup = bid_live if arah == "BUY" else ask_live
+                poin = (harga_tutup - p.price_open) if arah == "BUY" else (p.price_open - harga_tutup)
+                pct_eq = (p.profit / eq * 100.0) if eq > 0 else 0.0
+                if p.sl and p.sl > 0:
+                    sudah_bep = (arah == "BUY" and p.sl >= p.price_open) or (arah == "SELL" and p.sl <= p.price_open)
+                    if sudah_bep:
+                        kunci_pt = (p.sl - p.price_open) if arah == "BUY" else (p.price_open - p.sl)
+                        sl_info = f"{p.sl:.3f} [✅ SUDAH DIKUNCI BEP+ (+{kunci_pt:.2f} pt di area profit) — POSISI 100% BEBAS RISIKO!]"
+                    else:
+                        jrk_sl = (harga_tutup - p.sl) if arah == "BUY" else (p.sl - harga_tutup)
+                        sl_info = f"{p.sl:.3f} (jarak dari harga sekarang ke SL: {jrk_sl:.2f} pt)"
+                else:
+                    sl_info = "BELUM DISET (⚠️ RAWAN TANPA PENGAMAN!)"
+                tp_info = f"{p.tp:.3f}" if (p.tp and p.tp > 0) else "BELUM DISET (Terbuka / Runner)"
+                out.append(
+                    f"  - Ticket #{p.ticket} | {arah} {p.volume} lot @ {p.price_open:.3f} (Harga sekarang: {harga_tutup:.3f}) | "
+                    f"SL: {sl_info} | TP: {tp_info} | "
+                    f"Floating: {p.profit:+,.2f} {cur} ({pct_eq:+.2f}% equity | {poin:+.2f} poin)"
+                )
+        else:
+            out.append("  [POSISI RUNNING / FLOATING SAAT INI]: Tidak ada posisi market yang sedang terbuka (0 posisi running).")
 
-    if pos:
-        out.append("  [POSISI RUNNING / FLOATING]:")
-        for p in pos:
-            arah = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
-            poin = (harga_skrg - p.price_open) if arah == "BUY" else (p.price_open - harga_skrg)
-            out.append(
-                f"  - Ticket #{p.ticket} | {arah} {p.volume} lot @ {p.price_open:.2f} | "
-                f"SL: {p.sl if p.sl > 0 else 'BELUM DISET'} | TP: {p.tp if p.tp > 0 else 'BELUM DISET'} | "
-                f"Floating: ${p.profit:+.2f} ({poin:+.2f} poin)"
-            )
+        if orders:
+            out.append(f"  [PENDING ORDER TERPASANG SAAT INI — TOTAL {len(orders)} ORDER (WAJIB DIEVALUASI VALIDITAS ZONANYA OLEH AI)]:")
+            for o in orders:
+                nama_ord, arah_ord = _info_tipe_pending(o.type)
+                vol_ord = getattr(o, "volume_current", getattr(o, "volume_initial", 0.0))
+                jarak_ord = abs(bid_live - o.price_open) if bid_live > 0 else 0.0
+                letak_ord = "di atas harga sekarang" if o.price_open > bid_live else "di bawah harga sekarang"
+                sl_ord_txt = f"{o.sl:.3f} (jarak SL {abs(o.price_open - o.sl):.2f} pt)" if (o.sl and o.sl > 0) else "BELUM DISET (⚠️ WAJIB INGATKAN PASANG SL!)"
+                tp_ord_txt = f"{o.tp:.3f}" if (o.tp and o.tp > 0) else "BELUM DISET"
+                out.append(
+                    f"  - Ticket #{o.ticket} | {nama_ord} ({arah_ord}) {vol_ord} lot @ {o.price_open:.3f} "
+                    f"(Jarak: {jarak_ord:.2f} poin {letak_ord}) | "
+                    f"SL: {sl_ord_txt} | TP: {tp_ord_txt}"
+                )
+        else:
+            out.append("  [PENDING ORDER TERPASANG SAAT INI]: Tidak ada pending order (0 limit/stop order).")
 
-    if orders:
-        out.append("  [PENDING ORDER TERPASANG (WAJIB DIEVALUASI VALIDITAS ZONANYA OLEH AI)]:")
-        for o in orders:
-            nama_ord, arah_ord = _info_tipe_pending(o.type)
-            vol_ord = getattr(o, "volume_current", getattr(o, "volume_initial", 0.0))
-            jarak_ord = abs(harga_skrg - o.price_open) if harga_skrg > 0 else 0.0
-            out.append(
-                f"  - Ticket #{o.ticket} | {nama_ord} ({arah_ord}) {vol_ord} lot @ {o.price_open:.2f} "
-                f"(Jarak dari harga sekarang: {jarak_ord:.2f} poin) | "
-                f"SL: {o.sl if o.sl > 0 else 'BELUM DISET'} | TP: {o.tp if o.tp > 0 else 'BELUM DISET'}"
-            )
+    # Riwayat transaksi yang sudah tertutup hari ini (agar AI tahu histori eksekusi hari ini & tidak mengarang)
+    if tick:
+        try:
+            awal_hari = int(tick.time) - int(tick.time) % 86400
+            deals = mt5.history_deals_get(datetime.now() - timedelta(days=2), datetime.now() + timedelta(days=1)) or ()
+            deals_hari = [
+                d for d in deals
+                if d.time >= awal_hari and getattr(d, "symbol", "") == SYMBOL
+                and getattr(d, "entry", 0) in (getattr(mt5, "DEAL_ENTRY_OUT", 1), getattr(mt5, "DEAL_ENTRY_INOUT", 2))
+            ]
+            if deals_hari:
+                out.append(f"  [RIWAYAT POSISI YANG SUDAH DITUTUP HARI INI ({len(deals_hari)} transaksi selesai, terbaru di bawah)]:")
+                for d in deals_hari[-5:]:
+                    arah_d = "SELL (tutup BUY)" if d.type == mt5.DEAL_TYPE_SELL else "BUY (tutup SELL)"
+                    t_d = pd.Timestamp(int(d.time), unit="s").strftime("%H:%M")
+                    net_d = d.profit + d.commission + d.swap + getattr(d, "fee", 0.0)
+                    alasan_d = {
+                        getattr(mt5, "DEAL_REASON_SL", 4): "kena SL",
+                        getattr(mt5, "DEAL_REASON_TP", 5): "kena TP",
+                        getattr(mt5, "DEAL_REASON_SO", 6): "Stop Out",
+                    }.get(getattr(d, "reason", -1), "tutup manual/script")
+                    out.append(
+                        f"  - [{t_d} waktu server] Deal #{d.ticket} (Pos #{getattr(d, 'position_id', '-')}) | "
+                        f"{arah_d} {d.volume} lot @ {d.price:.3f} | Hasil: {net_d:+,.2f} {cur} ({alasan_d})"
+                    )
+        except Exception as e_hist:
+            _catat_error("cek_posisi_terbuka_mt5_hist", e_hist)
+
     return "\n".join(out) + "\n"
 
 
@@ -1790,6 +1855,33 @@ def kumpulkan_konteks_mt5(is_refresh=False):
     smc_text = "".join(analisa_metode(n, frames[n], offset, harga_ref) for n in ("H4", "H1", "M30", "M5"))
     smc_text += analisa_sesi(frames["M30"], frames["M5"], offset)
 
+    # Hitung kandidat zona algoritmik siap pakai (BUY & SELL) dari data MT5 agar AI punya jangkar angka presisi
+    z_buy_k, z_buy_c2 = _cari_zona_valid_berikutnya_mt5("BUY", harga_ref, harga_ref, atr_m5_val)
+    z_sell_k, z_sell_c2 = _cari_zona_valid_berikutnya_mt5("SELL", harga_ref, harga_ref, atr_m5_val)
+    kandidat_algo_txt = "\n===== KANDIDAT SETUP ALGORITMIK MT5 SIAP PAKAI (JANGKAR PRESISI ANTI-HALUSINASI) =====\n"
+    kandidat_algo_txt += "  (Gunakan angka di bawah ini sebagai acuan utama ZONA_BAWAH / ZONA_ATAS dan SINYAL_AKTIF agar 100% akurat sesuai struktur MT5 & lolos gerbang jarak <= 20 poin):\n"
+    if z_buy_k:
+        kandidat_algo_txt += (
+            f"  * KANDIDAT BUY #1 (Terdekat): ENTRY {z_buy_k['lo']:.2f}-{z_buy_k['hi']:.2f} | SL {z_buy_k['sl']:.2f} | "
+            f"TP1 {z_buy_k['tp1']:.2f} | TP2 {z_buy_k['tp2']:.2f} (Jarak {harga_ref - z_buy_k['hi']:.2f} pt | {z_buy_k['sumber']})\n"
+        )
+    if z_buy_c2:
+        kandidat_algo_txt += (
+            f"  * KANDIDAT BUY #2 (Cadangan): ENTRY {z_buy_c2['lo']:.2f}-{z_buy_c2['hi']:.2f} | SL {z_buy_c2['sl']:.2f} | "
+            f"TP1 {z_buy_c2['tp1']:.2f} | TP2 {z_buy_c2['tp2']:.2f} (Jarak {harga_ref - z_buy_c2['hi']:.2f} pt | {z_buy_c2['sumber']})\n"
+        )
+    if z_sell_k:
+        kandidat_algo_txt += (
+            f"  * KANDIDAT SELL #1 (Terdekat): ENTRY {z_sell_k['lo']:.2f}-{z_sell_k['hi']:.2f} | SL {z_sell_k['sl']:.2f} | "
+            f"TP1 {z_sell_k['tp1']:.2f} | TP2 {z_sell_k['tp2']:.2f} (Jarak {z_sell_k['lo'] - harga_ref:.2f} pt | {z_sell_k['sumber']})\n"
+        )
+    if z_sell_c2:
+        kandidat_algo_txt += (
+            f"  * KANDIDAT SELL #2 (Cadangan): ENTRY {z_sell_c2['lo']:.2f}-{z_sell_c2['hi']:.2f} | SL {z_sell_c2['sl']:.2f} | "
+            f"TP1 {z_sell_c2['tp1']:.2f} | TP2 {z_sell_c2['tp2']:.2f} (Jarak {z_sell_c2['lo'] - harga_ref:.2f} pt | {z_sell_c2['sumber']})\n"
+        )
+    zona_text += kandidat_algo_txt
+
     data_text = (ringkas_tf("W1", frames["W1"], 6)
                  + ringkas_tf("D1", frames["D1"], 10)
                  + ringkas_tf("H4", frames["H4"], 12)
@@ -1798,9 +1890,21 @@ def kumpulkan_konteks_mt5(is_refresh=False):
                  + ringkas_tf("M5", frames["M5"], 40))
 
     return f"""
-Kamu adalah analis teknikal emas ({SYMBOL}) yang disiplin dan konservatif. Gunakan HANYA data di bawah (waktu = waktu server broker).
-Semua candle sudah CLOSE (valid). Swing high/low sudah dihitung dan terkonfirmasi, gunakan itu sebagai dasar zona.
+Kamu adalah analis teknikal emas ({SYMBOL}) institusional yang SANGAT TELITI, DISIPLIN, dan ANTI-HALUSINASI.
+Gunakan 100% HANYA fakta angka dari data MT5 di bawah ini (waktu = waktu server broker).
+Semua candle di tabel sudah CLOSE (valid). Swing high/low, Order Block, FVG, dan Golden Confluence sudah dihitung secara matematis oleh Python dari data real-time MT5 — GUNAKAN ANGKA TERSEBUT, DILARANG KERAS MENGARANG ANGKA SENDIRI!
 Harga saat ini: {harga_sekarang}
+
+🛡️ [ATURAN KERAS ANTI-HALUSINASI & AUDIT AKUN REAL MT5 (WAJIB DITAATI MUTLAK)]:
+1. DILARANG MENGARANG LEVEL HARGA / INDIKATOR: Setiap angka Support/Resistance, Order Block, FVG, High/Low candle, EMA, RSI, ATR, maupun Balance/Equity/Lot yang kamu sebutkan WAJIB ada secara eksplisit di dalam data di bawah. Jangan pernah menebak atau mengira-ngira angka di luar data!
+2. BACA MATA UANG & POSISI AKUN REAL DENGAN TELITI:
+   - Cek bagian "FAKTA AKUN REAL MT5, POSISI RUNNING & PENDING ORDER". Jika mata uang akun tertulis `IDC` (atau selain USD), WAJIB tulis `IDC` (JANGAN PERNAH menulis simbol `$` atau `USD` untuk nilai saldo/profit `IDC`!).
+   - Jika ada POSISI RUNNING (misal SELL atau BUY yang sedang terbuka), sebutkan nomor Ticket, lot, harga open, SL, dan profit poinnya secara presisi!
+   - TELITI MEMBACA STATUS SL BEP+: Pada posisi SELL, jika angka SL < Harga Open (misal Open 4130.88, SL 4130.55), itu berarti SL SUDAH DIKUNCI DI AREA PROFIT (BEP+)! Pada posisi BUY, jika angka SL > Harga Open, itu juga berarti SL SUDAH DIKUNCI DI BEP+! Jangan menyuruh trader "segera geser SL ke BEP" jika di data sudah tertulis `[✅ SUDAH DIKUNCI BEP+]`, melainkan apresiasi dan berikan panduan target TP / trailing SL selanjutnya!
+3. LOGIKA TP1 PADA ORDER LIMIT:
+   - Jika memberikan sinyal BUY LIMIT di bawah harga sekarang, pastikan TP1 berada di atas area entry dengan R:R >= 1:1.5.
+   - Jika memberikan sinyal SELL LIMIT di atas harga sekarang, pastikan TP1 berada di bawah area entry dengan R:R >= 1:1.5.
+4. KONSISTENSI 100% ANTARA TEKS DAN [RADAR_TARGET]: Angka Area Entry, SL, TP1, dan TP2 yang kamu tulis di bagian penjelasan sinyal WAJIB SAMA PERSIS 100% sampai ke desimalnya dengan yang kamu tulis di blok `[RADAR_TARGET]` paling bawah!
 
 {zona_text}
 
@@ -1849,7 +1953,7 @@ PILAR 4: KONTEKS LINGKUNGAN PASAR & MANAJEMEN RISIKO
 - Rasio Risk-to-Reward: R:R terukur minimal 1:1.5 hingga 1:2+ dengan jarak SL logis di balik batas struktur/wick.
 
 OUTPUT:
-A. Status Order Flow Institusi, ADR Harian, Radar Berita USD, Evaluasi Posisi Terbuka & Pending Order (jika user punya posisi floating di MT5, beri saran tegas: HOLD / GESER SL KE BEP / CUT LOSS; jika user sedang memasang Pending Order seperti BUY LIMIT / SELL LIMIT di MT5, WAJIB evaluasi apakah zona limit tersebut MASIH VALID [PERTAHANKAN], PERLU DIGESER [ADJUST LEVEL], atau SUDAH TIDAK VALID / RAWAN JEBOL [SEGERA CANCEL/HAPUS] beserta alasan struktur/likuiditasnya), serta Tabel Ringkasan Zona Utama & Golden Confluence.
+A. Status Order Flow Institusi, ADR Harian, Radar Berita USD, Evaluasi Posisi Terbuka & Pending Order (jika user punya posisi floating di MT5, beri saran tegas berdasarkan status SL sebenarnya: apakah SL sudah BEP+ [PERTAHANKAN / TRAILING PROFIT], belum BEP [GESER SL KE BEP], atau melanggar struktur [CUT LOSS]; jika user sedang memasang Pending Order seperti BUY LIMIT / SELL LIMIT di MT5, WAJIB evaluasi satu per satu nomor tiketnya apakah zona limit tersebut MASIH VALID [PERTAHANKAN], PERLU DIGESER [ADJUST LEVEL], atau SUDAH TIDAK VALID / TERLALU JAUH / TANPA SL [SEGERA PASANG SL / CANCEL] beserta alasan struktur/likuiditasnya), serta Tabel Ringkasan Zona Utama & Golden Confluence.
 B. Daftar sinyal. HANYA tampilkan sinyal berlabel LOW RISK atau MEDIUM RISK. DILARANG menampilkan sinyal HIGH RISK atau sinyal yang melawan Institutional Impulse aktif!
 
    ══════════════════════════════════════════════════════════════════════
@@ -1873,7 +1977,7 @@ B. Daftar sinyal. HANYA tampilkan sinyal berlabel LOW RISK atau MEDIUM RISK. DIL
    4. KONDISI INVALIDASI EKSPLISIT (GARIS PEMBATALAN SETUP):
       - Wajib sebutkan level pasti pembatalan: "Setup ini BATAL / GUGUR jika candle M5 close menembus [Level X] SEBELUM menjemput area entry."
    5. UKURAN LOT & MANAJEMEN RISIKO MT5 REALISTIS:
-      - Ambil langsung rekomendasi ukuran lot dari tabel "MANAJEMEN RISIKO & KALKULATOR LOT OTOMATIS" sesuai jarak SL dan equity akun MT5 (1% untuk Low Risk, 0.5% untuk Medium Risk).
+      - Ambil langsung rekomendasi ukuran lot dan mata uang akun (`IDC` / `USD`) dari bagian "MANAJEMEN RISIKO & KALKULATOR LOT OTOMATIS" sesuai jarak SL dan equity akun MT5 (1% untuk Low Risk, 0.5% untuk Medium Risk).
 
    FORMAT SETIAP SINYAL WAJIB DITULIS RAPI SEPERTI INI:
    ----------------------------------------------------------------------
@@ -1883,7 +1987,7 @@ B. Daftar sinyal. HANYA tampilkan sinyal berlabel LOW RISK atau MEDIUM RISK. DIL
    • Target TP    :
      - TP1        : <angka> (R:R 1:X | Amankan 50% lot & Geser SL ke BEP+)
      - TP2        : <angka> (R:R 1:X | Runner ke likuiditas eksternal)
-   • Manajemen Lot: <X.XX> lot (Maksimum risiko: $XX.XX / X% modal)
+   • Manajemen Lot: <X.XX> lot (Maksimum risiko sesuai mata uang akun / X% modal)
    • Pemicu (Trigger) : Syarat candle M5 (level CISD / Sweep / CHoCH spesifik)
    • Invalidasi   : Setup BATAL jika candle M5 close melewati <angka level> sebelum terjemput
    • TABEL 4 PILAR KONFLUENSI:
@@ -1945,6 +2049,46 @@ def _normalisasi_radar(teks):
     return re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", teks)
 
 
+def _ekstrak_sinyal_dari_narasi(teks_penuh):
+    """Fallback parser: jika AI menuliskan sinyal di badan narasi (misal saat Q&A) tetapi lupa menyertakan atau
+    tidak sinkron dengan [RADAR_TARGET], ekstrak angka BUY/SELL, Area Entry, SL, TP1, TP2 dari narasi."""
+    if not teks_penuh:
+        return None
+    bersih = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", teks_penuh.replace("*", "").replace("`", ""))
+    # Cari header [SINYAL ...] BUY/SELL atau rekomendasi eksplisit
+    m_hdr = list(re.finditer(r"\[SINYAL[^\]]*\]\s*(BUY|SELL)\b", bersih, re.I))
+    segmen = bersih[m_hdr[-1].start():] if m_hdr else bersih
+    arah = m_hdr[-1].group(1).upper() if m_hdr else None
+    if not arah:
+        m_arah = re.search(r"(?:Setup|Sinyal|Rekomendasi|Order)\s*(?:Utama|Aktif|Baru)?\s*[:\-]?\s*(BUY|SELL)\s*(?:LIMIT|STOP|XAUUSD)?", segmen, re.I)
+        if m_arah:
+            arah = m_arah.group(1).upper()
+    if not arah:
+        return None
+    m_entry = re.search(r"(?:Area\s*Entry|Entry\s*Zone|Entry)\s*[:\-]\s*(\d{4}(?:\.\d+)?)\s*(?:-\s*|\s+s/d\s+|\s+sampai\s+)(\d{4}(?:\.\d+)?)", segmen, re.I)
+    if not m_entry:
+        return None
+    m_sl = re.search(r"(?:Stop\s*Loss|SL)\s*[:\-]\s*(\d{4}(?:\.\d+)?)", segmen, re.I)
+    m_tp1 = re.search(r"TP\s*1\s*[:\-]\s*(\d{4}(?:\.\d+)?)", segmen, re.I)
+    m_tp2 = re.search(r"TP\s*2\s*[:\-]\s*(\d{4}(?:\.\d+)?)", segmen, re.I)
+    if not (m_sl and m_tp1):
+        return None
+    e1, e2 = float(m_entry.group(1)), float(m_entry.group(2))
+    sl = float(m_sl.group(1))
+    tp1 = float(m_tp1.group(1))
+    tp2 = float(m_tp2.group(1)) if m_tp2 else tp1
+    return dict(
+        arah=arah,
+        lo=round(min(e1, e2), 2),
+        hi=round(max(e1, e2), 2),
+        sl=sl,
+        tp1=tp1,
+        tp2=tp2,
+        lo_asli=round(min(e1, e2), 2),
+        hi_asli=round(max(e1, e2), 2),
+    )
+
+
 def validasi_sinyal_struktur(sig):
     """Aturan intrinsik sinyal (tidak bergantung kondisi pasar saat ini): sisi SL/TP, lebar entry, jarak SL, R:R."""
     alasan = []
@@ -1993,6 +2137,7 @@ def ekstrak_target_ai(teks_ai):
     _STATE_PARSER["ditolak"] = []
     if not teks_ai:
         return target
+    teks_penuh_asli = teks_ai
     teks_ai = _normalisasi_radar(teks_ai)
 
     m_atas = re.search(r"ZONA_ATAS:\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)(?:.*?batas_jebol:\s*(\d+(?:\.\d+)?))?", teks_ai, re.I)
@@ -2028,6 +2173,17 @@ def ekstrak_target_ai(teks_ai):
                 target["sinyal"] = sig
             else:
                 _STATE_PARSER["ditolak"] = alasan
+
+    # Fallback: jika AI menulis setup lengkap di narasi (misal saat Q&A) namun lupa menulis [RADAR_TARGET]
+    if target["sinyal"] is None and not re.search(r"SINYAL_AKTIF:\s*WAIT", teks_ai, re.I):
+        sig_narasi = _ekstrak_sinyal_dari_narasi(teks_penuh_asli)
+        if sig_narasi:
+            ok_n, alasan_n = validasi_sinyal_struktur(sig_narasi)
+            if ok_n:
+                target["sinyal"] = sig_narasi
+                _STATE_PARSER["ditolak"] = []
+            elif not _STATE_PARSER["ditolak"]:
+                _STATE_PARSER["ditolak"] = alasan_n
 
     # 🛡️ FILTER ANTI-HALUSINASI ZONA JAUH:
     # Jika AI memberikan zona yang terlalu jauh (> 35 poin dari harga real-time MT5),
@@ -2164,7 +2320,10 @@ def _ambil_m1_sejak(ts_server):
 def _simulasi_jalur(sig, rates, spread=0.0):
     """Menelusuri candle M1 sejak sinyal terbit: apakah entry terjemput, SL/TP tersentuh, atau TERLEWAT.
     Konservatif: bila SL dan TP tersentuh pada candle yang sama, SL dianggap lebih dulu.
-    Gaya entry diturunkan dari harga saat terbit: limit (menunggu pullback), break (menunggu tembus), atau langsung (di dalam zona)."""
+    Gaya entry diturunkan dari harga saat terbit: limit (menunggu pullback), break (menunggu tembus), atau langsung (di dalam zona).
+    PERBAIKAN ANTI-PHANTOM TP1: Untuk order 'limit' (mis. BUY Limit di bawah harga sekarang), jika saat sinyal dibuat
+    harga memang masih di sekitar/di atas TP1, jangan langsung dianggap 'terlewat' kecuali harga sudah sempat
+    mendekati area entry (atau melewati titik tengah menuju entry) lalu memantul menyentuh TP1, atau jika SL ditembus."""
     buy = str(sig.get("arah", "BUY")).upper() == "BUY"
     lo, hi = float(sig["lo"]), float(sig["hi"])
     sl, tp1 = float(sig["sl"]), float(sig["tp1"])
@@ -2182,18 +2341,33 @@ def _simulasi_jalur(sig, rates, spread=0.0):
 
     h = dict(terisi=False, tp1=False, tp2=False, sl=False, terlewat=False, t_isi=None, t_akhir=None, mfe=0.0, mae=0.0)
     terisi = (gaya == "langsung")
+    # Untuk limit order: catat apakah harga pernah turun/naik mendekati separuh jalan ke zona entry
+    sudah_mendekat = (gaya != "limit")
+    batas_dekat_buy = hi + min(2.5, 0.45 * max(0.0, tp1 - hi))
+    batas_dekat_sell = lo - min(2.5, 0.45 * max(0.0, lo - tp1))
+
     for r in rates:
         hb, lb = float(r["high"]), float(r["low"])      # harga bid
         ha, la = hb + spread, lb + spread               # harga ask
         t = int(r["time"])
         baru_isi = False
         if not terisi:
+            # Cek juga jika harga langsung menjebol SL sebelum/saat di area limit
+            if (buy and lb <= sl) or (not buy and ha >= sl):
+                h["sl"], h["t_akhir"] = True, t
+                break
             if buy:                                       # BUY terisi di ask
+                if lb <= batas_dekat_buy:
+                    sudah_mendekat = True
                 kena = (la <= hi) if gaya == "limit" else (ha >= lo)
-                tembus_tp = hb >= tp1
+                # Hanya dianggap terlewat (missed entry) jika sudah sempat mendekati entry lalu terbang ke TP1,
+                # ATAU jika harga saat buat < TP1 lalu langsung terbang ke TP1 + 1.5 pt tanpa retrace
+                tembus_tp = (hb >= tp1) and (sudah_mendekat or (hb0 is not None and hb0 < tp1 - 1.0 and hb >= tp1 + 0.5))
             else:                                         # SELL terisi di bid
+                if hb >= batas_dekat_sell:
+                    sudah_mendekat = True
                 kena = (hb >= lo) if gaya == "limit" else (lb <= hi)
-                tembus_tp = lb <= tp1
+                tembus_tp = (lb <= tp1) and (sudah_mendekat or (hb0 is not None and hb0 > tp1 + 1.0 and lb <= tp1 - 0.5))
             if not kena:
                 if tembus_tp:
                     h["terlewat"], h["t_akhir"] = True, t
@@ -2265,11 +2439,11 @@ def _status_dari_hasil(sig, h, bid, umur_jam):
     sl, tp1 = float(sig["sl"]), float(sig["tp1"])
     tp2 = float(sig.get("tp2", tp1))
     if h["terlewat"]:
-        return ST_BATAL_TERLEWAT, f"Harga sudah mencapai TP1 ({tp1:.2f}) tanpa pernah menjemput area entry ({lo:.2f} - {hi:.2f}). Jangan dikejar."
+        return ST_BATAL_TERLEWAT, f"Harga sudah memantul mencapai TP1 ({tp1:.2f}) tanpa menjemput area entry ({lo:.2f} - {hi:.2f}). Jangan dikejar."
     if h["sl"]:
         return ST_BATAL_SL, f"Sejak sinyal terbit harga pernah menyentuh SL ({sl:.2f}) (riwayat M1), walau harga sekarang {bid:.2f}. Setup tidak lagi valid."
     if h["tp2"]:
-        return ST_SELESAI_TP2, f"Harga telah menyapu target penuh TP2 ({tp2:.2f}) sejak sinyal terbit. Siklus setup selesai."
+        return ST_SELESAI_TP2, f"Harga telah menyapu target penuh TP2 ({tp2:.2f}) setelah entry terjemput. Siklus setup selesai."
     if h["tp1"]:
         return ST_TP1_TERCAPAI, f"Harga telah mencapai TP1 ({tp1:.2f}) setelah entry terjemput. SL seharusnya sudah dikunci ke BEP+."
     if h["terisi"]:
@@ -2280,7 +2454,7 @@ def _status_dari_hasil(sig, h, bid, umur_jam):
         return ST_BATAL_KEDALUWARSA, f"Belum terjemput setelah {umur_jam:.1f} jam (batas {SINYAL_TTL_BELUM_TERISI_JAM} jam). Kondisi pasar sudah berubah."
     if lo <= bid <= hi:
         return ST_AKTIF_ENTRY, f"Harga ({bid:.2f}) sedang berada di area entry ({lo:.2f} - {hi:.2f}). Siap eksekusi."
-    return ST_VALID_PULLBACK, f"Harga ({bid:.2f}) belum menjemput area entry ({lo:.2f} - {hi:.2f}); SL ({sl:.2f}) belum tersentuh sejak sinyal terbit."
+    return ST_VALID_PULLBACK, f"Harga ({bid:.2f}) belum menjemput area entry ({lo:.2f} - {hi:.2f}); menunggu pullback ke zona (SL {sl:.2f} belum tersentuh)."
 
 
 def evaluasi_validitas_sinyal(sig, harga_bid):
@@ -2303,7 +2477,7 @@ def evaluasi_validitas_sinyal(sig, harga_bid):
 
 
 def _evaluasi_validitas_titik(sig, harga_bid):
-    """(Penilaian titik harga lama) Mengevaluasi apakah sinyal masih valid, kena SL, atau kena TP berdasarkan harga SAAT INI saja."""
+    """(Penilaian titik harga tanpa data M1) Mengevaluasi apakah sinyal masih valid, kena SL, atau menunggu pullback."""
     if not sig or not isinstance(sig, dict) or harga_bid <= 0:
         return "UNKNOWN", "Data sinyal atau harga tidak tersedia"
 
@@ -2313,37 +2487,140 @@ def _evaluasi_validitas_titik(sig, harga_bid):
     tp2 = float(sig.get("tp2", tp1))
     lo = float(sig.get("lo", 0.0))
     hi = float(sig.get("hi", 0.0))
+    hb0 = sig.get("harga_buat")
 
     if arah == "BUY":
         if harga_bid <= sl:
             return ST_BATAL_SL, f"Harga ({harga_bid:.2f}) telah menembus batas Stop Loss ({sl:.2f}). Setup tidak lagi valid."
-        elif harga_bid >= tp2:
-            return ST_SELESAI_TP2, f"Harga ({harga_bid:.2f}) telah menyapu target penuh TP2 ({tp2:.2f}). Siklus setup selesai."
-        elif harga_bid >= tp1:
-            return ST_TP1_TERCAPAI, f"Harga ({harga_bid:.2f}) telah mencapai target TP1 ({tp1:.2f}). SL seharusnya sudah dikunci ke BEP+."
         elif lo <= harga_bid <= hi:
             return ST_AKTIF_ENTRY, f"Harga ({harga_bid:.2f}) sedang berada tepat di area entry ({lo:.2f} - {hi:.2f}). Siap eksekusi."
         elif harga_bid > hi:
+            # Jika ini sinyal BUY Limit (harga_buat > hi) dan belum ada bukti terisi, maka harga > hi adalah MENUNGGU PULLBACK
+            if hb0 is not None and float(hb0) > hi and "TP1 Tercapai" not in str(sig.get("ket", "")):
+                return ST_VALID_PULLBACK, f"Harga ({harga_bid:.2f}) masih berada di atas area entry ({lo:.2f} - {hi:.2f}). Menunggu pullback menjemput zona."
+            if harga_bid >= tp2:
+                return ST_SELESAI_TP2, f"Harga ({harga_bid:.2f}) telah menyapu target penuh TP2 ({tp2:.2f}). Siklus setup selesai."
+            if harga_bid >= tp1:
+                return ST_TP1_TERCAPAI, f"Harga ({harga_bid:.2f}) telah mencapai target TP1 ({tp1:.2f}). SL seharusnya sudah dikunci ke BEP+."
             return ST_VALID_PULLBACK, f"Harga ({harga_bid:.2f}) berada di atas entry ({lo:.2f} - {hi:.2f}). Menunggu harga pullback menjemput zona."
         else:
             return ST_VALID_DEKAT_SL, f"Harga ({harga_bid:.2f}) berada di bawah entry namun masih bertahan di atas batas SL ({sl:.2f})."
     else:
         if harga_bid >= sl:
             return ST_BATAL_SL, f"Harga ({harga_bid:.2f}) telah menembus batas Stop Loss ({sl:.2f}). Setup tidak lagi valid."
-        elif harga_bid <= tp2:
-            return ST_SELESAI_TP2, f"Harga ({harga_bid:.2f}) telah menyapu target penuh TP2 ({tp2:.2f}). Siklus setup selesai."
-        elif harga_bid <= tp1:
-            return ST_TP1_TERCAPAI, f"Harga ({harga_bid:.2f}) telah mencapai target TP1 ({tp1:.2f}). SL seharusnya sudah dikunci ke BEP+."
         elif lo <= harga_bid <= hi:
             return ST_AKTIF_ENTRY, f"Harga ({harga_bid:.2f}) sedang berada tepat di area entry ({lo:.2f} - {hi:.2f}). Siap eksekusi."
         elif harga_bid < lo:
+            if hb0 is not None and float(hb0) < lo and "TP1 Tercapai" not in str(sig.get("ket", "")):
+                return ST_VALID_PULLBACK, f"Harga ({harga_bid:.2f}) masih berada di bawah area entry ({lo:.2f} - {hi:.2f}). Menunggu pullback menjemput zona."
+            if harga_bid <= tp2:
+                return ST_SELESAI_TP2, f"Harga ({harga_bid:.2f}) telah menyapu target penuh TP2 ({tp2:.2f}). Siklus setup selesai."
+            if harga_bid <= tp1:
+                return ST_TP1_TERCAPAI, f"Harga ({harga_bid:.2f}) telah mencapai target TP1 ({tp1:.2f}). SL seharusnya sudah dikunci ke BEP+."
             return ST_VALID_PULLBACK, f"Harga ({harga_bid:.2f}) berada di bawah entry ({lo:.2f} - {hi:.2f}). Menunggu harga pullback menjemput zona."
         else:
             return ST_VALID_DEKAT_SL, f"Harga ({harga_bid:.2f}) berada di atas entry namun masih bertahan di bawah batas SL ({sl:.2f})."
 
 
+def putuskan_sinyal_terkunci(
+    sinyal_kandidat,
+    sinyal_aktif,
+    status_aktif=None,
+    paksa_ganti=False,
+    izinkan_balik_arah=False,
+    konteks="QA"
+):
+    """
+    Evaluasi terpusat untuk SIGNAL LOCK & DIRECTIONAL LOCK (Jalur STARTUP, REFRESH, QA).
+
+    Menentukan apakah sinyal_kandidat baru boleh menggantikan sinyal_aktif yang sedang berjalan.
+
+    Parameter:
+    - sinyal_kandidat: dict sinyal baru dari AI (atau None)
+    - sinyal_aktif: dict sinyal aktif yang sedang dipegang sistem (atau None)
+    - status_aktif: string status validitas sinyal_aktif (hasil evaluasi_validitas_sinyal)
+    - paksa_ganti: bool, True jika trader secara eksplisit meminta 'sinyal baru'/'reset sinyal' (hanya di QA)
+    - izinkan_balik_arah: bool, True jika trader eksplisit menyertakan kata kunci 'balik arah'/'reversal' (hanya di QA)
+    - konteks: str, nama jalur pemanggil ('STARTUP', 'REFRESH', 'QA', atau 'PANTAU' di masa depan)
+
+    Mengembalikan tuple:
+      (sinyal_terpilih, sinyal_riwayat_baru, pesan_log, disetujui_ubah)
+      - sinyal_terpilih: sinyal yang harus dipakai (kandidat baru atau sinyal_aktif yang dipertahankan).
+      - sinyal_riwayat_baru: sinyal lama yang diarsipkan ke SINYAL_SEBELUMNYA_DINAMIS jika terjadi penggantian nyata,
+                            atau None jika tidak ada pengarsipan.
+      - pesan_log: list teks string untuk dicetak ke terminal (bila ada lock/update).
+      - disetujui_ubah: boolean True bila sinyal_kandidat diterima menggantikan sinyal_aktif.
+    """
+    pesan_log = []
+
+    if not sinyal_kandidat or not isinstance(sinyal_kandidat, dict) or not sinyal_kandidat.get("lo"):
+        return sinyal_aktif, None, pesan_log, False
+
+    if not sinyal_aktif or not isinstance(sinyal_aktif, dict) or not sinyal_aktif.get("lo"):
+        # Belum ada sinyal aktif (status WAIT) -> sinyal baru diterima
+        return sinyal_kandidat, None, pesan_log, True
+
+    masih_aktif = sinyal_masih_aktif(status_aktif) if status_aktif else True
+
+    beda_arah = (sinyal_kandidat["arah"] != sinyal_aktif["arah"])
+    beda_angka = (
+        beda_arah
+        or abs(float(sinyal_kandidat["lo"]) - float(sinyal_aktif["lo"])) > 0.05
+        or abs(float(sinyal_kandidat["hi"]) - float(sinyal_aktif["hi"])) > 0.05
+        or abs(float(sinyal_kandidat["sl"]) - float(sinyal_aktif["sl"])) > 0.05
+    )
+    # Syarat pengarsipan ke SINYAL_SEBELUMNYA_DINAMIS: arah atau lo berbeda (toleransi 0.05)
+    beda_arsip = (
+        beda_arah
+        or abs(float(sinyal_kandidat["lo"]) - float(sinyal_aktif["lo"])) > 0.05
+    )
+
+    # 1. KASUS SINYAL LAMA SUDAH SELESAI / BATAL / EXPIRED
+    if not masih_aktif:
+        sinyal_riwayat = sinyal_aktif if beda_arsip else None
+        st_lbl = status_aktif or "NON-AKTIF"
+        pesan_log.append(
+            f"\n   [ℹ️ UPDATE SINYAL/{konteks}: Sinyal sebelumnya sudah selesai/batal ({st_lbl}). "
+            f"AI menerbitkan Sinyal Baru ({sinyal_kandidat['arah']} @ {sinyal_kandidat['lo']:.2f}-{sinyal_kandidat['hi']:.2f}).]"
+        )
+        return sinyal_kandidat, sinyal_riwayat, pesan_log, True
+
+    # 2. KASUS SINYAL LAMA MASIH AKTIF
+    # 2A. Trader secara eksplisit meminta ganti sinyal (paksa_ganti=True, hanya di QA)
+    if paksa_ganti:
+        if beda_arah and not izinkan_balik_arah:
+            # 🔒 DIRECTIONAL LOCK: Tahan pembalikan arah tanpa konfirmasi kata kunci balik arah
+            pesan_log.append(
+                f"\n   [🔒 DIRECTIONAL LOCK/{konteks}: Sinyal aktif tetap {sinyal_aktif['arah']} @ "
+                f"{sinyal_aktif['lo']:.2f}-{sinyal_aktif['hi']:.2f}. Sinyal lawan ({sinyal_kandidat['arah']}) tidak diaktifkan "
+                f"karena setup sebelumnya belum selesai ({status_aktif or 'AKTIF'}). Gunakan kata kunci 'balik arah' jika sengaja switch.]"
+            )
+            return sinyal_aktif, None, pesan_log, False
+        else:
+            sinyal_riwayat = sinyal_aktif if beda_arsip else None
+            pesan_log.append(
+                f"\n   [ℹ️ GANTI SINYAL/{konteks}: Sinyal aktif digantikan oleh setup baru "
+                f"({sinyal_kandidat['arah']} @ {sinyal_kandidat['lo']:.2f}-{sinyal_kandidat['hi']:.2f}) atas permintaan trader.]"
+            )
+            return sinyal_kandidat, sinyal_riwayat, pesan_log, True
+
+    # 2B. Normal (Startup, Refresh, atau QA pertanyaan biasa tanpa paksa ganti)
+    if beda_angka:
+        st_lbl = status_aktif or "MASIH VALID"
+        pesan_log.append(
+            f"\n   [🔒 SIGNAL LOCK/{konteks}: Sinyal baru AI ({sinyal_kandidat['arah']} @ {sinyal_kandidat['lo']:.2f}-{sinyal_kandidat['hi']:.2f}) "
+            f"DITAHAN karena sinyal aktif ({sinyal_aktif['arah']} @ {sinyal_aktif['lo']:.2f}-{sinyal_aktif['hi']:.2f}, SL {sinyal_aktif['sl']:.2f}) "
+            f"masih valid ({st_lbl})! Angka asli tetap dipertahankan.]"
+        )
+        return sinyal_aktif, None, pesan_log, False
+
+    # Sinyal kandidat identik dengan sinyal aktif
+    return sinyal_aktif, None, pesan_log, False
+
+
 def cek_status_eksekusi_sinyal(sig, pos_list=None, order_list=None):
-    """Mengecek apakah suatu sinyal AI diambil (open posisi), dipasang pending order, atau TIDAK DIAMBIL oleh trader di MT5."""
+    """Mengecek apakah suatu sinyal AI diambil (open posisi), dipasang pending order, atau TIDAK DIAMBIL oleh trader di MT5.
+    PENTING: Jangan menulis 'Tidak ada posisi terbuka di MT5' jika trader sebenarnya sedang memegang posisi arah berlawanan!"""
     if not sig or not isinstance(sig, dict) or not sig.get("lo"):
         return "TIDAK ADA SINYAL", "TIDAK ADA", None
 
@@ -2356,49 +2633,102 @@ def cek_status_eksekusi_sinyal(sig, pos_list=None, order_list=None):
     pos_list = pos_list or ()
     order_list = order_list or ()
 
+    lo_s, hi_s = float(sig["lo"]), float(sig["hi"])
+    mid_s = (lo_s + hi_s) / 2.0
+
     pos_searah = [
         p for p in pos_list
         if (arah_s == "BUY" and p.type == mt5.ORDER_TYPE_BUY)
         or (arah_s == "SELL" and p.type == mt5.ORDER_TYPE_SELL)
     ]
-    ord_searah = [
+    pos_lawan = [
+        p for p in pos_list
+        if (arah_s == "BUY" and p.type == mt5.ORDER_TYPE_SELL)
+        or (arah_s == "SELL" and p.type == mt5.ORDER_TYPE_BUY)
+    ]
+    ord_searah_dekat = [
         o for o in order_list
-        if (arah_s == "BUY" and "BUY" in _info_tipe_pending(o.type)[1])
-        or (arah_s == "SELL" and "SELL" in _info_tipe_pending(o.type)[1])
+        if ((arah_s == "BUY" and "BUY" in _info_tipe_pending(o.type)[1])
+            or (arah_s == "SELL" and "SELL" in _info_tipe_pending(o.type)[1]))
+        and (lo_s - 5.0 <= o.price_open <= hi_s + 5.0)
     ]
 
     if pos_searah:
-        p0 = pos_searah[0]
+        p0 = min(pos_searah, key=lambda x: abs(x.price_open - mid_s))
         ringkasan = f"Ticket #{p0.ticket} ({p0.volume} lot @ {p0.price_open:.2f})"
         return f"SINYAL {arah_s} SEDANG DIAMBIL", "DIAMBIL", ringkasan
-    elif ord_searah:
-        o0 = ord_searah[0]
+    elif ord_searah_dekat:
+        o0 = min(ord_searah_dekat, key=lambda x: abs(x.price_open - mid_s))
         nm0 = _info_tipe_pending(o0.type)[0]
         ringkasan = f"{nm0} #{o0.ticket} @ {o0.price_open:.2f}"
         return f"SINYAL {arah_s} DIPASANG PENDING", "LIMIT", ringkasan
     else:
-        return f"SINYAL {arah_s} YANG TIDAK DIAMBIL", "TIDAK DIAMBIL", "Tidak ada posisi terbuka di MT5"
+        if pos_lawan:
+            arah_l = "BUY" if pos_lawan[0].type == mt5.ORDER_TYPE_BUY else "SELL"
+            daftar_l = ", ".join(f"#{p.ticket} ({p.volume} lot @ {p.price_open:.2f})" for p in pos_lawan[:3])
+            info_l = f"Sinyal {arah_s} ({lo_s:.2f}-{hi_s:.2f}) ini tidak diambil; Trader SEDANG MEMEGANG {len(pos_lawan)} POSISI {arah_l}: {daftar_l}"
+            return f"SINYAL {arah_s} TIDAK DIAMBIL (TRADER PEGANG {len(pos_lawan)} POSISI {arah_l})", "TIDAK DIAMBIL", info_l
+        if order_list:
+            return f"SINYAL {arah_s} BELUM DIAMBIL", "TIDAK DIAMBIL", f"Tidak ada posisi/pending di {lo_s:.2f}-{hi_s:.2f} (ada {len(order_list)} pending order di level lain)"
+        return f"SINYAL {arah_s} YANG TIDAK DIAMBIL", "TIDAK DIAMBIL", "Tidak ada posisi running untuk sinyal ini di MT5"
+
+
+KOLOM_JURNAL_SINYAL = [
+    "id", "waktu_lokal", "arah", "lo", "hi", "lo_asli", "hi_asli", "sl", "tp1", "tp2",
+    "harga_buat", "risiko", "ket", "catatan", "model", "spread_buat"
+]
+
+
+def _migrasi_header_jurnal():
+    """Memeriksa dan memigrasikan header jurnal CSV lama jika kolom 'model' atau 'spread_buat' belum ada (dengan backup .bak)."""
+    if not os.path.exists(FILE_JURNAL_SINYAL):
+        return
+    try:
+        with open(FILE_JURNAL_SINYAL, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header or all(k in header for k in ("model", "spread_buat")):
+                return  # Sudah termigrasi lengkap atau file kosong
+        # Buat backup file lama sebelum ditimpa
+        shutil.copy2(FILE_JURNAL_SINYAL, FILE_JURNAL_SINYAL + ".bak")
+        with open(FILE_JURNAL_SINYAL, "r", encoding="utf-8") as f:
+            baris_lama = list(csv.DictReader(f))
+        with open(FILE_JURNAL_SINYAL, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=KOLOM_JURNAL_SINYAL, extrasaction="ignore")
+            writer.writeheader()
+            for row in baris_lama:
+                if not row.get("model"):
+                    row["model"] = ""
+                if not row.get("spread_buat"):
+                    row["spread_buat"] = ""
+                writer.writerow(row)
+    except Exception as e:
+        _catat_error("migrasi_header_jurnal", e)
 
 
 def _catat_sinyal_csv(sig, catatan=""):
     """Tambahkan sinyal baru ke jurnal CSV (dasar evaluasi/backtest: perintah 'rekap')."""
     try:
+        _migrasi_header_jurnal()
         baru = not os.path.exists(FILE_JURNAL_SINYAL)
         with open(FILE_JURNAL_SINYAL, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if baru:
-                w.writerow(["id", "waktu_lokal", "arah", "lo", "hi", "lo_asli", "hi_asli", "sl", "tp1", "tp2",
-                            "harga_buat", "risiko", "ket", "catatan"])
-            w.writerow([sig["t_buat"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sig["arah"],
-                        sig["lo"], sig["hi"], sig.get("lo_asli", sig["lo"]), sig.get("hi_asli", sig["hi"]),
-                        sig["sl"], sig["tp1"], sig.get("tp2", sig["tp1"]), sig.get("harga_buat", ""),
-                        tentukan_klasifikasi_risiko_sinyal(sig)[0], str(sig.get("ket", ""))[:100], str(catatan)[:60]])
+                w.writerow(KOLOM_JURNAL_SINYAL)
+            w.writerow([
+                sig["t_buat"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sig["arah"],
+                sig["lo"], sig["hi"], sig.get("lo_asli", sig["lo"]), sig.get("hi_asli", sig["hi"]),
+                sig["sl"], sig["tp1"], sig.get("tp2", sig["tp1"]), sig.get("harga_buat", ""),
+                tentukan_klasifikasi_risiko_sinyal(sig)[0], str(sig.get("ket", ""))[:100], str(catatan)[:60],
+                str(sig.get("model", ""))[:50],
+                f"{float(sig['spread_buat']):.3f}" if sig.get("spread_buat") is not None else ""
+            ])
     except Exception as e:
         _catat_error("catat_sinyal_csv", e)
 
 
 def _stempel_sinyal(sig, data_lama, catatan=""):
-    """Beri cap waktu server ('t_buat') & harga saat terbit ('harga_buat') pada sinyal baru. Sinyal identik dengan yang
+    """Beri cap waktu server ('t_buat'), harga saat terbit ('harga_buat'), & spread ('spread_buat') pada sinyal baru. Sinyal identik dengan yang
     sudah tersimpan mewarisi cap lamanya (supaya riwayat & kedaluwarsa tidak ter-reset oleh penerbitan ulang)."""
     lama = (data_lama or {}).get("sinyal")
     if (isinstance(lama, dict) and lama.get("t_buat") and lama.get("arah") == sig.get("arah")
@@ -2406,11 +2736,16 @@ def _stempel_sinyal(sig, data_lama, catatan=""):
         sig["t_buat"] = lama["t_buat"]
         if lama.get("harga_buat") is not None:
             sig["harga_buat"] = lama["harga_buat"]
+        if lama.get("spread_buat") is not None:
+            sig["spread_buat"] = lama["spread_buat"]
+        if lama.get("model") and not sig.get("model"):
+            sig["model"] = lama["model"]
         return
     tick = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
     if tick:
         sig["t_buat"] = int(tick.time)
         sig["harga_buat"] = float(tick.bid)
+        sig["spread_buat"] = round(float(tick.ask - tick.bid), 3)
         _catat_sinyal_csv(sig, catatan)
 
 
@@ -2459,6 +2794,18 @@ def gerbang_sinyal_baru(sig):
                     alasan.append(f"melawan trend HTF ({arah} vs bias HTF {bias['bias']}, skor {bias['skor']:+d}) — ubah FILTER_TREND_AKTIF=False untuk menonaktifkan")
         except Exception as e:
             _catat_error("gerbang_trend", e)
+    # --- Filter Sesi: sinyal baru hanya diizinkan di sesi London & New York ---
+    if FILTER_SESI_AKTIF and tick and getattr(tick, "time", 0) > 0:
+        offset = SERVER_UTC_OFFSET_JAM
+        if offset is None:
+            offset = deteksi_offset(tick, df if "df" in locals() else None)
+        if offset is not None:
+            ts_utc = int(tick.time) - int(offset * 3600)
+            dt_utc = datetime.fromtimestamp(ts_utc, tz=timezone.utc)
+            jam_utc = dt_utc.hour + dt_utc.minute / 60.0
+            di_sesi = any(awal <= jam_utc < akhir for awal, akhir in SESI_DIIZINKAN_UTC)
+            if not di_sesi:
+                alasan.append(f"di luar sesi London/New York (jam UTC {dt_utc.strftime('%H:%M')})")
     return (not alasan), alasan
 
 
@@ -2477,8 +2824,9 @@ def terapkan_gerbang(sig):
 
 
 def tampilkan_rekap():
-    """Evaluasi semua sinyal di jurnal CSV terhadap riwayat harga M1: win-rate & total R per kelas risiko.
+    """Evaluasi semua sinyal di jurnal CSV terhadap riwayat harga M1: win-rate & total R per kelas risiko & per model AI.
     (R: SL = -1R; TP1 saja = +R:R TP1; TP2 = +R:R TP2; tidak terisi/terlewat = 0R & tidak dihitung sebagai trade.)"""
+    _migrasi_header_jurnal()
     if not os.path.exists(FILE_JURNAL_SINYAL):
         print("   Belum ada sinyal tercatat di jurnal.")
         return
@@ -2491,38 +2839,56 @@ def tampilkan_rekap():
         print("   Jurnal sinyal kosong.")
         return
     tick = mt5.symbol_info_tick(SYMBOL)
-    spread = float(tick.ask - tick.bid) if tick else 0.0
+    spread_live = float(tick.ask - tick.bid) if tick else 0.0
     kelas = {}
+    model_stat = {}
     for row in rows:
         try:
+            sp_buat = float(row["spread_buat"]) if (row.get("spread_buat") and str(row["spread_buat"]).strip()) else None
             sig = dict(arah=row["arah"], lo=float(row["lo"]), hi=float(row["hi"]), lo_asli=float(row["lo_asli"] or row["lo"]),
                        hi_asli=float(row["hi_asli"] or row["hi"]), sl=float(row["sl"]), tp1=float(row["tp1"]),
                        tp2=float(row["tp2"]), t_buat=int(row["id"]),
-                       harga_buat=float(row["harga_buat"]) if row.get("harga_buat") else None)
+                       harga_buat=float(row["harga_buat"]) if row.get("harga_buat") else None,
+                       spread_buat=sp_buat)
         except (ValueError, KeyError):
             continue
         k = kelas.setdefault(row.get("risiko") or "UNKNOWN", dict(n=0, tdk_terisi=0, berjalan=0, menang=0, kalah=0, total_r=0.0, nodata=0))
         k["n"] += 1
+        nama_mdl = (row.get("model") or "").strip() or "TIDAK DIKETAHUI"
+        m_st = model_stat.setdefault(nama_mdl, dict(n=0, tdk_terisi=0, berjalan=0, menang=0, kalah=0, total_r=0.0, nodata=0))
+        m_st["n"] += 1
         rates = _ambil_m1_sejak(sig["t_buat"])
         if rates is None:
             k["nodata"] += 1
+            m_st["nodata"] += 1
             continue
-        h = _simulasi_jalur(sig, rates, spread)
+        spread_eval = sig["spread_buat"] if sig["spread_buat"] is not None else spread_live
+        h = _simulasi_jalur(sig, rates, spread_eval)
         mid = (sig["lo_asli"] + sig["hi_asli"]) / 2.0
         risiko = abs(mid - sig["sl"]) or 1.0
         if h["sl"]:
             k["kalah"] += 1
             k["total_r"] -= 1.0
+            m_st["kalah"] += 1
+            m_st["total_r"] -= 1.0
         elif h["tp2"]:
+            gain = abs(sig["tp2"] - mid) / risiko
             k["menang"] += 1
-            k["total_r"] += abs(sig["tp2"] - mid) / risiko
+            k["total_r"] += gain
+            m_st["menang"] += 1
+            m_st["total_r"] += gain
         elif h["tp1"]:
+            gain = abs(sig["tp1"] - mid) / risiko
             k["menang"] += 1
-            k["total_r"] += abs(sig["tp1"] - mid) / risiko
+            k["total_r"] += gain
+            m_st["menang"] += 1
+            m_st["total_r"] += gain
         elif h["terisi"]:
             k["berjalan"] += 1
+            m_st["berjalan"] += 1
         else:
             k["tdk_terisi"] += 1
+            m_st["tdk_terisi"] += 1
     print("\n" + "=" * 70)
     print(f"REKAP JURNAL SINYAL ({len(rows)} sinyal) — dievaluasi dari riwayat M1")
     print("=" * 70)
@@ -2539,6 +2905,14 @@ def tampilkan_rekap():
     print(f"TOTAL selesai: {tot_trade} trade | {tot_r:+.2f}R")
     if tot_trade < 30:
         print("Catatan: sampel < 30 trade — angka di atas belum bermakna secara statistik.")
+    print("-" * 70)
+    print("RINGKASAN PER MODEL AI:")
+    for nama_m, m_s in sorted(model_stat.items()):
+        trade_m = m_s["menang"] + m_s["kalah"]
+        wr_m = f"{m_s['menang'] / trade_m * 100:.0f}%" if trade_m else "-"
+        ex_m = f"{m_s['total_r'] / trade_m:+.2f}R" if trade_m else "-"
+        print(f"• {nama_m:<25} sinyal {m_s['n']:>3} | selesai {trade_m:>3} (menang {m_s['menang']}, kalah {m_s['kalah']}) | win-rate {wr_m} | total {m_s['total_r']:+.2f}R | expectancy/trade {ex_m} | berjalan {m_s['berjalan']} | tidak terisi/terlewat {m_s['tdk_terisi']}"
+              + (f" | tanpa data {m_s['nodata']}" if m_s["nodata"] else ""))
     print("=" * 70)
 
 
@@ -2656,7 +3030,9 @@ def _cari_zona_valid_berikutnya_mt5(arah_cari, batas_lewat, harga_skrg, atr_m5, 
 
     kandidat_mentah = []
     daftar_tf = [
-        ("M30", mt5.TIMEFRAME_M30, 180, 2.0),
+        ("M5", mt5.TIMEFRAME_M5, 150, 1.2),
+        ("M15", mt5.TIMEFRAME_M15, 160, 1.6),
+        ("M30", mt5.TIMEFRAME_M30, 180, 2.2),
         ("H1", mt5.TIMEFRAME_H1, 200, 3.5),
         ("H4", mt5.TIMEFRAME_H4, 180, 5.0),
         ("D1", mt5.TIMEFRAME_D1, 120, 6.5),
@@ -2707,13 +3083,20 @@ def _cari_zona_valid_berikutnya_mt5(arah_cari, batas_lewat, harga_skrg, atr_m5, 
     else:
         kandidat_mentah.sort(key=lambda z: z["lo"])
 
-    # Gabungkan zona yang berhimpitan / konfluensi (jarak <= 2.2 poin)
+    # Gabungkan zona yang berhimpitan / konfluensi (jarak <= 1.5 poin, dan lebar total klaster <= 6.0 poin agar tidak daisy-chain)
     klaster = []
     for z in kandidat_mentah:
+        # Abaikan zona tunggal yang terlalu lebar (> 12 poin, misal FVG D1 raksasa) kecuali dipersempit ke tepi terdekat
+        if (z["hi"] - z["lo"]) > 8.0:
+            if arah_cari == "BUY":
+                z = dict(z, lo=round(z["hi"] - 3.5, 2))
+            else:
+                z = dict(z, hi=round(z["lo"] + 3.5, 2))
         digabung = False
         for kl in klaster:
-            overlap = not (z["hi"] < kl["lo"] - 2.2 or z["lo"] > kl["hi"] + 2.2)
-            if overlap:
+            overlap = not (z["hi"] < kl["lo"] - 1.5 or z["lo"] > kl["hi"] + 1.5)
+            calon_lebar = max(kl["hi"], z["hi"]) - min(kl["lo"], z["lo"])
+            if overlap and calon_lebar <= 6.0:
                 kl["lo"] = min(kl["lo"], z["lo"])
                 kl["hi"] = max(kl["hi"], z["hi"])
                 kl["skor"] += z["skor"] * 0.8
@@ -3175,8 +3558,9 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                     if (now_s - _mm_ts) >= 5.0:   # info akun cukup disegarkan tiap 5 detik
                         _mm_acc, _mm_sym, _mm_ts = mt5.account_info(), mt5.symbol_info(SYMBOL), now_s
                     acc_live_mm, sym_live_mm = _mm_acc, _mm_sym
+                    cur_live_mm = acc_live_mm.currency if acc_live_mm else "USD"
                     eq_live_mm = float(acc_live_mm.equity if acc_live_mm and acc_live_mm.equity > 0 else (acc_live_mm.balance if acc_live_mm else 1000.0))
-                    contract_live_mm = float(sym_live_mm.trade_contract_size if sym_live_mm else 100.0)
+                    contract_live_mm = _nilai_per_poin(harga, True, float(sym_live_mm.trade_contract_size if sym_live_mm else 100.0))
 
                     for o in orders_live:
                         tkt_o = o.ticket
@@ -3701,7 +4085,13 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                             for _ in range(5):
                                 bunyi(600, 350)
                         elif (s["arah"] == "BUY" and harga >= s["tp1"]) or (s["arah"] == "SELL" and harga <= s["tp1"]):
-                            if "tp1" not in sudah_notif_masuk:
+                            st_now_tp, _ = evaluasi_validitas_sinyal(s, harga)
+                            sudah_masuk_zona = (
+                                "sig_entry" in sudah_notif_masuk
+                                or kode_ambil_now == "DIAMBIL"
+                                or st_now_tp in (ST_TP1_TERCAPAI, ST_SELESAI_TP2, ST_VALID_BERJALAN, ST_AKTIF_ENTRY)
+                            )
+                            if sudah_masuk_zona and "tp1" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add("tp1")
                                 mid_entry = round((s["lo"] + s["hi"]) / 2.0, 2)
                                 bep_sl = round(mid_entry + 0.3, 2) if s["arah"] == "BUY" else round(mid_entry - 0.3, 2)
@@ -3713,8 +4103,6 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                                     print(f"\n\n[TARGET TERCAPAI — POSISI {s['arah']} ANDA!] Harga {harga:.2f} menyentuh TP1 ({s['tp1']:.2f})! Amankan profit / geser SL ke BEP.")
                                 _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_bep, f"TP1 ({s['tp1']:.2f}) Tercapai -> SL Sinyal Aktif dikunci ke BEP+ ({bep_sl:.2f})")
                                 sudah_notif_masuk.add("tp1")
-                                for _ in range(4):
-                                    bunyi(1500, 250)
                                 for _ in range(4):
                                     bunyi(1500, 250)
 
@@ -3961,12 +4349,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.genai import types
 
 MODELS_TO_TRY = [
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.6-flash",
     "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
 ]
 
 # Menyimpan model yang terbukti aktif dan paling cepat di sesi ini, serta membuang model yang 404 / kuota habis
@@ -3986,8 +4377,8 @@ def _coba_satu_model(client, model_name, contents):
 
 
 def snapshot_live_qa():
-    """Mengambil harga Bid/Ask detik ini + update kilat M5 & M30 (0.1 detik) setiap kali user bertanya di Q&A,
-    supaya AI selalu tahu kalau harga baru saja menjemput zona atau baru saja membentuk Sweep/CISD/CHoCH di M5!"""
+    """Mengambil harga Bid/Ask detik ini + update kilat M5 & M30 + Akun & Zona MT5 setiap kali user bertanya di Q&A,
+    supaya AI selalu tahu posisi akun real, zona valid MT5 terdekat, serta struktur M5 terbaru tanpa berhalusinasi!"""
     if not pastikan_mt5_aktif():
         return ""
     tick = mt5.symbol_info_tick(SYMBOL)
@@ -4039,31 +4430,67 @@ def snapshot_live_qa():
             htf_running_txt += f"H1 High {float(cur_h1['high']):.2f} Low {float(cur_h1['low']):.2f}"
         htf_running_txt = htf_running_txt.rstrip(" |") + "\n"
 
+    # Sertakan Zona Demand (BUY) & Supply (SELL) Valid Terdekat hasil kalkulasi algoritmik MT5 (H4/H1/M30/M15)
+    # agar di mode Q&A AI TIDAK PERNAH mengarang/menebak angka zona sendiri!
+    z_buy_qa, z_buy_cad = _cari_zona_valid_berikutnya_mt5("BUY", harga, harga, float(atr5[-1]))
+    z_sell_qa, z_sell_cad = _cari_zona_valid_berikutnya_mt5("SELL", harga, harga, float(atr5[-1]))
+    zona_mt5_qa_txt = "- [ZONA INSTITUSIONAL VALID TERDEKAT DARI DATA MT5 REAL-TIME (WAJIB PAKAI INI JIKA MEMBUAT SETUP BARU)]:\n"
+    if z_buy_qa:
+        zona_mt5_qa_txt += (
+            f"  * KANDIDAT BUY LIMIT UTAMA (DEMAND BAWAH TERDEKAT): ENTRY {z_buy_qa['lo']:.2f}-{z_buy_qa['hi']:.2f} | "
+            f"SL {z_buy_qa['sl']:.2f} | TP1 {z_buy_qa['tp1']:.2f} | TP2 {z_buy_qa['tp2']:.2f} "
+            f"(Jarak: {harga - z_buy_qa['hi']:.2f} pt di bawah harga sekarang | Sumber: {z_buy_qa['ket']})\n"
+        )
+    if z_buy_cad:
+        zona_mt5_qa_txt += (
+            f"  * KANDIDAT BUY LIMIT KE-2 (DEMAND CADANGAN): ENTRY {z_buy_cad['lo']:.2f}-{z_buy_cad['hi']:.2f} | "
+            f"SL {z_buy_cad['sl']:.2f} | TP1 {z_buy_cad['tp1']:.2f} | TP2 {z_buy_cad['tp2']:.2f} ({z_buy_cad['ket']})\n"
+        )
+    if z_sell_qa:
+        zona_mt5_qa_txt += (
+            f"  * KANDIDAT SELL LIMIT UTAMA (SUPPLY ATAS TERDEKAT): ENTRY {z_sell_qa['lo']:.2f}-{z_sell_qa['hi']:.2f} | "
+            f"SL {z_sell_qa['sl']:.2f} | TP1 {z_sell_qa['tp1']:.2f} | TP2 {z_sell_qa['tp2']:.2f} "
+            f"(Jarak: {z_sell_qa['lo'] - harga:.2f} pt di atas harga sekarang | Sumber: {z_sell_qa['ket']})\n"
+        )
+    if z_sell_cad:
+        zona_mt5_qa_txt += (
+            f"  * KANDIDAT SELL LIMIT KE-2 (SUPPLY CADANGAN): ENTRY {z_sell_cad['lo']:.2f}-{z_sell_cad['hi']:.2f} | "
+            f"SL {z_sell_cad['sl']:.2f} | TP1 {z_sell_cad['tp1']:.2f} | TP2 {z_sell_cad['tp2']:.2f} ({z_sell_cad['ket']})\n"
+        )
+
+    # Sertakan analisa akun & tabel lot presisi
+    acc_qa = mt5.account_info()
+    sym_qa = mt5.symbol_info(SYMBOL)
+    info_akun_qa = analisa_akun_dan_lot(acc_qa, sym_qa, float(atr5[-1]), harga)
+
     sig_live_txt = ""
     if SINYAL_AKTIF_DINAMIS:
         sd = SINYAL_AKTIF_DINAMIS
         st_sd, al_sd = evaluasi_validitas_sinyal(sd, harga)
-        kunci_sd = "TERKUNCI AKTIF — DILARANG UBAH ANGKA ENTRY/SL/TP!" if sinyal_masih_aktif(st_sd) else "SUDAH SELESAI/BATAL — BOLEH UPDATE SETUP BARU"
+        lbl_eks_sd, _, info_eks_sd = cek_status_eksekusi_sinyal(sd)
+        kunci_sd = "TERKUNCI AKTIF — DILARANG UBAH ANGKA ENTRY/SL/TP!" if sinyal_masih_aktif(st_sd) else "SUDAH SELESAI/BATAL — WAJIB BERIKAN SETUP BARU DARI ZONA MT5 DI ATAS!"
         sig_live_txt = (
-            f"- 🔒 SINYAL UTAMA TERKUNCI SAAT INI [{kunci_sd}]: "
-            f"{sd['arah']} | ENTRY: {sd['lo']:.2f}-{sd['hi']:.2f} | SL: {sd['sl']:.2f} | TP1: {sd['tp1']:.2f} | TP2: {sd['tp2']:.2f} "
-            f"-> Status Real-Time: [{st_sd}] ({al_sd})\n"
+            f"- 🔒 SINYAL UTAMA SAAT INI [{kunci_sd}]: "
+            f"{sd['arah']} | ENTRY: {sd['lo']:.2f}-{sd['hi']:.2f} | SL: {sd['sl']:.2f} | TP1: {sd['tp1']:.2f} | TP2: {sd.get('tp2', sd['tp1']):.2f} "
+            f"-> Status Real-Time: [{st_sd}] ({al_sd}) | Status di Akun MT5: [{lbl_eks_sd}] ({info_eks_sd})\n"
         )
 
     _bias_qa = bias_htf_cached()
     return (
         f"\n[UPDATE DATA LIVE MT5 DETIK INI SAAT TRADER BERTANYA]:\n"
-        f"- Harga Sekarang: Bid {harga:.2f} (Spread {spread:.2f}) | Volatilitas ATR14 M5: {atr5[-1]:.2f} pt\n"
+        f"- Harga Sekarang: Bid {harga:.2f} / Ask {tick.ask if tick else harga:.2f} (Spread {spread:.2f}) | Volatilitas ATR14 M5: {atr5[-1]:.2f} pt\n"
         f"- {teks_bias_htf(_bias_qa)} | Detail: {' | '.join(_bias_qa['detail'].get(k, '-') for k in ('D1', 'H4', 'H1'))}\n"
         f"{htf_running_txt}"
         f"{sig_live_txt}"
+        f"{zona_mt5_qa_txt}"
         f"- Struktur M5 Terbaru: {ev_txt}\n"
         f"- CISD (Change in State of Delivery) M5 Terbaru: {cisd_txt} | Trigger Calon Saat Ini: {calon_cisd5}\n"
         f"- Liquidity Sweep M5 Terbaru: {sw_txt}\n"
         f"- Pola Candle M5 Terbaru: {', '.join(pola5) if pola5 else 'tidak ada'}\n"
         f"- Status Order Flow & Sideways M5: {inst5}\n"
         f"- {m30_info}"
-        f"{pos_txt}"
+        f"{pos_txt}\n"
+        f"{info_akun_qa}\n"
         f"10 Candle M5 Terakhir yang Sudah Close:\n{tabel5}\n"
     )
 
@@ -4279,38 +4706,35 @@ def main():
         print("\n   [⚠️ Semua model Gemini sedang padat antrean. Mode mekanis & pantau tetap diaktifkan — ketik 'refresh' untuk coba lagi.]")
         jawaban_awal = ""
     _tgt_awal = ekstrak_target_ai(jawaban_awal)
-    sinyal_baru_ai = terapkan_gerbang(_tgt_awal.get("sinyal"))
+    _cand_awal = _tgt_awal.get("sinyal")
+    if _cand_awal and model_aktif:
+        _cand_awal["model"] = model_aktif
+    sinyal_baru_ai = terapkan_gerbang(_cand_awal)
+    if sinyal_baru_ai and model_aktif:
+        sinyal_baru_ai["model"] = model_aktif
 
-    if sinyal_baru_ai:
-        # 🔒 SIGNAL & PRICE LEVEL LOCK:
-        # Jika sinyal sebelumnya masih valid (belum kena SL / belum selesai / belum kedaluwarsa),
-        # DILARANG membalikkan arah DAN DILARANG menggeser-geser angka Entry/SL!
-        if sig_sebelumnya and isinstance(sig_sebelumnya, dict):
-            tick_st = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
-            bid_st = tick_st.bid if tick_st else 0.0
-            st_cek, _ = evaluasi_validitas_sinyal(sig_sebelumnya, bid_st)
-            if sinyal_masih_aktif(st_cek):
-                beda_angka = (
-                    sinyal_baru_ai["arah"] != sig_sebelumnya["arah"]
-                    or abs(sinyal_baru_ai["lo"] - sig_sebelumnya["lo"]) > 0.05
-                    or abs(sinyal_baru_ai["hi"] - sig_sebelumnya["hi"]) > 0.05
-                    or abs(sinyal_baru_ai["sl"] - sig_sebelumnya["sl"]) > 0.05
-                )
-                if beda_angka:
-                    print(
-                        f"\n   [🔒 SIGNAL LOCK AKTIF: AI mencoba mengubah sinyal ke {sinyal_baru_ai['arah']} @ {sinyal_baru_ai['lo']:.2f}-{sinyal_baru_ai['hi']:.2f}, "
-                        f"namun DITAHAN karena sinyal {sig_sebelumnya['arah']} @ {sig_sebelumnya['lo']:.2f}-{sig_sebelumnya['hi']:.2f} (SL {sig_sebelumnya['sl']:.2f}) "
-                        f"masih valid ({st_cek})! Angka asli tetap dipertahankan.]"
-                    )
-                sinyal_baru_ai = sig_sebelumnya
+    tick_st = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
+    bid_st = tick_st.bid if tick_st else 0.0
+    st_cek = "UNKNOWN"
+    if sig_sebelumnya and isinstance(sig_sebelumnya, dict) and bid_st > 0:
+        st_cek, _ = evaluasi_validitas_sinyal(sig_sebelumnya, bid_st)
 
-        SINYAL_AKTIF_DINAMIS = sinyal_baru_ai
-        # Jika sinyal baru berbeda angka dari sinyal sebelumnya (karena sinyal lama sudah batal/selesai), simpan sinyal lama sebagai riwayat
-        if sig_sebelumnya and (sinyal_baru_ai["lo"] != sig_sebelumnya["lo"] or sinyal_baru_ai["arah"] != sig_sebelumnya["arah"]):
-            SINYAL_SEBELUMNYA_DINAMIS = sig_sebelumnya
-            print(f"\n   [ℹ️ UPDATE SINYAL: Sinyal sebelumnya sudah selesai/batal. AI menerbitkan Sinyal Baru ({sinyal_baru_ai['arah']} @ {sinyal_baru_ai['lo']:.2f}-{sinyal_baru_ai['hi']:.2f}).]")
-    else:
-        SINYAL_AKTIF_DINAMIS = sig_sebelumnya
+    # 🔒 SIGNAL & DIRECTIONAL LOCK via helper terpusat (konteks STARTUP)
+    sig_pilih, sig_rw, logs_lock, diubah = putuskan_sinyal_terkunci(
+        sinyal_baru_ai,
+        sig_sebelumnya,
+        status_aktif=st_cek,
+        paksa_ganti=False,
+        izinkan_balik_arah=False,
+        konteks="STARTUP",
+    )
+    for p in logs_lock:
+        print(p)
+    if sig_rw:
+        # Pengarsipan di Startup jika sinyal lama digantikan sinyal baru pasca-batal/selesai
+        SINYAL_SEBELUMNYA_DINAMIS = sig_rw
+
+    SINYAL_AKTIF_DINAMIS = sig_pilih
 
     # Selaraskan zona pantau dengan sinyal aktif agar tidak ada dua angka zona berbeda di layar
     if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict):
@@ -4497,28 +4921,34 @@ def main():
             jwb_baru, mdl = panggil_gemini(client, prompt_baru, stream_output=True)
             if jwb_baru:
                 _tgt_baru = ekstrak_target_ai(jwb_baru)
-                sinyal_kandidat = terapkan_gerbang(_tgt_baru.get("sinyal"))
-                # 🔒 SIGNAL & PRICE LEVEL LOCK: Jangan timpa/geser angka sinyal aktif lama jika masih valid!
-                if sinyal_kandidat and SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict):
-                    tick_ref = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
-                    bid_ref = tick_ref.bid if tick_ref else 0.0
+                _cand_baru = _tgt_baru.get("sinyal")
+                if _cand_baru and mdl:
+                    _cand_baru["model"] = mdl
+                sinyal_kandidat = terapkan_gerbang(_cand_baru)
+                if sinyal_kandidat and mdl:
+                    sinyal_kandidat["model"] = mdl
+                tick_ref = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
+                bid_ref = tick_ref.bid if tick_ref else 0.0
+                st_aktif_ref = "UNKNOWN"
+                if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict) and bid_ref > 0:
                     st_aktif_ref, _ = evaluasi_validitas_sinyal(SINYAL_AKTIF_DINAMIS, bid_ref)
-                    if sinyal_masih_aktif(st_aktif_ref):
-                        beda_ref = (
-                            sinyal_kandidat["arah"] != SINYAL_AKTIF_DINAMIS["arah"]
-                            or abs(sinyal_kandidat["lo"] - SINYAL_AKTIF_DINAMIS["lo"]) > 0.05
-                            or abs(sinyal_kandidat["hi"] - SINYAL_AKTIF_DINAMIS["hi"]) > 0.05
-                            or abs(sinyal_kandidat["sl"] - SINYAL_AKTIF_DINAMIS["sl"]) > 0.05
-                        )
-                        if beda_ref:
-                            print(
-                                f"\n   [🔒 SIGNAL LOCK: Sinyal baru AI ({sinyal_kandidat['arah']} @ {sinyal_kandidat['lo']:.2f}-{sinyal_kandidat['hi']:.2f}) "
-                                f"DITAHAN karena sinyal {SINYAL_AKTIF_DINAMIS['arah']} @ {SINYAL_AKTIF_DINAMIS['lo']:.2f}-{SINYAL_AKTIF_DINAMIS['hi']:.2f} "
-                                f"(SL {SINYAL_AKTIF_DINAMIS['sl']:.2f}) masih valid ({st_aktif_ref})!]"
-                            )
-                        sinyal_kandidat = SINYAL_AKTIF_DINAMIS
 
-                SINYAL_AKTIF_DINAMIS = sinyal_kandidat or SINYAL_AKTIF_DINAMIS
+                # 🔒 SIGNAL & DIRECTIONAL LOCK via helper terpusat (konteks REFRESH)
+                sig_pilih, sig_rw, logs_lock, diubah = putuskan_sinyal_terkunci(
+                    sinyal_kandidat,
+                    SINYAL_AKTIF_DINAMIS,
+                    status_aktif=st_aktif_ref,
+                    paksa_ganti=False,
+                    izinkan_balik_arah=False,
+                    konteks="REFRESH",
+                )
+                for p in logs_lock:
+                    print(p)
+                if sig_rw:
+                    # Pengarsipan di Refresh adalah perubahan perilaku yang disengaja (jika sinyal lama diganti karena selesai/batal)
+                    SINYAL_SEBELUMNYA_DINAMIS = sig_rw
+
+                SINYAL_AKTIF_DINAMIS = sig_pilih
                 if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict):
                     if SINYAL_AKTIF_DINAMIS["arah"] == "BUY":
                         ZONA_BAWAH_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
@@ -4529,7 +4959,7 @@ def main():
                 else:
                     ZONA_ATAS_DINAMIS = _tgt_baru.get("atas")
                     ZONA_BAWAH_DINAMIS = _tgt_baru.get("bawah")
-                simpan_state_sinyal(SINYAL_AKTIF_DINAMIS, atas=ZONA_ATAS_DINAMIS, bawah=ZONA_BAWAH_DINAMIS, catatan="Refresh Manual")
+                simpan_state_sinyal(SINYAL_AKTIF_DINAMIS, SINYAL_SEBELUMNYA_DINAMIS, atas=ZONA_ATAS_DINAMIS, bawah=ZONA_BAWAH_DINAMIS, catatan="Refresh Manual")
                 riwayat_chat = [
                     {"role": "user", "parts": [{"text": prompt_baru}]},
                     {"role": "model", "parts": [{"text": jwb_baru}]},
@@ -4566,12 +4996,13 @@ def main():
             f"Pertanyaan trader: {tanya}\n"
             f"{live_snap}"
             f"{teks_kunci_qa}\n"
-            "INSTRUKSI JAWABAN (PROTOKOL AKURASI TINGGI & KONSISTENSI MUTLAK):\n"
-            "1. Gunakan [UPDATE DATA LIVE MT5 DETIK INI] di atas sebagai kondisi pasar terbaru!\n"
-            "2. KONSISTENSI ANGKA 100% (DILARANG PLIN-PLAN): Jika sudah ada Sinyal Utama Terkunci yang MASIH VALID di atas, PERTAHANKAN angka Entry, SL, dan TP tersebut tanpa diubah sepeser pun (kecuali trader secara eksplisit mengetik perintah 'ganti sinyal baru' / 'reset sinyal').\n"
-            "3. Hanya jika BELUM ADA sinyal aktif (status WAIT) atau sinyal lama SUDAH BATAL (kena SL), berikan setup baru sesuai Protokol Akurasi Tinggi: Tipe Order, Entry ketat (maks 1.5-2.0 pt), SL di balik wick + buffer ATR, TP1 (R:R min 1:1.5), TP2, dan Lot rekomendasi.\n"
-            "4. Pastikan angka ZONA_BAWAH (untuk BUY) atau ZONA_ATAS (untuk SELL) di [RADAR_TARGET] SAMA PERSIS dengan angka ENTRY sinyal agar tidak ada dua versi harga yang membingungkan trader!\n"
-            "5. Jawab singkat, tegas, konsisten, dan selalu sebutkan level/waktu candle spesifik dari data."
+            "🛡️ INSTRUKSI JAWABAN (PROTOKOL ANTI-HALUSINASI, AKURASI TINGGI & KONSISTENSI MUTLAK):\n"
+            "1. FAKTA MUTLAK MT5: Gunakan HANYA angka dari [UPDATE DATA LIVE MT5 DETIK INI] di atas (Harga Bid/Ask, Posisi Terbuka & Tiket, Pending Order, Mata Uang Akun misal IDC/USC/USD, Balance/Equity, dan Zona Institusional MT5 Terdekat). DILARANG KERAS mengarang angka zona, mengarang saldo/lot, atau menyebut posisi BEP+ masih berisiko SL!\n"
+            "2. AUDIT POSISI & PENDING ORDER: Jika trader bertanya tentang posisi atau akunnya, sebutkan Nomor Tiket (#...), arah, lot, harga open, SL (dan apakah SL sudah dikunci BEP+ bebas risiko), serta floating profit dalam mata uang akun yang sebenarnya.\n"
+            "3. KONSISTENSI ANGKA 100% (DILARANG PLIN-PLAN): Jika sudah ada Sinyal Utama Terkunci yang MASIH VALID di atas, PERTAHANKAN angka Entry, SL, dan TP tersebut tanpa diubah sepeser pun (kecuali trader secara eksplisit meminta 'ganti sinyal baru' / 'reset sinyal').\n"
+            "4. JIKA MEMBUAT SETUP BARU (karena belum ada sinyal aktif / sinyal lama SUDAH BATAL / selesai): WAJIB ambil angka Entry, SL, TP1, dan TP2 dari [ZONA INSTITUSIONAL VALID TERDEKAT DARI DATA MT5 REAL-TIME] di atas agar 100% berdasar struktur asli MT5 (bukan tebakan), dan WAJIB sertakan blok [RADAR_TARGET] di bagian paling bawah jawaban!\n"
+            "5. Pastikan angka ZONA_BAWAH (untuk BUY) atau ZONA_ATAS (untuk SELL) di [RADAR_TARGET] SAMA PERSIS dengan angka ENTRY sinyal agar tidak ada dua versi harga yang membingungkan trader!\n"
+            "6. Jawab singkat, tajam, konsisten, dan selalu sebutkan level/waktu candle spesifik dari data."
         )
         # Jaga ukuran riwayat chat tetap ramping (konteks data utama + maks 6 pesan tanya jawab terakhir) agar respon secepat kilat
         if len(riwayat_chat) > 8:
@@ -4583,21 +5014,45 @@ def main():
         print("   Menghubungi server AI...", end="\r")
         jawaban_qa, mdl = panggil_gemini(client, konten_qa, stream_output=True)
         if jawaban_qa:
-            sig_qa = terapkan_gerbang(ekstrak_target_ai(jawaban_qa).get("sinyal"))
-            # 🔒 SIGNAL LOCK: Hanya timpa sinyal jika belum ada sinyal aktif atau trader meminta sinyal baru
+            _tgt_qa = ekstrak_target_ai(jawaban_qa)
+            _cand_qa = _tgt_qa.get("sinyal")
+            if _cand_qa and mdl:
+                _cand_qa["model"] = mdl
+            sig_qa = terapkan_gerbang(_cand_qa)
+            if sig_qa and mdl:
+                sig_qa["model"] = mdl
             tanya_lower = tanya.lower()
-            minta_baru = any(k in tanya_lower for k in ("sinyal baru", "setup baru", "ganti sinyal", "refresh"))
-            if sig_qa and (SINYAL_AKTIF_DINAMIS is None or minta_baru):
-                # 🔒 DIRECTIONAL INTEGRITY: Jangan timpa sinyal aktif dengan sinyal lawan jika belum selesai/kena SL
-                if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict) and sig_qa["arah"] != SINYAL_AKTIF_DINAMIS["arah"] and not any(k in tanya_lower for k in ("balik arah", "reversal", "ganti sell", "ganti buy", "switch")):
-                    tick_q = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
-                    bid_q = tick_q.bid if tick_q else 0.0
-                    st_q, _ = evaluasi_validitas_sinyal(SINYAL_AKTIF_DINAMIS, bid_q)
-                    if sinyal_masih_aktif(st_q):
-                        print(f"\n   [🔒 DIRECTIONAL LOCK: Sinyal aktif tetap {SINYAL_AKTIF_DINAMIS['arah']}. Sinyal lawan ({sig_qa['arah']}) tidak diaktifkan karena setup sebelumnya belum selesai.]")
-                        sig_qa = SINYAL_AKTIF_DINAMIS
-                SINYAL_AKTIF_DINAMIS = sig_qa
-                simpan_state_sinyal(SINYAL_AKTIF_DINAMIS, atas=ZONA_ATAS_DINAMIS, bawah=ZONA_BAWAH_DINAMIS, catatan=f"Update QA: {tanya[:30]}")
+            minta_baru = any(k in tanya_lower for k in ("sinyal baru", "setup baru", "ganti sinyal", "reset sinyal", "refresh"))
+            izinkan_balik = any(k in tanya_lower for k in ("balik arah", "reversal", "ganti sell", "ganti buy", "switch"))
+            tick_q = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
+            bid_q = tick_q.bid if tick_q else 0.0
+            st_q_curr = "UNKNOWN"
+            if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict) and bid_q > 0:
+                st_q_curr, _ = evaluasi_validitas_sinyal(SINYAL_AKTIF_DINAMIS, bid_q)
+
+            if sig_qa:
+                # 🔒 SIGNAL & DIRECTIONAL LOCK via helper terpusat (konteks QA)
+                sig_pilih, sig_rw, logs_lock, diubah = putuskan_sinyal_terkunci(
+                    sig_qa,
+                    SINYAL_AKTIF_DINAMIS,
+                    status_aktif=st_q_curr,
+                    paksa_ganti=minta_baru,
+                    izinkan_balik_arah=izinkan_balik,
+                    konteks="QA",
+                )
+                for p in logs_lock:
+                    print(p)
+                if sig_rw:
+                    SINYAL_SEBELUMNYA_DINAMIS = sig_rw
+                if diubah:
+                    SINYAL_AKTIF_DINAMIS = sig_pilih
+                    if SINYAL_AKTIF_DINAMIS["arah"] == "BUY":
+                        ZONA_BAWAH_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
+                        ZONA_ATAS_DINAMIS = _tgt_qa.get("atas") or ZONA_ATAS_DINAMIS
+                    else:
+                        ZONA_ATAS_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
+                        ZONA_BAWAH_DINAMIS = _tgt_qa.get("bawah") or ZONA_BAWAH_DINAMIS
+                    simpan_state_sinyal(SINYAL_AKTIF_DINAMIS, SINYAL_SEBELUMNYA_DINAMIS, ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, catatan=f"Update QA: {tanya[:30]}")
             riwayat_chat.append({"role": "user", "parts": [{"text": f"Pertanyaan trader: {tanya}"}]})
             riwayat_chat.append({"role": "model", "parts": [{"text": jawaban_qa}]})
         else:

@@ -1,39 +1,36 @@
 {
-  "waktu_simpan": "2026-11-09 16:50:01",
+  "waktu_simpan": "2026-11-10 06:13:16",
   "sinyal": {
-    "arah": "BUY",
-    "lo": 4074.0,
-    "hi": 4075.9,
-    "sl": 4068.5,
-    "tp1": 4094.0,
-    "tp2": 4108.0,
-    "lo_asli": 4074.0,
-    "hi_asli": 4075.9,
-    "t_buat": 1794217800,
-    "harga_buat": 4094.898
+    "arah": "SELL",
+    "lo": 4139.81,
+    "hi": 4146.28,
+    "sl": 4150.33,
+    "tp1": 4132.4,
+    "tp2": 4124.71,
+    "ket": "Re-Entry 2nd Chance Pasca Stop-Hunt",
+    "t_buat": 1794265996,
+    "harga_buat": 4143.923
   },
   "sinyal_sebelumnya": {
-    "arah": "BUY",
-    "lo": 4076.81,
-    "hi": 4078.65,
-    "sl": 4078.03,
-    "tp1": 4104.34,
-    "tp2": 4134.26,
-    "lo_asli": 4076.81,
-    "hi_asli": 4078.65,
-    "t_buat": 1794207851,
-    "harga_buat": 4106.136,
-    "ket": "TP1 Tercapai \u2014 SL Geser ke BEP+ (Runner ke TP2)"
+    "arah": "SELL",
+    "lo": 4135.09,
+    "hi": 4138.9,
+    "sl": 4146.25,
+    "tp1": 4117.23,
+    "tp2": 4104.79,
+    "ket": "Re-Entry 2nd Chance Pasca Stop-Hunt",
+    "t_buat": 1794265500,
+    "harga_buat": 4135.888
   },
   "atas": [
-    4102.09,
-    4106.84,
-    4113.5
+    4145.76,
+    4148.96,
+    4154.75
   ],
   "bawah": [
-    4074.0,
-    4075.9,
-    4068.5
+    4095.54,
+    4098.74,
+    4091.12
   ],
-  "catatan": "Refresh Manual"
+  "catatan": "Stop-Hunt Recovery Posisi SELL #31095347 (SL digeser ke atas wick sweep 4146.63)"
 }

@@ -18,7 +18,7 @@ from modules.mt5_conn import (
     ambil_candle_berjalan, _suffix_simbol
 )
 
-_CACHE_BIAS = {}
+_CACHE_BIAS = {"data": None, "ts": 0.0}
 
 
 def cari_swing(df, n=SWING_N):
@@ -914,7 +914,7 @@ def hitung_bias_htf(frames=None):
 
 def bias_htf_cached(frames=None, ttl=300):
     """Bias HTF dengan cache 5 menit. Gunakan di loop pantau dan gerbang sinyal."""
-    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+    if _CACHE_BIAS.get("data") is None or (time.time() - _CACHE_BIAS.get("ts", 0.0)) > ttl:
         _CACHE_BIAS["data"] = hitung_bias_htf(frames)
         _CACHE_BIAS["ts"] = time.time()
     return _CACHE_BIAS["data"]
@@ -927,9 +927,11 @@ def invalidasi_cache_bias():
 
 def teks_bias_htf(bias_dict):
     """Format ringkas untuk status bar dan konteks AI."""
-    b = bias_dict
-    icon = "🟢" if b["bias"] == "BULLISH" else ("🔴" if b["bias"] == "BEARISH" else "🟡")
-    return f"{icon} BIAS HTF: {b['bias']} (skor {b['skor']:+d}/5)"
+    b = bias_dict or {}
+    bias = b.get("bias", "NETRAL")
+    skor = b.get("skor", 0)
+    icon = "🟢" if bias == "BULLISH" else ("🔴" if bias == "BEARISH" else "🟡")
+    return f"{icon} BIAS HTF: {bias} (skor {skor:+d}/5)"
 
 
 def _cari_zona_valid_berikutnya_mt5(arah_cari, batas_lewat, harga_skrg, atr_m5, is_institusi=False):
@@ -965,6 +967,22 @@ def _cari_zona_valid_berikutnya_mt5(arah_cari, batas_lewat, harga_skrg, atr_m5, 
 
         if not kandidat_aman:
             return None, None  # tanpa fallback: zona yang sudah terlewati tidak boleh dipakai ulang
+
+        # Urutkan kandidat berdasarkan kualitas teknikal objektif (bukan sekadar jarak terdekat)
+        def _sort_kandidat(z):
+            rank = {"A+": 0, "A": 1, "B": 2}
+            tf_rank = 0 if "H4" in z.get("timeframe", "") and "H1" in z.get("timeframe", "") else (1 if "H4" in z.get("timeframe", "") else 2)
+            fresh_rank = {"FRESH": 0, "TESTED_1X": 1, "TESTED_2X": 2}.get(z.get("freshness", ""), 9)
+            return (
+                rank.get(z.get("grade", ""), 9),
+                -round(float(z.get("score", 0.0)), 1),
+                tf_rank,
+                fresh_rank,
+                -round(float(z.get("displacement_strength", 0.0)), 2),
+                str(z.get("zone_id", "")),
+            )
+
+        kandidat_aman.sort(key=_sort_kandidat)
 
         def bentuk_dari_scanner(z):
             lo_z, hi_z = round(float(z["price_low"]), 2), round(float(z["price_high"]), 2)

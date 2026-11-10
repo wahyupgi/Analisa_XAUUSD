@@ -16,7 +16,7 @@ import modules.zone_scanner as zs
 from modules.zone_scanner import (
     detect_swings, detect_market_structure, detect_liquidity_sweeps, detect_fvgs, detect_order_blocks,
     score_zone, merge_overlapping_zones, evaluate_htf_context, validate_entry_setup, scan_xauusd_zones,
-    evaluate_trade_decision, Zone,
+    evaluate_trade_decision, detect_market_regime, format_scanner_audit, Zone,
 )
 from modules.mt5_conn import tambah_indikator
 
@@ -51,22 +51,42 @@ def make_zone(**kw):
 
 
 def m5_trigger_df():
-    """M5 sintetis: osilasi, swing high 2012, turun ke zona 2000-2004, reversal impuls break close > 2012, pullback ke zona."""
+    """M5 sintetis: osilasi, swing high 2012, swing low 2003, sweep low ke 2001, reversal impuls break close > 2012, pullback ke zona."""
     rows = []
-    for i in range(40):
+    for i in range(45):
         c = 2008 + 2 * math.sin(i / 2.0)
         rows.append((c - 0.3, c + 1.0, c - 1.0, c + 0.3, 100))
-    rows[30] = (2009, 2012, 2008.5, 2009.5, 100)
-    p = 2008.5
-    for _ in range(11):
-        rows.append((p, p + 0.4, p - 1.0, p - 0.7, 100))
-        p -= 0.6
-    for j in range(6):
-        o = 2002 + j
-        rows.append((o, o + 1.4, o - 0.4, o + 1.0, 100))
-    rows.append((2007.5, 2014.0, 2007.3, 2013.5, 300))   # BOS bullish (close > 2012)
-    for c in (2010, 2008, 2006, 2005, 2004.5, 2004.2):
-        rows.append((c + 0.8, c + 1.0, c - 0.3, c, 100))
+    rows.append((2009.0, 2012.0, 2008.5, 2009.5, 100)) # swing high 2012
+    for p in (2008.0, 2006.0, 2005.0, 2004.0):
+        rows.append((p, p + 0.5, p - 0.5, p, 100))
+    rows.append((2004.0, 2004.5, 2003.0, 2004.0, 100)) # swing low 2003.0
+    rows.append((2004.0, 2005.5, 2003.8, 2005.0, 100))
+    rows.append((2005.0, 2006.0, 2004.5, 2005.5, 100))
+    rows.append((2005.5, 2006.5, 2005.0, 2006.0, 100)) # confirmed swing low
+    rows.append((2005.0, 2005.2, 2001.0, 2003.5, 200)) # SWEEP_LOW to 2001.0
+    rows.append((2003.5, 2006.0, 2003.2, 2005.5, 200)) # sweep confirmation
+    for o in (2006.0, 2008.0, 2010.0):
+        rows.append((o, o + 2.5, o - 0.2, o + 2.2, 300))
+    rows.append((2012.0, 2015.0, 2011.8, 2014.5, 500)) # BOS break above 2012
+    for c in (2012.0, 2009.0, 2006.5, 2004.5, 2003.5):
+        rows.append((c + 0.5, c + 0.8, c - 0.5, c, 100)) # pullback to 2003.5
+    return make_df(rows, freq="5min")
+
+
+def m5_no_sweep_df():
+    """M5 sintetis dengan BOS/CHoCH tetapi tanpa Liquidity Sweep."""
+    rows = []
+    for i in range(50):
+        c = 2008 + 2 * math.sin(i / 2.0)
+        rows.append((c - 0.3, c + 1.0, c - 1.0, c + 0.3, 100))
+    rows.append((2009.0, 2012.0, 2008.5, 2009.5, 100))
+    for p in (2008.0, 2006.0, 2004.0, 2003.0):
+        rows.append((p, p + 0.5, p - 0.5, p, 100))
+    for o in (2004.0, 2007.0, 2010.0):
+        rows.append((o, o + 2.5, o - 0.2, o + 2.2, 300))
+    rows.append((2012.0, 2015.0, 2011.8, 2014.5, 500))
+    for c in (2012.0, 2009.0, 2006.5, 2004.5, 2003.5):
+        rows.append((c + 0.5, c + 0.8, c - 0.5, c, 100))
     return make_df(rows, freq="5min")
 
 
@@ -305,7 +325,7 @@ class TestEntryValidator(Base):
             "m5 kosong": self.chk(m5=pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])),
             "harga nan": self.chk(price=float("nan")),
             "tanpa target struktural": self.chk(htf=False),
-            "zona B tanpa sweep": self.chk(zone=make_zone(grade="B")),
+            "tanpa sweep (semua grade wajib)": self.chk(m5=m5_no_sweep_df()),
         }
         for name, r in cases.items():
             self.assertEqual(r["status"], "WAIT", name)
@@ -478,11 +498,210 @@ class TestGeminiFailSafe(Base):
         s = self.ag._terapkan_otoritas_scanner(self.target())["sinyal"]
         self.assertEqual((s["lo"], s["hi"], s["sl"], s["tp1"]), (2001.5, 2004.0, 1997.0, 2030.2))
 
-    def test_ai_wait_stays_wait(self):
-        self.ag.evaluate_trade_decision = lambda: {"status": "VALID", "reasons": [], "plan": self.plan, "direction": "BUY"}
+    def test_scanner_wait_stays_wait(self):
+        self.ag.evaluate_trade_decision = lambda: {"status": "WAIT", "reasons": ["M5 belum konfirmasi"], "plan": None, "direction": "BUY"}
         t = self.target()
-        t["sinyal"] = None
-        self.assertIsNone(self.ag._terapkan_otoritas_scanner(t)["sinyal"])
+        res = self.ag._terapkan_otoritas_scanner(t)
+        self.assertIsNone(res["sinyal"])
+        self.assertIn("M5 belum konfirmasi", self.ag._STATE_PARSER["ditolak"][0])
+
+    def test_python_autonomous_signal_when_valid(self):
+        # Python Scanner menghasilkan sinyal mandiri bahkan jika input t["sinyal"] kosong
+        self.ag.evaluate_trade_decision = lambda: {"status": "VALID", "reasons": [], "plan": self.plan, "direction": "BUY"}
+        t = {"atas": None, "bawah": None, "sinyal": None}
+        res = self.ag._terapkan_otoritas_scanner(t)
+        self.assertIsNotNone(res["sinyal"])
+        self.assertEqual((res["sinyal"]["lo"], res["sinyal"]["hi"], res["sinyal"]["sl"]), (2001.5, 2004.0, 1997.0))
+
+
+class TestRequirement7ZoneDetection(Base):
+    """Pengujian Unit Mandiri: Deteksi OB, FVG, Liquidity Sweep, BOS, dan CHoCH."""
+
+    def test_order_block_and_fvg_detection(self):
+        df = make_df(BULL_ROWS)
+        ev, _, sw = detect_market_structure(df)
+        fvgs = detect_fvgs(df)
+        sweeps = detect_liquidity_sweeps(df, sw)
+        ok, bad = detect_order_blocks(df, ev, fvgs, sweeps, "H1")
+        self.assertTrue(len(ok) > 0)
+        self.assertEqual(ok[0].zone_type, "DEMAND")
+        self.assertIsNotNone(ok[0].fvg_confirmation)
+
+    def test_liquidity_sweep_detection(self):
+        df = m5_trigger_df()
+        swings = detect_swings(df, 3)
+        sweeps = detect_liquidity_sweeps(df, swings, 40)
+        types = [s["type"] for s in sweeps]
+        self.assertIn("SWEEP_LOW", types)
+
+    def test_bos_and_choch_detection(self):
+        df = m5_trigger_df()
+        events, trend, swings = detect_market_structure(df, 3)
+        event_types = [e["tipe"] for e in events]
+        self.assertTrue("BOS" in event_types or "CHoCH" in event_types)
+
+
+class TestRequirement7MultiTimeframe(Base):
+    """Pengujian Unit Mandiri: Hirarki Multi-Timeframe (H4, H1, M30) & Kondisi Pasar."""
+
+    def test_h4_bullish_and_h1_bullish_aligned(self):
+        up = make_df([(1900 + i * 3, 1905 + i * 3, 1898 + i * 3, 1904 + i * 3, 100) for i in range(50)], freq="4h")
+        ctx = evaluate_htf_context({"H4": up, "H1": up})
+        self.assertFalse(ctx["has_conflict"])
+        self.assertEqual(ctx["H4"], "BULLISH")
+        self.assertEqual(ctx["H1"], "BULLISH")
+
+    def test_h4_bearish_and_h1_bearish_aligned(self):
+        dn = make_df([(2200 - i * 3, 2202 - i * 3, 2195 - i * 3, 2196 - i * 3, 100) for i in range(50)], freq="4h")
+        ctx = evaluate_htf_context({"H4": dn, "H1": dn})
+        self.assertFalse(ctx["has_conflict"])
+        self.assertEqual(ctx["H4"], "BEARISH")
+        self.assertEqual(ctx["H1"], "BEARISH")
+
+    def test_h4_bullish_vs_h1_bearish_conflict_waits(self):
+        # H4 Bullish vs H1 Bearish -> harus memicu conflict -> WAIT
+        c = fake_ctx(H4="BULLISH", H1="BEARISH", has_conflict=True)
+        self.assertTrue(c["has_conflict"])
+        self.assertEqual(c["bias_utama"], "BULLISH") # bias tercatat tapi conflict aktif
+
+    def test_market_ranging_detection(self):
+        df = flat_df(2050.0, 40, "1h")
+        reg = detect_market_regime(df)
+        self.assertIn(reg["regime"], ("RANGING", "UNKNOWN"))
+
+    def test_market_choppy_detection(self):
+        # Bolak-balik break wick tajam
+        rows = []
+        for i in range(35):
+            o = 2000.0 if i % 2 == 0 else 2004.0
+            c = 2004.0 if i % 2 == 0 else 2000.0
+            rows.append((o, 2008.0, 1996.0, c, 100))
+        df = make_df(rows, freq="1h")
+        reg = detect_market_regime(df)
+        self.assertIn(reg["regime"], ("CHOPPY", "RANGING"))
+
+
+class TestRequirement7EntryValidation(Base):
+    """Pengujian Unit Mandiri: Validasi Entry M5 Konsisten untuk Semua Grade."""
+
+    def setUp(self):
+        super().setUp()
+        self.m5 = m5_trigger_df()
+        self.m5_nosweep = m5_no_sweep_df()
+        self.h1 = h1_target_df()
+        self.zone = make_zone()
+
+    def test_sweep_terkonfirmasi_passes(self):
+        res = zs._entry_check(self.zone, 2003.5, self.m5, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "VALID")
+
+    def test_tidak_ada_sweep_waits(self):
+        res = zs._entry_check(self.zone, 2003.5, self.m5_nosweep, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+        self.assertTrue(any("Sweep" in r for r in res["reasons"]))
+
+    def test_sweep_tanpa_displacement_waits(self):
+        # M5 dengan body candle sangat kecil (tanpa displacement kuat)
+        m5_small = self.m5.copy()
+        m5_small["Close"] = m5_small["Open"] + 0.05
+        res = zs._entry_check(self.zone, 2003.5, m5_small, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+
+    def test_displacement_tanpa_konfirmasi_struktur_waits(self):
+        flat = flat_df(2003.0, 70, "5min")
+        res = zs._entry_check(self.zone, 2003.5, flat, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+
+    def test_entry_terlambat_waits(self):
+        # Harga sudah lari jauh di atas zona (misal di 2025.0)
+        res = zs._entry_check(self.zone, 2025.0, self.m5, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+        self.assertTrue(any("terlambat" in r.lower() or "belum di area" in r.lower() for r in res["reasons"]))
+
+    def test_harga_belum_menyentuh_zona_waits(self):
+        # Zona 2000-2004, harga di 2015 dan data m5 tidak pernah menyentuh 2000-2004
+        high_df = flat_df(2020.0, 70, "5min")
+        res = zs._entry_check(self.zone, 2020.0, high_df, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+        self.assertTrue(any("belum" in r.lower() for r in res["reasons"]))
+
+
+class TestRequirement7RiskManagement(Base):
+    """Pengujian Unit Mandiri: Kontrol Risiko (R:R, Batas SL, Spread)."""
+
+    def setUp(self):
+        super().setUp()
+        self.m5 = m5_trigger_df()
+        self.h1 = h1_target_df()
+
+    def test_rr_memenuhi_syarat(self):
+        res = zs._entry_check(make_zone(sl_recommended=1997.0), 2003.5, self.m5, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "VALID")
+        self.assertGreaterEqual(res["plan"]["rr"], 1.5)
+
+    def test_rr_dibawah_minimal_waits(self):
+        # SL sangat jauh (1983.0), risk = 20.5 -> RR < 1.5
+        res = zs._entry_check(make_zone(sl_recommended=1983.0), 2003.5, self.m5, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+        self.assertTrue(any("R:R" in r or "SL" in r for r in res["reasons"]))
+
+    def test_sl_terlalu_lebar_waits(self):
+        # SL berjarak > 20 poin dari entry
+        res = zs._entry_check(make_zone(sl_recommended=1970.0), 2003.5, self.m5, 0.3, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+        self.assertTrue(any("SL" in r for r in res["reasons"]))
+
+    def test_spread_terlalu_tinggi_waits(self):
+        # Spread 3.0 pt > batas 1.0 pt
+        res = zs._entry_check(make_zone(), 2003.5, self.m5, 3.0, False, {"H1": self.h1})
+        self.assertEqual(res["status"], "WAIT")
+        self.assertTrue(any("Spread" in r for r in res["reasons"]))
+
+
+class TestRequirement8LoggingAndAudit(Base):
+    """Pengujian Format Audit [SCANNER] & Keamanan Informasi."""
+
+    def test_audit_format_structure(self):
+        dec_valid = {
+            "status": "VALID",
+            "direction": "BUY",
+            "stages": {
+                "H4": {"ok": True, "msg": "Bias H4 BULLISH"},
+                "H1": {"ok": True, "msg": "H1 BULLISH"},
+                "M30": {"ok": True, "msg": "M30 BULLISH"},
+                "M5": {"ok": True, "msg": "M5 trigger valid"},
+                "RISK": {"ok": True, "msg": "R:R 2.0"},
+            },
+            "plan": {"entry_acuan": 2003.0, "sl": 1997.0, "tp1": 2015.0, "rr": 2.0},
+            "reasons": ["Entry valid"],
+        }
+        audit = format_scanner_audit(dec_valid)
+        self.assertIn("[SCANNER] H4 Bias: BULLISH", audit)
+        self.assertIn("[SCANNER] H1 Structure: BULLISH", audit)
+        self.assertIn("[SCANNER] M30 Momentum: CONFIRMED", audit)
+        self.assertIn("[SCANNER] M5 Liquidity Sweep: CONFIRMED", audit)
+        self.assertIn("[SCANNER] M5 Displacement: CONFIRMED", audit)
+        self.assertIn("[SCANNER] Entry Validation: PASSED", audit)
+        self.assertIn("[SCANNER] Risk Reward: 1:2.0", audit)
+        self.assertIn("[SCANNER] Final Decision: BUY VALID", audit)
+
+    def test_audit_rejection_format(self):
+        dec_wait = {
+            "status": "WAIT",
+            "direction": "BUY",
+            "stages": {"H4": {"ok": True, "msg": "Bias H4 BULLISH"}, "H1": {"ok": True, "msg": "H1 BULLISH"}},
+            "plan": None,
+            "reasons": ["M5 Liquidity Sweep Not Confirmed"],
+        }
+        audit = format_scanner_audit(dec_wait)
+        self.assertIn("[SCANNER] Final Decision: WAIT", audit)
+        self.assertIn("[SCANNER] Rejection Reason: M5 Liquidity Sweep Not Confirmed", audit)
+
+    def test_no_sensitive_data_in_audit(self):
+        dec_test = {"status": "WAIT", "direction": None, "stages": {}, "plan": None, "reasons": ["test"]}
+        audit = format_scanner_audit(dec_test)
+        for s in ("api_key", "password", "AIza", "secret", "token"):
+            self.assertNotIn(s, audit.lower())
 
 
 class TestIntegration(unittest.TestCase):

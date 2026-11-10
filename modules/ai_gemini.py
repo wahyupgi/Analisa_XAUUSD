@@ -420,11 +420,15 @@ def _validasi_trigger_m5(sig):
         return False, f"Trigger M5 gagal diverifikasi ({type(exc).__name__}); fail-safe WAIT"
 
 def _terapkan_otoritas_scanner(target):
-    """Python Zone Scanner = otoritas mutlak (fail-safe).
+    """Python Zone Scanner = satu-satunya sumber kebenaran teknikal (Single Source of Truth).
 
-    - ZONA_ATAS/ZONA_BAWAH hanya berasal dari scanner; zona AI yang tidak ada di scanner dibuang.
-    - Sinyal AI hanya lolos bila pipeline Python (H4->H1->M30->M5->Risk) berstatus VALID dan searah.
-    - Exception scanner / data kosong / validator gagal => sinyal dibuang (WAIT). Error dicatat lengkap.
+    Aturan Mutlak:
+      1. Zona entry (ZONA_ATAS / ZONA_BAWAH) HANYA berasal dari Python Scanner (best_supply & best_demand).
+      2. Sinyal trading dihasilkan langsung dari evaluasi mandiri Python Scanner:
+         - Jika Python Scanner berstatus VALID (BUY/SELL): sinyal aktif dikunci ke plan Python.
+         - Jika Python Scanner berstatus WAIT atau INVALID: sinyal aktif bernilai None (WAIT).
+      3. AI Gemini DILARANG membuat atau mengganti angka entry, SL, TP, atau zona secara bebas.
+      4. Tidak ada proses lanjutan atau pending order yang boleh sembarangan menimpa keputusan scanner.
     """
     try:
         dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
@@ -439,135 +443,58 @@ def _terapkan_otoritas_scanner(target):
     target["bawah"] = (float(bd["price_low"]), float(bd["price_high"]), float(bd["sl_recommended"])) if bd else None
     target["atas"] = (float(bs["price_low"]), float(bs["price_high"]), float(bs["sl_recommended"])) if bs else None
 
-    sig = target.get("sinyal")
-    if not sig:
-        return target
-    arah = str(sig.get("arah", "")).upper()
-    plan = dec.get("plan") or {}
-    if dec.get("status") != "VALID" or not plan or dec.get("direction") != arah:
-        alasan = "; ".join(dec.get("reasons") or []) or "validasi Python tidak lengkap"
+    status_dec = dec.get("status", "WAIT")
+    plan = dec.get("plan")
+    arah_dec = dec.get("direction")
+
+    # Tolak jika terdapat kandidat sinyal berlawanan arah dengan keputusan teknikal scanner
+    sig_in = target.get("sinyal")
+    if sig_in and isinstance(sig_in, dict) and sig_in.get("arah"):
+        arah_in = str(sig_in["arah"]).upper()
+        if arah_dec and arah_in != arah_dec:
+            target["sinyal"] = None
+            _STATE_PARSER["ditolak"] = [f"Ditolak: Arah usulan ({arah_in}) bertentangan dengan arah Python Scanner ({arah_dec})"]
+            return target
+
+    # Keputusan mandiri Python Scanner:
+    if status_dec == "VALID" and plan and arah_dec:
+        sig_python = dict(
+            arah=str(plan["arah"]).upper(),
+            lo=round(float(plan["entry_min"]), 2),
+            hi=round(float(plan["entry_max"]), 2),
+            lo_asli=round(float(plan["entry_min"]), 2),
+            hi_asli=round(float(plan["entry_max"]), 2),
+            sl=float(plan["sl"]),
+            tp1=float(plan["tp1"]),
+            tp2=float(plan["tp2"]),
+            ket=str(plan.get("keterangan", "Python Scanner Valid"))[:100],
+            tipe_strategi="PYTHON SCANNER VALID",
+        )
+        ok, alasan_v = validasi_sinyal_struktur(sig_python)
+        if ok:
+            target["sinyal"] = sig_python
+            _STATE_PARSER["ditolak"] = []
+        else:
+            target["sinyal"] = None
+            _STATE_PARSER["ditolak"] = ["Rencana Python gagal validasi struktur: " + "; ".join(alasan_v)]
+    else:
+        alasan = "; ".join(dec.get("reasons") or []) or f"status scanner {status_dec}"
         target["sinyal"] = None
-        _STATE_PARSER["ditolak"] = [f"Ditolak Python ({dec.get('status')}, arah scanner {dec.get('direction')}): {alasan}"]
-        return target
-    # Angka dikunci ke hasil validasi Python; AI hanya memberi interpretasi.
-    sig.update(lo=round(plan["entry_min"], 2), hi=round(plan["entry_max"], 2), lo_asli=round(plan["entry_min"], 2),
-               hi_asli=round(plan["entry_max"], 2), sl=plan["sl"], tp1=plan["tp1"], tp2=plan["tp2"],
-               ket=plan["keterangan"][:100])
-    ok, alasan_v = validasi_sinyal_struktur(sig)
-    if not ok:
-        target["sinyal"] = None
-        _STATE_PARSER["ditolak"] = ["Rencana Python gagal validasi struktur: " + "; ".join(alasan_v)]
+        _STATE_PARSER["ditolak"] = [f"Ditolak Python Scanner ({status_dec}, arah {arah_dec}): {alasan}"]
+
     return target
 
 
 def ekstrak_target_ai(teks_ai):
-    """Membaca otomatis zona pantau, batas jebol (breakout/SL), dan TP dari teks jawaban AI,
-    serta memastikan zona radar berada di jarak realistis (intraday) bukan outlier ratusan poin.
-    Sinyal yang melanggar aturan struktur (SL/TP salah sisi, R:R < RR_MIN, dst.) ditolak: alasan di _STATE_PARSER['ditolak']."""
+    """Membaca target dan sinyal dengan Python Zone Scanner sebagai satu-satunya sumber kebenaran teknikal.
+    AI Gemini hanya memberikan narasi dan analisis tambahan, tanpa otoritas mengubah angka teknikal."""
     target = {"atas": None, "bawah": None, "sinyal": None}
     _STATE_PARSER["ditolak"] = []
-    if not teks_ai:
-        return target
-    teks_penuh_asli = teks_ai
-    teks_ai = _normalisasi_radar(teks_ai)
 
-    m_atas = re.search(r"ZONA_ATAS:\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)(?:.*?batas_jebol:\s*(\d+(?:\.\d+)?))?", teks_ai, re.I)
-    if m_atas:
-        a, b = float(m_atas.group(1)), float(m_atas.group(2))
-        jebol = float(m_atas.group(3)) if m_atas.group(3) else max(a, b) + 3.0
-        if a > 0 and b > 0:
-            target["atas"] = (min(a, b), max(a, b), jebol)
-
-    m_bawah = re.search(r"ZONA_BAWAH:\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)(?:.*?batas_jebol:\s*(\d+(?:\.\d+)?))?", teks_ai, re.I)
-    if m_bawah:
-        a, b = float(m_bawah.group(1)), float(m_bawah.group(2))
-        jebol = float(m_bawah.group(3)) if m_bawah.group(3) else min(a, b) - 3.0
-        if a > 0 and b > 0:
-            target["bawah"] = (min(a, b), max(a, b), jebol)
-
-    m_sig = re.search(
-        r"SINYAL_AKTIF:\s*(BUY|SELL)\s*\|\s*ENTRY:\s*(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?\s*\|\s*SL:\s*(\d+(?:\.\d+)?)\s*\|\s*TP1:\s*(\d+(?:\.\d+)?)(?:\s*\|\s*TP2:\s*(\d+(?:\.\d+)?))?",
-        teks_ai, re.I
-    )
-    if m_sig:
-        arah = m_sig.group(1).upper()
-        e1 = float(m_sig.group(2))
-        e2 = float(m_sig.group(3)) if m_sig.group(3) else e1
-        sl = float(m_sig.group(4))
-        tp1 = float(m_sig.group(5))
-        tp2 = float(m_sig.group(6)) if m_sig.group(6) else tp1
-        if e1 > 0 and sl > 0:
-            sig = dict(arah=arah, lo=round(min(e1, e2), 2), hi=round(max(e1, e2), 2), sl=sl, tp1=tp1, tp2=tp2,
-                       lo_asli=round(min(e1, e2), 2), hi_asli=round(max(e1, e2), 2))
-            ok, alasan = validasi_sinyal_struktur(sig)
-            if ok:
-                ok_m5, alasan_m5 = _validasi_trigger_m5(sig)
-                if ok_m5:
-                    target["sinyal"] = sig
-                else:
-                    _STATE_PARSER["ditolak"] = [alasan_m5]
-            else:
-                _STATE_PARSER["ditolak"] = alasan
-
-    # Fallback: jika AI menulis setup lengkap di narasi (misal saat Q&A) namun lupa menulis [RADAR_TARGET]
-    if target["sinyal"] is None and not re.search(r"SINYAL_AKTIF:\s*WAIT", teks_ai, re.I):
-        sig_narasi = _ekstrak_sinyal_dari_narasi(teks_penuh_asli)
-        if sig_narasi:
-            ok_n, alasan_n = validasi_sinyal_struktur(sig_narasi)
-            if ok_n:
-                ok_m5, alasan_m5 = _validasi_trigger_m5(sig_narasi)
-                if ok_m5:
-                    target["sinyal"] = sig_narasi
-                    _STATE_PARSER["ditolak"] = []
-                else:
-                    _STATE_PARSER["ditolak"] = [alasan_m5]
-            elif not _STATE_PARSER["ditolak"]:
-                _STATE_PARSER["ditolak"] = alasan_n
-
-    # 🛡️ VALIDASI MUTLAK DENGAN PYTHON ZONE SCANNER:
-    # Python Zone Scanner adalah sumber utama dan otoritas mutlak penentu zona.
-    # AI Gemini DILARANG menambahkan zona baru di luar hasil scanner.
-    # Jika scanner tidak menemukan zona valid, sistem menghasilkan WAIT.
+    # 🛡️ OTORITAS MUTLAK PYTHON SCANNER:
+    # Mengambil zona dan keputusan entry mandiri dari Python
     _terapkan_otoritas_scanner(target)
-
-    # 🛡️ FILTER ANTI-HALUSINASI ZONA JAUH:
-    # Jika AI memberikan zona yang terlalu jauh (> 35 poin dari harga real-time MT5),
-    # cari otomatis zona intraday nyata terdekat dari MT5 agar radar pantau tidak sia-sia!
-    if pastikan_mt5_aktif():
-        tick_cek = mt5.symbol_info_tick(SYMBOL)
-        if tick_cek and tick_cek.bid > 0:
-            h_bid = tick_cek.bid
-            df_m5_temp = ambil_data(mt5.TIMEFRAME_M5, 30)
-            atr_m5_temp = 2.0
-            if df_m5_temp is not None and len(df_m5_temp) >= 15:
-                atr_m5_temp = float(tambah_indikator(df_m5_temp.copy())["ATR14"].iloc[-1])
-
-            if target["bawah"]:
-                jarak_bawah = h_bid - target["bawah"][1]
-                if jarak_bawah > 35.0 or target["bawah"][1] > h_bid:
-                    u_b, _ = _cari_zona_valid_berikutnya_mt5("BUY", h_bid, h_bid, atr_m5_temp)
-                    if u_b:
-                        target["bawah"] = (u_b["lo"], u_b["hi"], u_b["jebol"])
-
-            if target["atas"]:
-                jarak_atas = target["atas"][0] - h_bid
-                if jarak_atas > 35.0 or target["atas"][0] < h_bid:
-                    u_a, _ = _cari_zona_valid_berikutnya_mt5("SELL", h_bid, h_bid, atr_m5_temp)
-                    if u_a:
-                        target["atas"] = (u_a["lo"], u_a["hi"], u_a["jebol"])
-
-            # Pending order user di MT5 diprioritaskan sebagai zona pantau
-            orders_live_chk = mt5.orders_get(symbol=SYMBOL) or ()
-            for o in orders_live_chk:
-                p_ord = o.price_open
-                if o.type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP):
-                    if target["bawah"] is None or abs(h_bid - target["bawah"][1]) > 25.0:
-                        sl_o = o.sl if o.sl > 0 else (p_ord - max(3.0, 1.5 * atr_m5_temp))
-                        target["bawah"] = (round(p_ord - 1.5, 2), round(p_ord + 1.5, 2), round(sl_o, 2))
-                elif o.type in (mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP):
-                    if target["atas"] is None or abs(target["atas"][0] - h_bid) > 25.0:
-                        sl_o = o.sl if o.sl > 0 else (p_ord + max(3.0, 1.5 * atr_m5_temp))
-                        target["atas"] = (round(p_ord - 1.5, 2), round(p_ord + 1.5, 2), round(sl_o, 2))
+    return target
 
     return target
 
@@ -682,10 +609,12 @@ def snapshot_live_qa():
         )
 
     _bias_qa = bias_htf_cached()
+    _detail_qa = _bias_qa.get("detail", {}) if isinstance(_bias_qa, dict) else {}
+    _detail_txt = " | ".join(str(_detail_qa.get(k, "-")) for k in ("D1", "H4", "H1"))
     return (
         f"\n[UPDATE DATA LIVE MT5 DETIK INI SAAT TRADER BERTANYA]:\n"
         f"- Harga Sekarang: Bid {harga:.2f} / Ask {tick.ask if tick else harga:.2f} (Spread {spread:.2f}) | Volatilitas ATR14 M5: {atr5[-1]:.2f} pt\n"
-        f"- {teks_bias_htf(_bias_qa)} | Detail: {' | '.join(_bias_qa['detail'].get(k, '-') for k in ('D1', 'H4', 'H1'))}\n"
+        f"- {teks_bias_htf(_bias_qa)} | Detail: {_detail_txt}\n"
         f"{htf_running_txt}"
         f"{sig_live_txt}"
         f"{zona_mt5_qa_txt}"

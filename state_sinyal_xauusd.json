@@ -1,36 +1,28 @@
 {
-  "waktu_simpan": "2026-11-10 06:13:16",
-  "sinyal": {
-    "arah": "SELL",
-    "lo": 4139.81,
-    "hi": 4146.28,
-    "sl": 4150.33,
-    "tp1": 4132.4,
-    "tp2": 4124.71,
-    "ket": "Re-Entry 2nd Chance Pasca Stop-Hunt",
-    "t_buat": 1794265996,
-    "harga_buat": 4143.923
-  },
+  "waktu_simpan": "2026-11-10 16:13:40",
+  "sinyal": null,
   "sinyal_sebelumnya": {
-    "arah": "SELL",
-    "lo": 4135.09,
-    "hi": 4138.9,
-    "sl": 4146.25,
-    "tp1": 4117.23,
-    "tp2": 4104.79,
-    "ket": "Re-Entry 2nd Chance Pasca Stop-Hunt",
-    "t_buat": 1794265500,
-    "harga_buat": 4135.888
+    "arah": "BUY",
+    "lo": 4114.16,
+    "hi": 4117.36,
+    "sl": 4109.54,
+    "tp1": 4129.87,
+    "tp2": 4140.82,
+    "ket": "Terkonfirmasi Reaksi Zona Demand Bawah (Trigger M5 Valid)",
+    "risiko": "MEDIUM RISK",
+    "t_buat": 1794294910,
+    "harga_buat": 4118.109,
+    "spread_buat": 0.24
   },
   "atas": [
-    4145.76,
-    4148.96,
-    4154.75
+    4116.88,
+    4121.31,
+    4123.5
   ],
   "bawah": [
-    4095.54,
-    4098.74,
-    4091.12
+    4072.66,
+    4074.5,
+    4066.5
   ],
-  "catatan": "Stop-Hunt Recovery Posisi SELL #31095347 (SL digeser ke atas wick sweep 4146.63)"
+  "catatan": "Startup Awal"
 }

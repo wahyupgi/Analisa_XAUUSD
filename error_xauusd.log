@@ -16,3 +16,269 @@ Traceback (most recent call last):
     raise HTTPError(req.full_url, code, msg, hdrs, fp)
 urllib.error.HTTPError: HTTP Error 429: Too Many Requests
 
+[2026-11-10 15:30:00] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:01] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:02] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:03] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:04] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:05] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:06] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:07] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:08] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:09] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:10] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:11] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:12] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 15:30:13] mode_pantau: KeyError('data')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\pantau.py", line 492, in mode_pantau_mt5
+    _bias_bar = bias_htf_cached()
+                ^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_teknikal.py", line 961, in bias_htf_cached
+    if _CACHE_BIAS["data"] is None or (time.time() - _CACHE_BIAS["ts"]) > ttl:
+       ~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+
+[2026-11-10 16:43:46] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 430, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 465, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-10 16:43:47] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 894, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 956, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 406, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-10 16:44:38] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 430, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 465, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-10 16:44:38] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 894, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 956, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 406, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-10 16:44:51] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 430, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 464, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-10 16:44:51] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 894, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 956, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 405, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-10 16:45:18] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 430, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 464, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-10 16:45:18] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 895, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 957, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 405, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-10 16:45:35] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 430, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 467, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-10 16:45:35] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 895, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 957, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 408, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-10 16:46:40] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 430, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 467, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-10 16:46:41] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 895, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 957, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 408, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+

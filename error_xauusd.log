@@ -354,3 +354,39 @@ Traceback (most recent call last):
     raise RuntimeError("scanner rusak")
 RuntimeError: scanner rusak
 
+[2026-11-11 06:08:58] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\modules\ai_gemini.py", line 434, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-11 06:08:59] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\modules\zone_scanner.py", line 991, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\modules\zone_scanner.py", line 1053, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-11 06:10:13] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\modules\ai_gemini.py", line 434, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-11 06:10:14] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\modules\zone_scanner.py", line 991, in evaluate_trade_decision
+    return _decide(dec, frames, current_price, spread, news_blackout, server_time, live)
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\modules\zone_scanner.py", line 1053, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price)
+  File "C:\Users\HP Elitebook\OneDrive\Dokumen\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+

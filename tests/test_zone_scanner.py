@@ -718,6 +718,30 @@ class TestIntegration(unittest.TestCase):
                   "state_manager", "zone_scanner", "ai_gemini", "pantau"):
             importlib.import_module(f"modules.{m}")
 
+    def test_snapshot_live_qa_clean_instructions(self):
+        from modules.ai_gemini import snapshot_live_qa
+        snap = snapshot_live_qa()
+        # Memastikan tidak ada instruksi paksaan membuat sinyal baru di snapshot QA
+        self.assertNotIn("WAJIB BERIKAN SETUP BARU", snap)
+        self.assertNotIn("WAJIB PAKAI INI JIKA MEMBUAT SETUP BARU", snap)
+
+    def test_qa_mode_keyword_detection(self):
+        kata_kunci_sinyal = (
+            "sinyal baru", "setup baru", "ganti sinyal", "reset sinyal",
+            "buatkan sinyal", "minta sinyal", "minta setup", "rekomendasi sinyal",
+            "cari sinyal baru", "cari setup baru", "buat sinyal baru"
+        )
+        # Pertanyaan umum teknikal / zona TIDAK boleh dianggap meminta sinyal baru
+        self.assertFalse(any(k in "berarti ini tidak ada zona buy yang valid ya".lower() for k in kata_kunci_sinyal))
+        self.assertFalse(any(k in "zona 4021.500 - 4019 masih valid ga dan ada apa disitu".lower() for k in kata_kunci_sinyal))
+        self.assertFalse(any(k in "di area 4026-4027 ada apa disitu".lower() for k in kata_kunci_sinyal))
+        self.assertFalse(any(k in "harga sekarang mau ke mana ya".lower() for k in kata_kunci_sinyal))
+
+        # Permintaan eksplisit sinyal baru harus terdeteksi
+        self.assertTrue(any(k in "minta sinyal baru dong".lower() for k in kata_kunci_sinyal))
+        self.assertTrue(any(k in "buatkan sinyal buy atau sell".lower() for k in kata_kunci_sinyal))
+        self.assertTrue(any(k in "minta setup untuk london session".lower() for k in kata_kunci_sinyal))
+
 
 if __name__ == "__main__":
     unittest.main()

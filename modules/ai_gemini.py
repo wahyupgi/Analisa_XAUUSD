@@ -567,7 +567,7 @@ def snapshot_live_qa():
     # agar di mode Q&A AI TIDAK PERNAH mengarang/menebak angka zona sendiri!
     z_buy_qa, z_buy_cad = _cari_zona_valid_berikutnya_mt5("BUY", harga, harga, float(atr5[-1]))
     z_sell_qa, z_sell_cad = _cari_zona_valid_berikutnya_mt5("SELL", harga, harga, float(atr5[-1]))
-    zona_mt5_qa_txt = "- [ZONA INSTITUSIONAL VALID TERDEKAT DARI DATA MT5 REAL-TIME (WAJIB PAKAI INI JIKA MEMBUAT SETUP BARU)]:\n"
+    zona_mt5_qa_txt = "- [REFERENSI ZONA TEKNIKAL DARI DATA MT5 REAL-TIME]:\n"
     if z_buy_qa:
         zona_mt5_qa_txt += (
             f"  * KANDIDAT BUY LIMIT UTAMA (DEMAND BAWAH TERDEKAT): ENTRY {z_buy_qa['lo']:.2f}-{z_buy_qa['hi']:.2f} | "
@@ -601,12 +601,22 @@ def snapshot_live_qa():
         sd = SINYAL_AKTIF_DINAMIS
         st_sd, al_sd = evaluasi_validitas_sinyal(sd, harga)
         lbl_eks_sd, _, info_eks_sd = cek_status_eksekusi_sinyal(sd)
-        kunci_sd = "TERKUNCI AKTIF — DILARANG UBAH ANGKA ENTRY/SL/TP!" if sinyal_masih_aktif(st_sd) else "SUDAH SELESAI/BATAL — WAJIB BERIKAN SETUP BARU DARI ZONA MT5 DI ATAS!"
+        kunci_sd = "TERKUNCI AKTIF — DILARANG UBAH ANGKA ENTRY/SL/TP!" if sinyal_masih_aktif(st_sd) else "BELUM ADA SINYAL AKTIF / SELESAI (Status Pasar: WAIT)"
         sig_live_txt = (
             f"- 🔒 SINYAL UTAMA SAAT INI [{kunci_sd}]: "
             f"{sd['arah']} | ENTRY: {sd['lo']:.2f}-{sd['hi']:.2f} | SL: {sd['sl']:.2f} | TP1: {sd['tp1']:.2f} | TP2: {sd.get('tp2', sd['tp1']):.2f} "
             f"-> Status Real-Time: [{st_sd}] ({al_sd}) | Status di Akun MT5: [{lbl_eks_sd}] ({info_eks_sd})\n"
         )
+
+    scan_qa_txt = ""
+    try:
+        from modules.zone_scanner import scan_xauusd_zones
+        scan_qa = scan_xauusd_zones()
+        dec_qa = scan_qa.get("decision", {})
+        reasons_qa = "; ".join(dec_qa.get("reasons", [])) or "tidak ada alasan"
+        scan_qa_txt = f"- Status Python Zone Scanner: [{dec_qa.get('status', 'WAIT')}] | Bias: {scan_qa.get('bias', '-')} | Catatan: {reasons_qa}\n"
+    except Exception:
+        pass
 
     _bias_qa = bias_htf_cached()
     _detail_qa = _bias_qa.get("detail", {}) if isinstance(_bias_qa, dict) else {}
@@ -615,6 +625,7 @@ def snapshot_live_qa():
         f"\n[UPDATE DATA LIVE MT5 DETIK INI SAAT TRADER BERTANYA]:\n"
         f"- Harga Sekarang: Bid {harga:.2f} / Ask {tick.ask if tick else harga:.2f} (Spread {spread:.2f}) | Volatilitas ATR14 M5: {atr5[-1]:.2f} pt\n"
         f"- {teks_bias_htf(_bias_qa)} | Detail: {_detail_txt}\n"
+        f"{scan_qa_txt}"
         f"{htf_running_txt}"
         f"{sig_live_txt}"
         f"{zona_mt5_qa_txt}"

@@ -447,6 +447,18 @@ def main():
                 print("\nGagal memperbarui analisa (server padat). Coba lagi sebentar.")
             continue
 
+        tanya_lower = tanya.lower()
+        kata_kunci_sinyal = (
+            "sinyal baru", "setup baru", "ganti sinyal", "reset sinyal",
+            "buatkan sinyal", "minta sinyal", "minta setup", "rekomendasi sinyal",
+            "cari sinyal baru", "cari setup baru", "buat sinyal baru"
+        )
+        minta_baru = any(k in tanya_lower for k in kata_kunci_sinyal)
+        tanya_posisi = any(k in tanya_lower for k in (
+            "posisi", "floating", "order", "pending", "tiket", "ticket",
+            "lot", "akun", "saldo", "balance", "equity", "bep"
+        ))
+
         live_snap = snapshot_live_qa()
         teks_kunci_qa = ""
         if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict):
@@ -455,83 +467,92 @@ def main():
             bid_q0 = tick_q0.bid if tick_q0 else 0.0
             st_q0, al_q0 = evaluasi_validitas_sinyal(sd_q, bid_q0)
             if sinyal_masih_aktif(st_q0):
-                zona_kunci_str = (
-                    f"ZONA_BAWAH: {sd_q['lo']:.2f}-{sd_q['hi']:.2f} (batas_jebol: {sd_q['sl']:.2f})"
-                    if sd_q["arah"] == "BUY"
-                    else f"ZONA_ATAS: {sd_q['lo']:.2f}-{sd_q['hi']:.2f} (batas_jebol: {sd_q['sl']:.2f})"
-                )
                 teks_kunci_qa = (
-                    f"\n🔒 [ATURAN KERAS ANTI-PLIN-PLAN — SINYAL SEDANG TERKUNCI AKTIF]:\n"
-                    f"- Sinyal Utama Saat Ini: {sd_q['arah']} | ENTRY: {sd_q['lo']:.2f}-{sd_q['hi']:.2f} | SL: {sd_q['sl']:.2f} | TP1: {sd_q['tp1']:.2f} | TP2: {sd_q.get('tp2', sd_q['tp1']):.2f}\n"
-                    f"- Status Validitas Algoritmik: [{st_q0}] -> {al_q0}\n"
-                    f"- LARANGAN MUTLAK: Karena sinyal di atas MASIH VALID (SL {sd_q['sl']:.2f} belum jebol), Anda DILARANG KERAS mengubah, menggeser, atau mengganti angka Area Entry ({sd_q['lo']:.2f}-{sd_q['hi']:.2f}), SL ({sd_q['sl']:.2f}), maupun TP! Jangan membuat angka zona baru yang berbeda (misal menggeser entry beberapa poin ke bawah/atas) karena itu membuat trader ragu dan terlihat plin-plan!\n"
-                    f"- Jika Anda menyertakan blok [RADAR_TARGET] atau menyebut ulang sinyal, Anda WAJIB menggunakan angka yang SAMA PERSIS 100%:\n"
-                    f"  {zona_kunci_str}\n"
-                    f"  SINYAL_AKTIF: {sd_q['arah']} | ENTRY: {sd_q['lo']:.2f}-{sd_q['hi']:.2f} | SL: {sd_q['sl']:.2f} | TP1: {sd_q['tp1']:.2f} | TP2: {sd_q.get('tp2', sd_q['tp1']):.2f}\n"
-                    f"- Fokus jawaban Anda adalah menjelaskan kondisi harga terkini terhadap Area Entry {sd_q['lo']:.2f}-{sd_q['hi']:.2f} dan SL {sd_q['sl']:.2f} tersebut!\n"
+                    f"\n[STATUS SINYAL AKTIF TERKUNCI]:\n"
+                    f"- Sinyal Saat Ini: {sd_q['arah']} @ {sd_q['lo']:.2f}-{sd_q['hi']:.2f} | SL {sd_q['sl']:.2f} | TP1 {sd_q['tp1']:.2f} | TP2 {sd_q.get('tp2', sd_q['tp1']):.2f}\n"
+                    f"- Status Validitas: [{st_q0}] -> {al_q0}\n"
+                    f"- Jaga konsistensi: jangan menggeser/mengganti angka sinyal aktif ini kecuali trader meminta 'ganti sinyal' / 'sinyal baru'.\n"
                 )
 
-        instruksi_qa = (
-            f"Pertanyaan trader: {tanya}\n"
-            f"{live_snap}"
-            f"{teks_kunci_qa}\n"
-            "🛡️ INSTRUKSI JAWABAN (PROTOKOL ANTI-HALUSINASI, AKURASI TINGGI & KONSISTENSI MUTLAK):\n"
-            "1. FAKTA MUTLAK MT5: Gunakan HANYA angka dari [UPDATE DATA LIVE MT5 DETIK INI] di atas (Harga Bid/Ask, Posisi Terbuka & Tiket, Pending Order, Mata Uang Akun misal IDC/USC/USD, Balance/Equity, dan Zona Institusional MT5 Terdekat). DILARANG KERAS mengarang angka zona, mengarang saldo/lot, atau menyebut posisi BEP+ masih berisiko SL!\n"
-            "2. AUDIT POSISI & PENDING ORDER: Jika trader bertanya tentang posisi atau akunnya, sebutkan Nomor Tiket (#...), arah, lot, harga open, SL (dan apakah SL sudah dikunci BEP+ bebas risiko), serta floating profit dalam mata uang akun yang sebenarnya.\n"
-            "3. KONSISTENSI ANGKA 100% (DILARANG PLIN-PLAN): Jika sudah ada Sinyal Utama Terkunci yang MASIH VALID di atas, PERTAHANKAN angka Entry, SL, dan TP tersebut tanpa diubah sepeser pun (kecuali trader secara eksplisit meminta 'ganti sinyal baru' / 'reset sinyal').\n"
-            "4. JIKA MEMBUAT SETUP BARU (karena belum ada sinyal aktif / sinyal lama SUDAH BATAL / selesai): WAJIB ambil angka Entry, SL, TP1, dan TP2 dari [ZONA INSTITUSIONAL VALID TERDEKAT DARI DATA MT5 REAL-TIME] di atas agar 100% berdasar struktur asli MT5 (bukan tebakan), dan WAJIB sertakan blok [RADAR_TARGET] di bagian paling bawah jawaban!\n"
-            "5. Pastikan angka ZONA_BAWAH (untuk BUY) atau ZONA_ATAS (untuk SELL) di [RADAR_TARGET] SAMA PERSIS dengan angka ENTRY sinyal agar tidak ada dua versi harga yang membingungkan trader!\n"
-            "6. Jawab singkat, tajam, konsisten, dan selalu sebutkan level/waktu candle spesifik dari data."
-        )
-        # Jaga ukuran riwayat chat tetap ramping (konteks data utama + maks 6 pesan tanya jawab terakhir) agar respon secepat kilat
-        if len(riwayat_chat) > 8:
-            riwayat_chat = riwayat_chat[:2] + riwayat_chat[-6:]
-        # Riwayat hanya menyimpan pertanyaan polos; instruksi + snapshot live HANYA dikirim untuk giliran ini
-        # (agar AI tidak bercampur dengan snapshot lama & token tidak membengkak).
-        konten_qa = riwayat_chat + [{"role": "user", "parts": [{"text": instruksi_qa}]}]
+        if minta_baru:
+            instruksi_qa = (
+                f"Pertanyaan trader: \"{tanya}\"\n\n"
+                f"{live_snap}\n"
+                f"{teks_kunci_qa}\n"
+                "🛡️ INSTRUKSI JAWABAN (PERMINTAAN SETUP / SINYAL BARU):\n"
+                "1. Trader secara eksplisit meminta setup/sinyal baru.\n"
+                "2. Periksa status Python Zone Scanner & konfirmasi multi-timeframe di atas. JIKA status pasar WAIT atau terdapat konflik tren HTF (misal H4 Bullish vs H1 Bearish): JELASKAN secara singkat, tegas, dan padat bahwa belum ada sinyal valid, pasar dalam fase WAIT, dan sebutkan zona mana yang paling logis untuk ditunggu. DILARANG memaksakan sinyal entry jika syarat belum terpenuhi!\n"
+                "3. JIKA dan HANYA JIKA ada setup yang lolos validasi penuh: tuliskan rencana setup secara ringkas dan WAJIB sertakan blok [RADAR_TARGET] di baris paling akhir jawaban.\n"
+                "4. Jawab langsung to the point tanpa basa-basi dan tanpa template A/B/C."
+            )
+        else:
+            instruksi_qa = (
+                f"Pertanyaan trader: \"{tanya}\"\n\n"
+                f"{live_snap}\n"
+                f"{teks_kunci_qa}\n"
+                "🛡️ INSTRUKSI JAWABAN (MODE TANYA JAWAB CEPAT & TO THE POINT):\n"
+                "1. JAWAB LANGSUNG KE INTI PERTANYAAN (MAKSIMAL 1-3 PARAGRAF RINGKAS, PADAT, DAN JELAS).\n"
+                "2. DILARANG KERAS MENGGUNAKAN FORMAT TEMPLATE: DILARANG membuat bagian A, B, C; DILARANG menulis header '### A. Status Order Flow...', '### B...', dsb.\n"
+                "3. DILARANG MEMBUAT BOX [SINYAL ...] DAN DILARANG MENYERTAKAN BLOK [RADAR_TARGET]! Trader HANYA bertanya biasa seputar market/zona/kondisi teknikal, BUKAN meminta sinyal baru.\n"
+                f"{'4. Jelaskan status posisi/order/akun trader secara spesifik sesuai pertanyaannya.' if tanya_posisi else '4. DILARANG mengulang audit pending order atau saldo akun karena trader tidak bertanya tentang akun/posisi.'}\n"
+                "5. Jika trader menanyakan zona teknikal tertentu (misal: 'zona X masih valid ga dan ada apa disitu' atau 'apakah ada zona buy yang valid'):\n"
+                "   - Jelaskan langsung apa yang ada di area harga tersebut (misal: FVG H1, Order Block, Swing High/Low, Liquidity Pool, dsb. dari data MT5 di atas).\n"
+                "   - Jelaskan apakah zona itu valid atau tidak berdasar bias HTF dan struktur terkini.\n"
+                "   - Berikan arahan singkat: apakah layak ditunggu atau sebaiknya WAIT.\n"
+                "6. Gunakan gaya bahasa profesional, lugas, santai namun presisi seperti rekan trader ahli (tanpa basa-basi)."
+            )
+
+        # Untuk sesi Tanya Jawab, gunakan hanya percakapan Q&A terakhir (tanpa prompt startup yang membawa template A/B/C)
+        percakapan_qa = [m for m in riwayat_chat[2:]] if len(riwayat_chat) > 2 else []
+        if len(percakapan_qa) > 6:
+            percakapan_qa = percakapan_qa[-6:]
+        konten_qa = percakapan_qa + [{"role": "user", "parts": [{"text": instruksi_qa}]}]
 
         print("   Menghubungi server AI...", end="\r")
         jawaban_qa, mdl = panggil_gemini(client, konten_qa, stream_output=True)
         if jawaban_qa:
-            _tgt_qa = ekstrak_target_ai(jawaban_qa)
-            _cand_qa = _tgt_qa.get("sinyal")
-            if _cand_qa and mdl:
-                _cand_qa["model"] = mdl
-            sig_qa = terapkan_gerbang(_cand_qa)
-            if sig_qa and mdl:
-                sig_qa["model"] = mdl
-            tanya_lower = tanya.lower()
-            minta_baru = any(k in tanya_lower for k in ("sinyal baru", "setup baru", "ganti sinyal", "reset sinyal", "refresh"))
-            izinkan_balik = any(k in tanya_lower for k in ("balik arah", "reversal", "ganti sell", "ganti buy", "switch"))
-            tick_q = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
-            bid_q = tick_q.bid if tick_q else 0.0
-            st_q_curr = "UNKNOWN"
-            if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict) and bid_q > 0:
-                st_q_curr, _ = evaluasi_validitas_sinyal(SINYAL_AKTIF_DINAMIS, bid_q)
+            if minta_baru:
+                _tgt_qa = ekstrak_target_ai(jawaban_qa)
+                _cand_qa = _tgt_qa.get("sinyal")
+                if _cand_qa and mdl:
+                    _cand_qa["model"] = mdl
+                sig_qa = terapkan_gerbang(_cand_qa)
+                if sig_qa and mdl:
+                    sig_qa["model"] = mdl
+                izinkan_balik = any(k in tanya_lower for k in ("balik arah", "reversal", "ganti sell", "ganti buy", "switch"))
+                tick_q = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
+                bid_q = tick_q.bid if tick_q else 0.0
+                st_q_curr = "UNKNOWN"
+                if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict) and bid_q > 0:
+                    st_q_curr, _ = evaluasi_validitas_sinyal(SINYAL_AKTIF_DINAMIS, bid_q)
 
-            if sig_qa:
-                # 🔒 SIGNAL & DIRECTIONAL LOCK via helper terpusat (konteks QA)
-                sig_pilih, sig_rw, logs_lock, diubah = putuskan_sinyal_terkunci(
-                    sig_qa,
-                    SINYAL_AKTIF_DINAMIS,
-                    status_aktif=st_q_curr,
-                    paksa_ganti=minta_baru,
-                    izinkan_balik_arah=izinkan_balik,
-                    konteks="QA",
-                )
-                for p in logs_lock:
-                    print(p)
-                if sig_rw:
-                    SINYAL_SEBELUMNYA_DINAMIS = sig_rw
-                if diubah:
-                    SINYAL_AKTIF_DINAMIS = sig_pilih
-                    if SINYAL_AKTIF_DINAMIS["arah"] == "BUY":
-                        ZONA_BAWAH_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
-                        ZONA_ATAS_DINAMIS = _tgt_qa.get("atas") or ZONA_ATAS_DINAMIS
-                    else:
-                        ZONA_ATAS_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
-                        ZONA_BAWAH_DINAMIS = _tgt_qa.get("bawah") or ZONA_BAWAH_DINAMIS
-                    simpan_state_sinyal(SINYAL_AKTIF_DINAMIS, SINYAL_SEBELUMNYA_DINAMIS, ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, catatan=f"Update QA: {tanya[:30]}")
+                if sig_qa:
+                    # 🔒 SIGNAL & DIRECTIONAL LOCK via helper terpusat (konteks QA)
+                    sig_pilih, sig_rw, logs_lock, diubah = putuskan_sinyal_terkunci(
+                        sig_qa,
+                        SINYAL_AKTIF_DINAMIS,
+                        status_aktif=st_q_curr,
+                        paksa_ganti=minta_baru,
+                        izinkan_balik_arah=izinkan_balik,
+                        konteks="QA",
+                    )
+                    for p in logs_lock:
+                        print(p)
+                    if sig_rw:
+                        SINYAL_SEBELUMNYA_DINAMIS = sig_rw
+                    if diubah:
+                        SINYAL_AKTIF_DINAMIS = sig_pilih
+                        if SINYAL_AKTIF_DINAMIS["arah"] == "BUY":
+                            ZONA_BAWAH_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
+                            ZONA_ATAS_DINAMIS = _tgt_qa.get("atas") or ZONA_ATAS_DINAMIS
+                        else:
+                            ZONA_ATAS_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
+                            ZONA_BAWAH_DINAMIS = _tgt_qa.get("bawah") or ZONA_BAWAH_DINAMIS
+                        simpan_state_sinyal(SINYAL_AKTIF_DINAMIS, SINYAL_SEBELUMNYA_DINAMIS, ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, catatan=f"Update QA: {tanya[:30]}")
+            else:
+                # Tanya jawab biasa: bersihkan status penolakan parser agar tidak bocor ke giliran berikutnya
+                _STATE_PARSER["ditolak"] = []
+
             riwayat_chat.append({"role": "user", "parts": [{"text": f"Pertanyaan trader: {tanya}"}]})
             riwayat_chat.append({"role": "model", "parts": [{"text": jawaban_qa}]})
         else:

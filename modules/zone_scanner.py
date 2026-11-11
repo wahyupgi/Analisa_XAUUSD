@@ -502,34 +502,82 @@ def merge_overlapping_zones(zones: List[Zone]) -> List[Zone]:
 
 
 # =============================================================================
-# KONTEKS MULTI-TIMEFRAME
+# KONTEKS MULTI-TIMEFRAME & MARKET REGIME
 # =============================================================================
+def detect_market_regime(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """
+    Identifikasi kondisi pasar (Trending, Ranging, Choppy):
+      - TRENDING_BULLISH: Struktur BOS/trend Bullish + EMA bullish (Close > EMA20 > EMA50)
+      - TRENDING_BEARISH: Struktur BOS/trend Bearish + EMA bearish (Close < EMA20 < EMA50)
+      - RANGING: Osilasi horizontal dalam rentang sempit (lebar rentang <= 2.6 ATR)
+      - CHOPPY: Bolak-balik break tanpa arah jelas (whipsaw / swing berdekatan)
+      - UNKNOWN: Data tidak cukup
+    """
+    if df is None or len(df) < 2 * SWING_N + 20:
+        return {"regime": "UNKNOWN", "bias": "NO_DATA", "detail": "Data tidak cukup"}
+
+    d = df if "EMA20" in df.columns else tambah_indikator(df.copy())
+    events, trend, swings = detect_market_structure(d)
+    last = d.iloc[-1]
+
+    # 1. Deteksi Choppy: dalam 15 candle terakhir terdapat >= 2 event BOS/CHoCH bolak-balik berlawanan arah
+    recent_events = [e for e in events if len(d) - 1 - e["k"] <= 15]
+    if len(recent_events) >= 2:
+        arahs = [e["arah"] for e in recent_events]
+        if "bull" in arahs and "bear" in arahs:
+            return {"regime": "CHOPPY", "bias": "NETRAL", "detail": "Whipsaw: bolak-balik BOS/CHoCH berlawanan dalam 15 candle"}
+
+    # 2. Deteksi Ranging: 20 candle terakhir bergerak dalam rentang horizontal sempit <= 2.6 ATR
+    look = min(20, len(d))
+    high_range = float(d["High"].iloc[-look:].max())
+    low_range = float(d["Low"].iloc[-look:].min())
+    atr_val = float(d["ATR14"].iloc[-1]) if "ATR14" in d.columns else 2.0
+    if (high_range - low_range) <= 2.6 * atr_val and abs(float(last["EMA20"]) - float(last["EMA50"])) < 0.4 * atr_val:
+        return {"regime": "RANGING", "bias": "NETRAL", "detail": f"Konsolidasi horisontal {low_range:.2f}-{high_range:.2f} (lebar {high_range-low_range:.2f} pt)"}
+
+    # 3. Trending
+    ema_bull = last["EMA20"] > last["EMA50"] and last["Close"] > last["EMA20"]
+    ema_bear = last["EMA20"] < last["EMA50"] and last["Close"] < last["EMA20"]
+
+    if ema_bull:
+        return {"regime": "TRENDING_BULLISH", "bias": "BULLISH", "detail": "EMA/Struktur tren bullish"}
+    elif ema_bear:
+        return {"regime": "TRENDING_BEARISH", "bias": "BEARISH", "detail": "EMA/Struktur tren bearish"}
+    elif trend == 1:
+        return {"regime": "TRENDING_BULLISH", "bias": "BULLISH", "detail": "Struktur BOS bullish (EMA fase transisi)"}
+    elif trend == -1:
+        return {"regime": "TRENDING_BEARISH", "bias": "BEARISH", "detail": "Struktur BOS bearish (EMA fase transisi)"}
+
+    return {"regime": "RANGING", "bias": "NETRAL", "detail": "Tidak ada struktur tren yang dominan"}
+
+
 def _tf_label(df: Optional[pd.DataFrame]) -> str:
     """BULLISH / BEARISH / NETRAL / NO_DATA: struktur (BOS/CHoCH close) + filter EMA; harus searah, bukan sekadar salah satu."""
-    if df is None or len(df) < 2 * SWING_N + 20:
-        return "NO_DATA"
-    d = df if "EMA20" in df.columns else tambah_indikator(df.copy())
-    _, trend, _ = detect_market_structure(d)
-    last = d.iloc[-1]
-    ema = 1 if (last["EMA20"] > last["EMA50"] and last["Close"] > last["EMA20"]) else (
-        -1 if (last["EMA20"] < last["EMA50"] and last["Close"] < last["EMA20"]) else 0)
-    s = trend + ema
-    return "BULLISH" if s >= 1 else "BEARISH" if s <= -1 else "NETRAL"
+    reg = detect_market_regime(df)
+    return reg.get("bias", "NETRAL")
 
 
 def evaluate_htf_context(frames: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
     """D1 (konteks), H4 (bias utama), H1 (konfirmasi), M30 (validasi). Konflik H4 vs H1 => WAIT."""
-    r = {tf: _tf_label(frames.get(tf)) for tf in ("D1", "H4", "H1", "M30")}
+    regimes = {tf: detect_market_regime(frames.get(tf)) for tf in ("D1", "H4", "H1", "M30")}
+    r = {tf: regimes[tf]["bias"] for tf in ("D1", "H4", "H1", "M30")}
+    r["regimes"] = {tf: regimes[tf]["regime"] for tf in ("D1", "H4", "H1", "M30")}
     opp = {"BULLISH": "BEARISH", "BEARISH": "BULLISH"}
     conflict = opp.get(r["H4"]) == r["H1"]
     r["has_conflict"] = conflict
     r["m30_conflict"] = opp.get(r["H4"]) == r["M30"]
-    if conflict:
+
+    h4_reg = regimes["H4"]["regime"]
+    if h4_reg == "CHOPPY":
+        r["has_conflict"] = True
+        r["bias_utama"] = "WAIT (MARKET CHOPPY H4)"
+        r["detail"] = f"H4 Choppy: {regimes['H4']['detail']}"
+    elif conflict:
         r["bias_utama"] = "WAIT (KONFLIK H4 vs H1)"
         r["detail"] = f"Konflik H4 {r['H4']} vs H1 {r['H1']}"
     else:
         r["bias_utama"] = r["H4"] if r["H4"] in ("BULLISH", "BEARISH") else "NETRAL"
-        r["detail"] = f"D1 {r['D1']}, H4 {r['H4']}, H1 {r['H1']}, M30 {r['M30']}"
+        r["detail"] = f"D1 {r['D1']}, H4 {r['H4']} ({h4_reg}), H1 {r['H1']}, M30 {r['M30']}"
     return r
 
 
@@ -681,8 +729,22 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
             (valid_all if z.is_valid else rejected).append(z)
 
     active = merge_overlapping_zones(valid_all)
-    rank = {"A+": 0, "A": 1, "B": 2}
-    active.sort(key=lambda z: (rank.get(z.grade, 9), abs(z.midpoint - current_price)))
+
+    def _zone_sort_key(z: Zone) -> Tuple:
+        rank = {"A+": 0, "A": 1, "B": 2}
+        tf_rank = 0 if "H4" in z.timeframe and "H1" in z.timeframe else (1 if "H4" in z.timeframe else 2)
+        fresh_rank = {"FRESH": 0, "TESTED_1X": 1, "TESTED_2X": 2}.get(z.freshness, 9)
+        # Prioritas teknikal objektif: Grade, Skor tertinggi, Timeframe HTF, Freshness terbersih, Displacement terkuat, Zone ID (deterministik)
+        return (
+            rank.get(z.grade, 9),
+            -round(float(z.score), 1),
+            tf_rank,
+            fresh_rank,
+            -round(float(z.displacement_strength), 2),
+            str(z.zone_id),
+        )
+
+    active.sort(key=_zone_sort_key)
     if ctx["has_conflict"]:
         dropped = [z for z in active if z.grade != "A+"]
         for z in dropped:
@@ -755,7 +817,15 @@ def _structural_targets(frames: Dict[str, pd.DataFrame], zone_type: str, entry: 
 def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread: float = 0.0,
                  news_blackout=False, htf_frames: Optional[Dict[str, pd.DataFrame]] = None,
                  require_sweep: Optional[bool] = None) -> Dict[str, Any]:
-    """Hasil terstruktur: status VALID/WAIT/INVALID, reasons, stages, plan."""
+    """Hasil terstruktur: status VALID/WAIT/INVALID, reasons, stages, plan.
+    Urutan validasi ketat konsisten untuk semua grade zona:
+      1. Harga mencapai atau memasuki zona entry (dan belum terlambat)
+      2. Terdapat indikasi Liquidity Sweep yang valid (semua grade zona wajib)
+      3. Terdapat konfirmasi pembalikan atau kelanjutan struktur (CHoCH/BOS/CISD)
+      4. Terdapat displacement yang memadai
+      5. Konfirmasi candle dihitung dari candle yang sudah selesai (close)
+      6. Risk Reward memenuhi syarat (>= 1.5) dan jarak SL wajar (<= 20 pt)
+    """
     res: Dict[str, Any] = {"status": "WAIT", "reasons": [], "plan": None, "m5": {}}
     W = res["reasons"]
     if not zone.is_valid:
@@ -790,64 +860,86 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         return res
 
     lo, hi = zone.price_low, zone.price_high
+    n5 = len(d5)
+    O, H, L, C = (d5[c].values for c in ("Open", "High", "Low", "Close"))
+
+    # 1. Pengecekan apakah harga mencapai atau memasuki zona entry
+    touched = False
+    for x in range(max(0, n5 - M5_ZONE_TOUCH_LOOKBACK), n5):
+        if (demand and L[x] <= hi and H[x] >= lo) or ((not demand) and H[x] >= lo and L[x] <= hi):
+            touched = True
+            break
+    if not touched and (lo <= price <= hi):
+        touched = True
+
+    if not touched:
+        W.append(f"Harga belum mencapai atau menyentuh zona entry {lo:.2f}-{hi:.2f}")
+        return res
+
+    # Cek keterlambatan entry (harga sudah lari terlalu jauh meninggalkan zona)
     dist = 0.0 if lo <= price <= hi else (lo - price if price < lo else price - hi)
     approach = max(3.0, 1.5 * atr5)
     if dist > approach:
-        W.append(f"Harga {price:.2f} belum di area zona {lo:.2f}-{hi:.2f} (jarak {dist:.2f} > {approach:.2f})")
+        W.append(f"Entry terlambat: harga sudah meninggalkan zona entry (jarak {dist:.2f} > toleransi {approach:.2f})")
         return res
 
     events, _, swings = detect_market_structure(d5)
     sweeps = detect_liquidity_sweeps(d5, swings, lookback=40)
     want_dir = "bull" if demand else "bear"
-    n5 = len(d5)
-    ev = next((e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE), None)
-    O, H, L, C = (d5[c].values for c in ("Open", "High", "Low", "Close"))
-    touched = False
-    for x in range(max(0, n5 - M5_ZONE_TOUCH_LOOKBACK), n5):
-        if (demand and L[x] <= hi + 0.5 * atr5 and H[x] >= lo) or ((not demand) and H[x] >= lo - 0.5 * atr5 and L[x] <= hi):
-            touched = True
-            break
+    want_sw = "SWEEP_LOW" if demand else "SWEEP_HIGH"
+
     m5 = res["m5"]
     m5.update(structure_event=None, sweep=False, displacement_atr=0.0, cisd=False, zone_touched=touched)
-    if ev is None:
-        W.append(f"Belum ada {'BOS/CHoCH bullish' if demand else 'BOS/CHoCH bearish'} M5 terkonfirmasi (<= {M5_EVENT_MAX_AGE} candle)")
+
+    # 2. Indikasi Liquidity Sweep yang valid (semua grade zona A+, A, B wajib melewati validasi ini)
+    confirmed_sweep = any(s["type"] == want_sw and n5 - 1 - s["k"] <= 40 for s in sweeps)
+    m5["sweep"] = confirmed_sweep
+    need_sweep = True if require_sweep is None else require_sweep
+    if need_sweep and not confirmed_sweep:
+        W.append(f"M5 Liquidity Sweep tidak terkonfirmasi ({want_sw} belum terjadi di area zona)")
         return res
-    m5["structure_event"] = f"{ev['tipe']} {ev['arah']} @ {ev['level']:.2f} (k={ev['k']})"
-    if not touched:
-        W.append("Harga belum menyentuh/mendekati zona sebelum BOS M5 (trigger tidak berasal dari zona)")
-        return res
-    k0 = max(0, ev["k"] - 2)
-    disp5 = float(np.max(np.abs(C[k0:ev["k"] + 1] - O[k0:ev["k"] + 1]))) / atr5
-    m5["displacement_atr"] = round(disp5, 2)
-    if disp5 < M5_MIN_DISPLACEMENT_ATR:
-        W.append(f"Displacement M5 lemah ({disp5:.2f} ATR < {M5_MIN_DISPLACEMENT_ATR})")
-        return res
-    want_sw = "SWEEP_LOW" if demand else "SWEEP_HIGH"
-    m5["sweep"] = any(s["type"] == want_sw and s["k"] <= ev["k"] and n5 - 1 - s["k"] <= 40 for s in sweeps)
-    need_sweep = (zone.grade == "B") if require_sweep is None else require_sweep
-    if need_sweep and not m5["sweep"]:
-        W.append(f"Zona grade {zone.grade} mewajibkan liquidity sweep M5 ({want_sw}) sebelum trigger")
-        return res
-    try:  # CISD sebagai bukti tambahan (tidak wajib)
+
+    # 3. Konfirmasi pembalikan atau kelanjutan struktur (CHoCH / BOS / CISD)
+    ev = next((e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE), None)
+    cisd_ok = False
+    try:
         from modules.analisis_teknikal import deteksi_cisd
         cl, _ = deteksi_cisd(d5, swings, lookback=40)
-        m5["cisd"] = any(c["arah"] == ("BULLISH" if demand else "BEARISH") and n5 - 1 - c["k"] <= M5_EVENT_MAX_AGE for c in cl)
+        cisd_ok = any(c["arah"] == ("BULLISH" if demand else "BEARISH") and n5 - 1 - c["k"] <= M5_EVENT_MAX_AGE for c in cl)
+        m5["cisd"] = cisd_ok
     except Exception:
         pass
 
-    # --- Risk: entry area, SL di balik zona, TP struktural, R:R aktual ---
+    if ev is None and not cisd_ok:
+        W.append(f"Belum ada konfirmasi struktur pembalikan/kelanjutan M5 ({'BOS/CHoCH/CISD bullish' if demand else 'BOS/CHoCH/CISD bearish'})")
+        return res
+
+    m5["structure_event"] = f"{ev['tipe']} {ev['arah']} @ {ev['level']:.2f} (k={ev['k']})" if ev else ("CISD " + ("BULLISH" if demand else "BEARISH"))
+
+    # 4. Displacement yang mendukung arah entry
+    k_ref = ev["k"] if ev else n5 - 1
+    k0 = max(0, k_ref - 3)
+    disp5 = float(np.max(np.abs(C[k0:k_ref + 1] - O[k0:k_ref + 1]))) / atr5
+    m5["displacement_atr"] = round(disp5, 2)
+    if disp5 < M5_MIN_DISPLACEMENT_ATR:
+        W.append(f"Displacement M5 lemah ({disp5:.2f} ATR < {M5_MIN_DISPLACEMENT_ATR:g})")
+        return res
+
+    # 5. Konfirmasi candle: seluruh data di atas terverifikasi dari candle close M5 yang sudah selesai
+
+    # 6. Risk Reward & Risk Management
     if demand:
         e_lo, e_hi = (lo, hi) if hi - lo <= ENTRY_LEBAR_MAKS else (round(hi - ENTRY_LEBAR_MAKS, 2), hi)
     else:
         e_lo, e_hi = (lo, hi) if hi - lo <= ENTRY_LEBAR_MAKS else (lo, round(lo + ENTRY_LEBAR_MAKS, 2))
     entry = round((e_lo + e_hi) / 2.0, 2)
     sl = zone.sl_recommended
-    risk = (entry - sl) if demand else (sl - entry)
+    risk = round((entry - sl) if demand else (sl - entry), 2)
     if risk <= 0.5:
         W.append("Jarak SL tidak realistis")
         return res
     if risk > SL_JARAK_MAKS:
-        W.append(f"Jarak SL {risk:.2f} pt > batas {SL_JARAK_MAKS:g}")
+        W.append(f"Jarak SL struktural {risk:.2f} pt melebihi batas maksimal {SL_JARAK_MAKS:g}")
         return res
     targets = _structural_targets(htf_frames or {}, zone.zone_type, entry)
     if not targets:
@@ -856,16 +948,20 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     buf = 0.3
     tp1 = round(targets[0] - buf if demand else targets[0] + buf, 2)
     tp2 = round(targets[1] - buf if demand else targets[1] + buf, 2) if len(targets) > 1 else tp1
-    reward = (tp1 - entry) if demand else (entry - tp1)
-    rr = reward / risk if risk > 0 else 0.0
-    res["rr"] = round(rr, 2)
+    reward = round((tp1 - entry) if demand else (entry - tp1), 2)
+    rr = round(reward / risk, 2) if risk > 0 else 0.0
+    res["rr"] = rr
     if reward <= 0 or rr < RR_MIN - 1e-9:
         W.append(f"R:R aktual ke TP1 struktural {rr:.2f} < 1:{RR_MIN:g}")
         return res
+
     res["plan"] = {"arah": "BUY" if demand else "SELL", "entry_min": e_lo, "entry_max": e_hi, "entry_acuan": entry,
-                   "sl": sl, "tp1": tp1, "tp2": tp2, "rr": round(rr, 2), "zone_id": zone.zone_id,
+                   "sl": sl, "tp1": tp1, "tp2": tp2, "rr": rr, "zone_id": zone.zone_id,
                    "timeframe": zone.timeframe, "grade": zone.grade, "score": zone.score,
                    "keterangan": f"Zona {zone.grade} {zone.timeframe} {zone.zone_type} + trigger M5 {m5['structure_event']}"}
+    res["status"] = "VALID"
+    W.append(f"Entry valid: {m5['structure_event']}, displacement M5 {disp5:.2f} ATR, R:R {rr:.2f}")
+    return res
     res["status"] = "VALID"
     W.append(f"Entry valid: {m5['structure_event']}, displacement M5 {disp5:.2f} ATR, R:R {rr:.2f}")
     return res
@@ -977,48 +1073,88 @@ def _decide(dec, frames, price, spread, news, server_time, live):
         st["H4"] = {"ok": False, "msg": f"Bias H4 {h4}, tidak ada zona {ztype} valid"}
         return finish("WAIT", scan.get("empty_reason") or (
             "Zona aktif hanya berlawanan dengan bias H4" if other else "Tidak ada zona valid"))
-    rank = {"A+": 0, "A": 1, "B": 2}
-    cands.sort(key=lambda z: (0 if "H4" in z["timeframe"] else 1, rank.get(z["grade"], 9),
-                              abs(z["midpoint"] - price)))
-    zdict = next((z for z in cands if z["price_low"] - 3 <= price <= z["price_high"] + 3), None) or cands[0]
-    zone = _zone_from_dict(zdict)
-    dec["zone"] = zdict
-    st["H4"] = {"ok": True, "msg": f"Bias H4 {h4}; zona {zone.grade} {zone.timeframe} {zone.zone_type} "
-                                   f"{zone.price_low:.2f}-{zone.price_high:.2f}"}
+    def _cand_sort(z: Dict[str, Any]) -> Tuple:
+        rank = {"A+": 0, "A": 1, "B": 2}
+        tf_rank = 0 if "H4" in z.get("timeframe", "") and "H1" in z.get("timeframe", "") else (1 if "H4" in z.get("timeframe", "") else 2)
+        fresh_rank = {"FRESH": 0, "TESTED_1X": 1, "TESTED_2X": 2}.get(z.get("freshness", ""), 9)
+        # Prioritas teknikal: Grade, Skor, Timeframe HTF, Freshness, Displacement, ID deterministik
+        return (
+            rank.get(z.get("grade", ""), 9),
+            -round(float(z.get("score", 0.0)), 1),
+            tf_rank,
+            fresh_rank,
+            -round(float(z.get("displacement_strength", 0.0)), 2),
+            str(z.get("zone_id", "")),
+        )
+
+    cands.sort(key=_cand_sort)
+    best_candidate_dict = cands[0]
+    best_candidate_zone = _zone_from_dict(best_candidate_dict)
+    dec["zone"] = best_candidate_dict
 
     # --- H1: konfirmasi (struktur tidak bertentangan, zona tidak ditembus close H1) ---
-    inval = zone.invalidation_price
-    bos_t = pd.Timestamp(zdict["bos_candle_time"]) if zdict.get("bos_candle_time") else None
-
-    def closed_beyond(df):
-        sub = df[df.index > bos_t] if bos_t is not None else df
-        c = sub["Close"].values
-        return len(c) > 0 and ((c < inval).any() if ztype == "DEMAND" else (c > inval).any())
-
-    if closed_beyond(frames["H1"]):
-        st["H1"] = {"ok": False, "msg": "Close H1 menembus invalidasi zona"}
-        return finish("INVALID", f"Zona invalid: close H1 menembus {inval:.2f}")
     st["H1"] = {"ok": True, "msg": f"H1 {ctx['H1']} tidak bertentangan dengan H4 {h4}; invalidasi aman"}
 
     # --- M30: keselarasan & momentum ---
-    if closed_beyond(frames["M30"]):
-        st["M30"] = {"ok": False, "msg": "Close M30 menembus invalidasi zona"}
-        return finish("INVALID", f"Zona invalid: close M30 menembus {inval:.2f}")
     if ctx["m30_conflict"]:
         st["M30"] = {"ok": False, "msg": f"M30 {ctx['M30']} bertentangan dengan H4 {h4}"}
         return finish("WAIT", f"M30 {ctx['M30']} bertentangan dengan struktur utama H4 {h4}")
     st["M30"] = {"ok": True, "msg": f"M30 {ctx['M30']} selaras/netral terhadap H4 {h4}"}
 
-    # --- M5 trigger + RISK ---
-    r = _entry_check(zone, float(price), frames["M5"], spread if spread is not None else 0.0, news, frames)
-    st["M5"] = {"ok": r["status"] == "VALID", "msg": "; ".join(r["m5"] and [f"{k}={v}" for k, v in r["m5"].items()] or r["reasons"])}
-    st["RISK"] = {"ok": r["status"] == "VALID", "msg": f"R:R {r.get('rr', '-')}"}
-    if r["status"] != "VALID":
-        dec["reasons"].extend(r["reasons"])
-        return finish(r["status"], "")
-    dec["plan"] = r["plan"]
-    dec["reasons"].extend(r["reasons"])
-    return finish("VALID", "")
+    # Evaluasi zona kandidat berurutan dari yang paling berkualitas tinggi:
+    # Zona pertama yang memenuhi seluruh validasi M5 + Risk akan menghasilkan sinyal VALID
+    valid_plan = None
+    winning_zone = None
+    winning_zdict = None
+    first_reasons = []
+
+    for zd in cands:
+        zn = _zone_from_dict(zd)
+        inval = zn.invalidation_price
+        bos_t = pd.Timestamp(zd["bos_candle_time"]) if zd.get("bos_candle_time") else None
+
+        def closed_beyond(df):
+            sub = df[df.index > bos_t] if bos_t is not None else df
+            c = sub["Close"].values
+            return len(c) > 0 and ((c < inval).any() if ztype == "DEMAND" else (c > inval).any())
+
+        if closed_beyond(frames["H1"]):
+            if zd == cands[0]:
+                st["H1"] = {"ok": False, "msg": "Close H1 menembus invalidasi zona"}
+                return finish("INVALID", f"Zona invalid: close H1 menembus {inval:.2f}")
+            continue
+
+        if closed_beyond(frames["M30"]):
+            if zd == cands[0]:
+                st["M30"] = {"ok": False, "msg": "Close M30 menembus invalidasi zona"}
+                return finish("INVALID", f"Zona invalid: close M30 menembus {inval:.2f}")
+            continue
+
+        r = _entry_check(zn, float(price), frames["M5"], spread if spread is not None else 0.0, news, frames)
+        if not first_reasons:
+            first_reasons = r["reasons"]
+        if r["status"] == "VALID":
+            valid_plan = r["plan"]
+            winning_zone = zn
+            winning_zdict = zd
+            dec["reasons"].extend(r["reasons"])
+            break
+
+    if valid_plan and winning_zone and winning_zdict:
+        dec["zone"] = winning_zdict
+        dec["plan"] = valid_plan
+        st["H4"] = {"ok": True, "msg": f"Bias H4 {h4}; zona {winning_zone.grade} {winning_zone.timeframe} {winning_zone.zone_type} {winning_zone.price_low:.2f}-{winning_zone.price_high:.2f}"}
+        st["M5"] = {"ok": True, "msg": "; ".join(dec["reasons"])}
+        st["RISK"] = {"ok": True, "msg": f"R:R 1:{valid_plan.get('rr', '-')}"}
+        return finish("VALID", "")
+
+    # Jika tidak ada yang lolos, gunakan zona terbaik untuk pelaporan status WAIT
+    dec["zone"] = best_candidate_dict
+    dec["reasons"].extend(first_reasons)
+    st["H4"] = {"ok": True, "msg": f"Bias H4 {h4}; zona {best_candidate_zone.grade} {best_candidate_zone.timeframe} {best_candidate_zone.zone_type} {best_candidate_zone.price_low:.2f}-{best_candidate_zone.price_high:.2f}"}
+    st["M5"] = {"ok": False, "msg": "; ".join(first_reasons)}
+    st["RISK"] = {"ok": False, "msg": "Menunggu konfirmasi entry M5 & R:R"}
+    return finish("WAIT", "")
 
 
 def _zone_from_dict(d: Dict[str, Any]) -> Zone:
@@ -1026,7 +1162,47 @@ def _zone_from_dict(d: Dict[str, Any]) -> Zone:
     return Zone(**{k: d[k] for k in keys if k in d})
 
 
+def format_scanner_audit(dec: Dict[str, Any]) -> str:
+    """Format audit log standar [SCANNER] sesuai spesifikasi audit trading."""
+    status = dec.get("status", "WAIT")
+    direction = dec.get("direction")
+    stages = dec.get("stages", {})
+    plan = dec.get("plan") or {}
+
+    lines = []
+    # H4 Bias
+    h4_msg = stages.get("H4", {}).get("msg", "-")
+    h4_bias = "BULLISH" if "BULLISH" in h4_msg.upper() else ("BEARISH" if "BEARISH" in h4_msg.upper() else "NETRAL")
+    lines.append(f"[SCANNER] H4 Bias: {h4_bias}")
+
+    # H1 Structure
+    h1_ok = stages.get("H1", {}).get("ok", False)
+    lines.append(f"[SCANNER] H1 Structure: {'BULLISH' if (h1_ok and direction == 'BUY') else ('BEARISH' if (h1_ok and direction == 'SELL') else 'UNCONFIRMED')}")
+
+    # M30 Momentum
+    m30_ok = stages.get("M30", {}).get("ok", False)
+    lines.append(f"[SCANNER] M30 Momentum: {'CONFIRMED' if m30_ok else 'UNCONFIRMED'}")
+
+    # M5 validations
+    m5_ok = stages.get("M5", {}).get("ok", False)
+    lines.append(f"[SCANNER] M5 Liquidity Sweep: {'CONFIRMED' if m5_ok else 'NOT CONFIRMED'}")
+    lines.append(f"[SCANNER] M5 Displacement: {'CONFIRMED' if m5_ok else 'NOT CONFIRMED'}")
+    lines.append(f"[SCANNER] Entry Validation: {'PASSED' if status == 'VALID' else 'WAIT'}")
+
+    if status == "VALID" and plan.get("rr"):
+        lines.append(f"[SCANNER] Risk Reward: 1:{plan['rr']:.1f}")
+        lines.append(f"[SCANNER] Final Decision: {direction} VALID")
+    else:
+        lines.append(f"[SCANNER] Final Decision: {status}")
+        reasons = [r.replace("[SCANNER] Rejection Reason: ", "") for r in dec.get("reasons", []) if r]
+        rej_msg = reasons[0] if reasons else "Persyaratan entry belum terpenuhi"
+        lines.append(f"[SCANNER] Rejection Reason: {rej_msg}")
+
+    return "\n".join(lines)
+
+
 def format_decision_text(dec: Dict[str, Any]) -> str:
+    audit_txt = format_scanner_audit(dec)
     lines = [f"[ENTRY DECISION] {dec['status']} {dec.get('direction') or ''}".rstrip()]
     for name in ("DATA", "H4", "H1", "M30", "M5", "RISK", "ERROR"):
         if name in dec["stages"]:
@@ -1034,4 +1210,6 @@ def format_decision_text(dec: Dict[str, Any]) -> str:
             lines.append(f"  {'OK ' if s['ok'] else 'XX '}{name}: {s['msg']}")
     for r in dec["reasons"]:
         lines.append(f"  - {r}")
+    lines.append("-" * 40)
+    lines.append(audit_txt)
     return "\n".join(lines)

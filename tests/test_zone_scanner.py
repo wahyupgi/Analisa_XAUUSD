@@ -719,8 +719,10 @@ class TestIntegration(unittest.TestCase):
             importlib.import_module(f"modules.{m}")
 
     def test_snapshot_live_qa_clean_instructions(self):
+        import unittest.mock
         from modules.ai_gemini import snapshot_live_qa
-        snap = snapshot_live_qa()
+        with unittest.mock.patch("modules.ai_gemini.pastikan_mt5_aktif", return_value=False):
+            snap = snapshot_live_qa()
         # Memastikan tidak ada instruksi paksaan membuat sinyal baru di snapshot QA
         self.assertNotIn("WAJIB BERIKAN SETUP BARU", snap)
         self.assertNotIn("WAJIB PAKAI INI JIKA MEMBUAT SETUP BARU", snap)

@@ -162,11 +162,11 @@ def status_risiko_akun():
 
 
 def analisa_akun_dan_lot(acc_info, sym_info, atr_m5, harga):
-    """Membaca saldo MT5 asli & menghitung lot untuk risiko 0.5% (Medium) dan 1% (Low): dibulatkan ke BAWAH,
-    nilai per poin dari order_calc_profit, spread dimasukkan ke risiko; plus status risiko agregat & rugi harian."""
+    """Membaca saldo MT5 asli & menghitung lot untuk alokasi risiko modal 0.5% (konservatif) dan 1.0% (standar / risiko lebih tinggi).
+    Lot dibulatkan ke BAWAH, nilai per poin dari order_calc_profit, spread dimasukkan ke risiko."""
     out = ["\n===== MANAJEMEN RISIKO & KALKULATOR LOT OTOMATIS (AKUN MT5) ====="]
-    if acc_info is None or sym_info is None:
-        out.append("Info akun MT5 tidak tersedia.")
+    if acc_info is None or sym_info is None or getattr(sym_info, 'trade_contract_size', 0) <= 0:
+        out.append("DATA UNAVAILABLE: Info akun atau spesifikasi kontrak simbol MT5 tidak lengkap/tersedia.")
         return "\n".join(out) + "\n"
 
     bal = acc_info.balance
@@ -184,16 +184,18 @@ def analisa_akun_dan_lot(acc_info, sym_info, atr_m5, harga):
     if str(cur).upper() != "USD":
         out.append(f"CATATAN: mata uang akun = {cur}. Semua nilai uang di bawah dalam {cur} (bukan USD).")
 
-    risk_low = eq * 0.01      # 1.0% untuk LOW RISK
-    risk_med = eq * 0.005     # 0.5% untuk MEDIUM RISK
-    out.append(f"Batas Risiko per Trade -> LOW RISK (1.0%): {risk_low:.2f} {cur} | MEDIUM RISK (0.5%): {risk_med:.2f} {cur}")
-    out.append("Tabel Acuan Ukuran Lot berdasarkan jarak Stop Loss (poin/dolar emas; sudah termasuk spread, lot dibulatkan ke bawah):")
+    risk_konservatif = eq * 0.005  # 0.5% (risiko lebih konservatif)
+    risk_standar = eq * 0.01       # 1.0% (risiko lebih tinggi dibandingkan 0.5%)
+    out.append(f"Batas Risiko Modal per Trade:")
+    out.append(f"  • 0,5% (risiko lebih konservatif)             : {risk_konservatif:.2f} {cur}")
+    out.append(f"  • 1,0% (risiko lebih tinggi dibandingkan 0,5%): {risk_standar:.2f} {cur}")
+    out.append("Tabel Acuan Ukuran Lot berdasarkan jarak Stop Loss (poin emas; sudah termasuk spread, lot dibulatkan ke bawah):")
     for sl_poin in (3.0, 5.0, 8.0, 10.0, 15.0):
         rugi_per_lot = (sl_poin + spread) * per_poin
-        lot_low, _, over_low = _hitung_lot(risk_low, rugi_per_lot, vol_min, vol_step, vol_max)
-        lot_med, _, over_med = _hitung_lot(risk_med, rugi_per_lot, vol_min, vol_step, vol_max)
-        flag = "  [⚠️ lot minimum broker melebihi batas risiko]" if (over_low or over_med) else ""
-        out.append(f"  - Jika jarak SL = {sl_poin:4.1f} poin ({sl_poin * 10:.0f} pips) -> Lot LOW RISK (1%): {lot_low:.2f} lot | Lot MEDIUM RISK (0.5%): {lot_med:.2f} lot{flag}")
+        lot_kons, _, over_kons = _hitung_lot(risk_konservatif, rugi_per_lot, vol_min, vol_step, vol_max)
+        lot_std, _, over_std = _hitung_lot(risk_standar, rugi_per_lot, vol_min, vol_step, vol_max)
+        flag = "  [⚠️ lot minimum broker melebihi batas risiko]" if (over_kons or over_std) else ""
+        out.append(f"  - Jarak SL = {sl_poin:4.1f} pt ({sl_poin * 10:.0f} pips) -> Lot 0,5% (konservatif): {lot_kons:.2f} lot | Lot 1,0% (standar): {lot_std:.2f} lot{flag}")
 
     st = status_risiko_akun()
     if st:
@@ -279,70 +281,97 @@ def _info_tipe_pending(tipe):
 
 def cek_posisi_terbuka_mt5(harga_skrg):
     """Membaca identitas akun real, posisi trading yang sedang running (floating), Pending Order, & riwayat deal hari ini di MT5."""
-    out = ["\n===== FAKTA AKUN REAL MT5, POSISI RUNNING & PENDING ORDER ANDA (DATA ASLI LIVE) ====="]
+    out = ["\n===== [MT5 ACTUAL ORDER STATUS] FAKTA AKUN MT5, POSISI RUNNING & PENDING ORDER (DATA ASLI LIVE) ====="]
+    out.append("  [KATEGORI DATA]: [MT5 ACTUAL ORDER STATUS] (Bukan Rekomendasi AI dan Bukan Setup Plan)")
+    if not pastikan_mt5_aktif():
+        out.append("DATA UNAVAILABLE: Koneksi MT5 tidak aktif.")
+        return "\n".join(out) + "\n"
+
     acc = mt5.account_info()
+    if acc is None:
+        out.append("DATA UNAVAILABLE: Data akun MT5 tidak tersedia.")
+        return "\n".join(out) + "\n"
+
+    sym = mt5.symbol_info(SYMBOL)
+    digits = int(getattr(sym, "digits", 2)) if sym else 2
     tick = mt5.symbol_info_tick(SYMBOL)
-    cur = acc.currency if acc else "USD"
+    cur = getattr(acc, "currency", "USD")
     eq = float(acc.equity if acc and acc.equity > 0 else (acc.balance if acc else 0.0))
     bid_live = float(tick.bid) if tick and tick.bid > 0 else float(harga_skrg)
     ask_live = float(tick.ask) if tick and tick.ask > 0 else float(harga_skrg)
 
-    if acc:
-        mode_akun = "REAL ACCOUNT" if getattr(acc, "trade_mode", 0) == getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2) else "DEMO/CONTEST"
-        out.append(
-            f"  [IDENTITAS AKUN MT5]: Login #{acc.login} ({acc.name} | Server: {acc.server} | Tipe: {mode_akun}) | "
-            f"Mata Uang: {cur} (JANGAN sebut USD/$ jika tertulis {cur}!) | "
-            f"Balance: {acc.balance:,.2f} {cur} | Equity: {acc.equity:,.2f} {cur} | Floating Total: {acc.profit:+,.2f} {cur} | Free Margin: {acc.margin_free:,.2f} {cur}"
-        )
+    mode_akun = "REAL ACCOUNT" if getattr(acc, "trade_mode", 0) == getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2) else "DEMO/CONTEST"
+    out.append(
+        f"  [IDENTITAS AKUN MT5]: Login #{acc.login} ({acc.name} | Server: {acc.server} | Tipe: {mode_akun}) | "
+        f"Mata Uang: {cur} (JANGAN sebut USD/$ jika tertulis {cur}!) | "
+        f"Balance: {acc.balance:,.2f} {cur} | Equity: {acc.equity:,.2f} {cur} | Floating Total: {acc.profit:+,.2f} {cur} | Free Margin: {acc.margin_free:,.2f} {cur}"
+    )
 
     pos = mt5.positions_get(symbol=SYMBOL)
     orders = mt5.orders_get(symbol=SYMBOL)
 
-    if not pos and not orders:
-        out.append("  - POSISI & PENDING ORDER: Tidak ada posisi running maupun pending order (Buy/Sell Limit) pada simbol ini saat ini.")
-    else:
-        if pos:
-            out.append(f"  [POSISI RUNNING / FLOATING SAAT INI — TOTAL {len(pos)} POSISI AKTIF (WAJIB DIKAWAL, JANGAN DIABAIKAN!)]:")
-            for p in pos:
-                arah = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
-                harga_tutup = bid_live if arah == "BUY" else ask_live
-                poin = (harga_tutup - p.price_open) if arah == "BUY" else (p.price_open - harga_tutup)
-                pct_eq = (p.profit / eq * 100.0) if eq > 0 else 0.0
-                if p.sl and p.sl > 0:
-                    sudah_bep = (arah == "BUY" and p.sl >= p.price_open) or (arah == "SELL" and p.sl <= p.price_open)
-                    if sudah_bep:
-                        kunci_pt = (p.sl - p.price_open) if arah == "BUY" else (p.price_open - p.sl)
-                        sl_info = f"{p.sl:.3f} [✅ SUDAH DIKUNCI BEP+ (+{kunci_pt:.2f} pt di area profit) — POSISI 100% BEBAS RISIKO!]"
-                    else:
-                        jrk_sl = (harga_tutup - p.sl) if arah == "BUY" else (p.sl - harga_tutup)
-                        sl_info = f"{p.sl:.3f} (jarak dari harga sekarang ke SL: {jrk_sl:.2f} pt)"
-                else:
-                    sl_info = "BELUM DISET (⚠️ RAWAN TANPA PENGAMAN!)"
-                tp_info = f"{p.tp:.3f}" if (p.tp and p.tp > 0) else "BELUM DISET (Terbuka / Runner)"
-                out.append(
-                    f"  - Ticket #{p.ticket} | {arah} {p.volume} lot @ {p.price_open:.3f} (Harga sekarang: {harga_tutup:.3f}) | "
-                    f"SL: {sl_info} | TP: {tp_info} | "
-                    f"Floating: {p.profit:+,.2f} {cur} ({pct_eq:+.2f}% equity | {poin:+.2f} poin)"
-                )
-        else:
-            out.append("  [POSISI RUNNING / FLOATING SAAT INI]: Tidak ada posisi market yang sedang terbuka (0 posisi running).")
+    if pos is None and orders is None:
+        out.append("  [POSISI & PENDING ORDER]: DATA UNAVAILABLE (Gagal membaca data posisi/order dari MT5).")
+        return "\n".join(out) + "\n"
 
-        if orders:
-            out.append(f"  [PENDING ORDER TERPASANG SAAT INI — TOTAL {len(orders)} ORDER (WAJIB DIEVALUASI VALIDITAS ZONANYA OLEH AI)]:")
-            for o in orders:
-                nama_ord, arah_ord = _info_tipe_pending(o.type)
-                vol_ord = getattr(o, "volume_current", getattr(o, "volume_initial", 0.0))
-                jarak_ord = abs(bid_live - o.price_open) if bid_live > 0 else 0.0
-                letak_ord = "di atas harga sekarang" if o.price_open > bid_live else "di bawah harga sekarang"
-                sl_ord_txt = f"{o.sl:.3f} (jarak SL {abs(o.price_open - o.sl):.2f} pt)" if (o.sl and o.sl > 0) else "BELUM DISET (⚠️ WAJIB INGATKAN PASANG SL!)"
-                tp_ord_txt = f"{o.tp:.3f}" if (o.tp and o.tp > 0) else "BELUM DISET"
-                out.append(
-                    f"  - Ticket #{o.ticket} | {nama_ord} ({arah_ord}) {vol_ord} lot @ {o.price_open:.3f} "
-                    f"(Jarak: {jarak_ord:.2f} poin {letak_ord}) | "
-                    f"SL: {sl_ord_txt} | TP: {tp_ord_txt}"
-                )
-        else:
-            out.append("  [PENDING ORDER TERPASANG SAAT INI]: Tidak ada pending order (0 limit/stop order).")
+    if pos:
+        out.append(f"  [POSISI RUNNING / FLOATING SAAT INI — TOTAL {len(pos)} POSISI AKTIF (WAJIB DIKAWAL, JANGAN DIABAIKAN!)]:")
+        for p in pos:
+            arah = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
+            harga_tutup = bid_live if arah == "BUY" else ask_live
+            poin = (harga_tutup - p.price_open) if arah == "BUY" else (p.price_open - harga_tutup)
+            pct_eq = (p.profit / eq * 100.0) if eq > 0 else 0.0
+            if p.sl and p.sl > 0:
+                sudah_bep = (arah == "BUY" and p.sl >= p.price_open) or (arah == "SELL" and p.sl <= p.price_open)
+                if sudah_bep:
+                    kunci_pt = (p.sl - p.price_open) if arah == "BUY" else (p.price_open - p.sl)
+                    sl_info = f"{p.sl:.{digits}f} [✅ SUDAH DIKUNCI BEP+ (+{kunci_pt:.2f} pt di area profit) — POSISI 100% BEBAS RISIKO!]"
+                else:
+                    jrk_sl = (harga_tutup - p.sl) if arah == "BUY" else (p.sl - harga_tutup)
+                    sl_info = f"{p.sl:.{digits}f} (jarak dari harga sekarang ke SL: {jrk_sl:.2f} pt)"
+            else:
+                sl_info = f"BELUM DISET (⚠️ RAWAN TANPA PENGAMAN!) [CRITICAL WARNING: Posisi #{p.ticket} TANPA STOP LOSS!]"
+            tp_info = f"{p.tp:.{digits}f}" if (p.tp and p.tp > 0) else "BELUM DISET (Terbuka / Runner)"
+            out.append(
+                f"  - Ticket #{p.ticket} | Simbol: {getattr(p, 'symbol', SYMBOL)} | {arah} {p.volume} lot @ {p.price_open:.{digits}f} (Harga sekarang: {harga_tutup:.{digits}f}) | "
+                f"SL: {sl_info} | TP: {tp_info} | "
+                f"Floating: {p.profit:+,.2f} {cur} ({pct_eq:+.2f}% equity | {poin:+.2f} poin)"
+            )
+            if not (p.sl and p.sl > 0):
+                out.append(f"    CRITICAL WARNING: Posisi #{p.ticket} tidak memiliki Stop Loss! Segera pasang Stop Loss manual di MT5 untuk membatasi risiko.")
+    else:
+        out.append("  [POSISI RUNNING / FLOATING SAAT INI]: Total 0 posisi running (Tidak ada posisi market terbuka).")
+
+    if orders:
+        out.append(f"  [PENDING ORDER TERPASANG SAAT INI — TOTAL {len(orders)} ORDER (WAJIB DIEVALUASI VALIDITAS ZONANYA OLEH AI)]:")
+        for o in orders:
+            nama_ord, arah_ord = _info_tipe_pending(o.type)
+            vol_ord = getattr(o, "volume_current", getattr(o, "volume_initial", 0.0))
+            jarak_ord = abs(bid_live - o.price_open) if bid_live > 0 else 0.0
+            letak_ord = "di atas harga sekarang" if o.price_open > bid_live else "di bawah harga sekarang"
+            if (o.sl and o.sl > 0):
+                sl_ord_txt = f"{o.sl:.{digits}f} (jarak SL {abs(o.price_open - o.sl):.2f} pt)"
+            else:
+                sl_ord_txt = f"BELUM DISET (⚠️ WAJIB INGATKAN PASANG SL!) [CRITICAL WARNING: Pending Order #{o.ticket} TANPA STOP LOSS!]"
+            tp_ord_txt = f"{o.tp:.{digits}f}" if (o.tp and o.tp > 0) else "BELUM DISET"
+            exp_time = getattr(o, "time_expiration", 0)
+            if isinstance(exp_time, (int, float)) and exp_time > 0:
+                try:
+                    exp_txt = pd.Timestamp(int(exp_time), unit="s").strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    exp_txt = str(exp_time)
+            else:
+                exp_txt = "GTC (Good till cancelled)"
+
+            out.append(
+                f"  - Ticket #{o.ticket} | Simbol: {getattr(o, 'symbol', SYMBOL)} | {nama_ord} ({arah_ord}) {vol_ord} lot @ {o.price_open:.{digits}f} "
+                f"(Jarak: {jarak_ord:.2f} poin {letak_ord}) | "
+                f"SL: {sl_ord_txt} | TP: {tp_ord_txt} | Expiration: {exp_txt} | Status: Placed in MT5"
+            )
+            if not (o.sl and o.sl > 0):
+                out.append(f"    CRITICAL WARNING: Pending Order #{o.ticket} tidak memiliki Stop Loss! Segera pasang Stop Loss manual di MT5 untuk membatasi risiko.")
+    else:
+        out.append("  [PENDING ORDER TERPASANG SAAT INI]: Total 0 order (Tidak ada pending order aktif).")
 
     # Riwayat transaksi yang sudah tertutup hari ini (agar AI tahu histori eksekusi hari ini & tidak mengarang)
     if tick:

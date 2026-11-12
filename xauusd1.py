@@ -44,8 +44,8 @@ def main():
     state_sebelumnya = muat_state_sinyal() or {}
 
     # Hubungkan MT5 lebih awal agar evaluasi harga real-time akurat
-    pastikan_mt5_aktif()
-    tick_cek = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
+    mt5_terhubung = pastikan_mt5_aktif()
+    tick_cek = mt5.symbol_info_tick(SYMBOL) if mt5_terhubung else None
     bid_cek = tick_cek.bid if tick_cek else 0.0
 
     # Ambil kandidat sinyal dari state sebelumnya (prioritaskan sinyal aktif, lalu sinyal_sebelumnya)
@@ -54,135 +54,67 @@ def main():
         cand_s = state_sebelumnya.get("sinyal_sebelumnya")
 
     sig_sebelumnya = None
-    teks_memori_prompt = ""
-
     if cand_s and isinstance(cand_s, dict) and cand_s.get("lo"):
         status_lama, alasan_lama = evaluasi_validitas_sinyal(cand_s, bid_cek)
-
-        # Sesuai permintaan user: HANYA tampilkan & pertahankan sinyal yang BENAR-BENAR MASIH VALID.
-        # Jika sudah tidak valid (batal / kena SL / expired / target selesai / unknown), HAPUS dari memori!
         if sinyal_masih_aktif(status_lama):
             sig_sebelumnya = cand_s
             SINYAL_AKTIF_DINAMIS = sig_sebelumnya
             SINYAL_SEBELUMNYA_DINAMIS = sig_sebelumnya
-
-            lbl_eks_start, kode_eks_start, info_eks_start = cek_status_eksekusi_sinyal(sig_sebelumnya)
-            kat_start, ket_r_start = tentukan_klasifikasi_risiko_sinyal(sig_sebelumnya)
-            tag_start = "⚠️ [HIGH RISK]" if kat_start == "HIGH RISK" else ("🛡️ [LOW RISK]" if kat_start == "LOW RISK" else "⚡ [MEDIUM RISK]")
-
-            print("\n" + "=" * 65)
-            print("📌 [SINYAL AKTIF DARI SESI SEBELUMNYA — MASIH VALID]")
-            print(f"• Setup  : {sig_sebelumnya['arah']} @ {sig_sebelumnya['lo']:.2f} - {sig_sebelumnya['hi']:.2f} | SL {sig_sebelumnya['sl']:.2f} | TP1 {sig_sebelumnya['tp1']:.2f}")
-            print(f"• Status : [{status_lama}] | Akun MT5: [{lbl_eks_start}] | Risiko: {tag_start}")
-            print("=" * 65 + "\n")
-
-            teks_memori_prompt = (
-                f"\n\n[MEMORI SINYAL AKTIF DARI SESI SEBELUMNYA — WAJIB DIKAWAL]:\n"
-                f"- 🔒 SINYAL AKTIF TERKUNCI: {sig_sebelumnya['arah']} | ENTRY: {sig_sebelumnya['lo']:.2f}-{sig_sebelumnya['hi']:.2f} | SL: {sig_sebelumnya['sl']:.2f} | TP1: {sig_sebelumnya['tp1']:.2f} | TP2: {sig_sebelumnya.get('tp2', sig_sebelumnya['tp1']):.2f} ({sig_sebelumnya.get('ket', '-')})\n"
-                f"- Status Validitas Saat Ini ({bid_cek:.2f}): [{status_lama}] -> {alasan_lama}\n"
-                f"- Status Akun MT5: [{lbl_eks_start}] ({info_eks_start})\n"
-                f"INSTRUKSI: Sinyal di atas masih valid dan aktif. Dilarang mengubah angka Entry/SL selama belum tersentuh SL atau TP2!\n"
-            )
         else:
-            # Sinyal sudah tidak valid / selesai / batal -> Bersihkan dari state agar tidak terus berulang
             simpan_state_sinyal(None, None, state_sebelumnya.get("atas"), state_sebelumnya.get("bawah"), "Reset Sinyal Invalid", hapus_riwayat=True)
             SINYAL_AKTIF_DINAMIS = None
             SINYAL_SEBELUMNYA_DINAMIS = None
             sig_sebelumnya = None
 
-    if not API_KEY:
-        sys.exit("API key Gemini belum diset. Isi variabel lingkungan GEMINI_API_KEY (mis. setx GEMINI_API_KEY \"...\" lalu buka terminal baru).")
-    try:
-        info_jurnal = ringkasan_jurnal_untuk_ai(5)
-        prompt = kumpulkan_konteks_mt5() + (f"\n\n{info_jurnal}" if info_jurnal else "") + teks_memori_prompt
-    except KonteksError as e_ctx:
-        sys.exit(str(e_ctx))
-    print("2. Mengirim data ke Gemini (streaming real-time)...")
-    client = genai.Client(
-        api_key=API_KEY,
-        http_options=types.HttpOptions(
-            timeout=25000,
-            retry_options=types.HttpRetryOptions(attempts=1),
-        ),
-    )
+    # Status Komponen Sistem
+    mt5_ok = bool(mt5_terhubung and mt5.terminal_info() is not None)
+    tick_live = mt5.symbol_info_tick(SYMBOL) if mt5_ok else None
+    engine_ok = True
 
-    validasi_model_tersedia(client)
-    jawaban_awal, model_aktif = panggil_gemini(client, prompt, stream_output=True)
-    if not jawaban_awal:
-        print("\n   [⚠️ Semua model Gemini sedang padat antrean. Mode mekanis & pantau tetap diaktifkan — ketik 'refresh' untuk coba lagi.]")
-        jawaban_awal = ""
-    _tgt_awal = ekstrak_target_ai(jawaban_awal)
-    _cand_awal = _tgt_awal.get("sinyal")
-    if _cand_awal and model_aktif:
-        _cand_awal["model"] = model_aktif
-    sinyal_baru_ai = terapkan_gerbang(_cand_awal)
-    if sinyal_baru_ai and model_aktif:
-        sinyal_baru_ai["model"] = model_aktif
-
-    tick_st = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
-    bid_st = tick_st.bid if tick_st else 0.0
-    st_cek = "UNKNOWN"
-    if sig_sebelumnya and isinstance(sig_sebelumnya, dict) and bid_st > 0:
-        st_cek, _ = evaluasi_validitas_sinyal(sig_sebelumnya, bid_st)
-
-    # 🔒 SIGNAL & DIRECTIONAL LOCK via helper terpusat (konteks STARTUP)
-    sig_pilih, sig_rw, logs_lock, diubah = putuskan_sinyal_terkunci(
-        sinyal_baru_ai,
-        sig_sebelumnya,
-        status_aktif=st_cek,
-        paksa_ganti=False,
-        izinkan_balik_arah=False,
-        konteks="STARTUP",
-    )
-    for p in logs_lock:
-        print(p)
-    if sig_rw:
-        # Pengarsipan di Startup jika sinyal lama digantikan sinyal baru pasca-batal/selesai
-        SINYAL_SEBELUMNYA_DINAMIS = sig_rw
-
-    SINYAL_AKTIF_DINAMIS = sig_pilih
-
-    # Selaraskan zona pantau dengan sinyal aktif agar tidak ada dua angka zona berbeda di layar
-    if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict):
-        if SINYAL_AKTIF_DINAMIS["arah"] == "BUY":
-            ZONA_BAWAH_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
-            ZONA_ATAS_DINAMIS = _tgt_awal.get("atas") or (tuple(state_sebelumnya["atas"]) if state_sebelumnya and state_sebelumnya.get("atas") else None)
-        else:
-            ZONA_ATAS_DINAMIS = (SINYAL_AKTIF_DINAMIS["lo"], SINYAL_AKTIF_DINAMIS["hi"], SINYAL_AKTIF_DINAMIS["sl"])
-            ZONA_BAWAH_DINAMIS = _tgt_awal.get("bawah") or (tuple(state_sebelumnya["bawah"]) if state_sebelumnya and state_sebelumnya.get("bawah") else None)
+    client = None
+    ai_status = "DISCONNECTED"
+    if API_KEY:
+        try:
+            client = genai.Client(
+                api_key=API_KEY,
+                http_options=types.HttpOptions(
+                    timeout=25000,
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+            )
+            ai_status = "READY"
+        except Exception as e_ai:
+            ai_status = f"ERROR ({type(e_ai).__name__})"
+            client = None
     else:
-        ZONA_ATAS_DINAMIS = _tgt_awal.get("atas") or (tuple(state_sebelumnya["atas"]) if state_sebelumnya and state_sebelumnya.get("atas") else None)
-        ZONA_BAWAH_DINAMIS = _tgt_awal.get("bawah") or (tuple(state_sebelumnya["bawah"]) if state_sebelumnya and state_sebelumnya.get("bawah") else None)
+        ai_status = "DISCONNECTED"
 
-    # Simpan state awal yang memuat sinyal aktif & sinyal sebelumnya
-    simpan_state_sinyal(SINYAL_AKTIF_DINAMIS, SINYAL_SEBELUMNYA_DINAMIS, ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, "Startup Awal")
+    # TAMPILKAN STARTUP AWAL RINGKAS (4 BAGIAN: HEADER, SYSTEM STATUS, MARKET OVERVIEW, COMMAND MENU)
+    print(format_startup_presentation(
+        symbol=SYMBOL,
+        mt5_connected=mt5_ok,
+        tick=tick_live,
+        engine_ready=engine_ok,
+        ai_status=ai_status,
+        version=APP_VERSION,
+    ))
 
-    # =====================================================================
-    #  FITUR TANYA JAWAB INTERAKTIF (Q&A CHAT DENGAN KONTEKS DATA MT5)
-    # =====================================================================
-    riwayat_chat = [
-        {"role": "user", "parts": [{"text": prompt}]},
-        {"role": "model", "parts": [{"text": jawaban_awal}]},
-    ]
+    # Sinkronisasi target zona awal Python Scanner ke state jika belum diset
+    if not ZONA_ATAS_DINAMIS or not ZONA_BAWAH_DINAMIS:
+        try:
+            _tgt_init = ekstrak_target_ai("")
+            if not ZONA_ATAS_DINAMIS and _tgt_init.get("atas"):
+                ZONA_ATAS_DINAMIS = _tgt_init["atas"]
+            if not ZONA_BAWAH_DINAMIS and _tgt_init.get("bawah"):
+                ZONA_BAWAH_DINAMIS = _tgt_init["bawah"]
+        except Exception:
+            pass
 
-    print("\n" + "=" * 70)
-    print("MODE TANYA JAWAB & ASISTEN TRADING INTERAKTIF AKTIF")
-    print("- Ketik pertanyaan bebas tentang market / setup di atas.")
-    print("- Ketik 'pantau'                -> OTOMATIS memantau zona AI & MENGAWAL POSISI RUNNING (Alert BEP/SL/Bahaya)!")
-    print("- Ketik 'pantau <bawah> <atas>' -> memantau zona harga manual pilihan Anda + mengawal posisi running.")
-    print("- Ketik 'sinyal' atau 'status'  -> tampilkan riwayat sinyal sebelumnya & status sinyal aktif saat ini.")
-    print("- Ketik 'jurnal' atau 'rekap'   -> lihat daftar zona sinyal (mana yang diambil, kena SL & kena TP).")
-    print("- Ketik 'ambil <nomor>'         -> tandai manual nomor zona di jurnal sebagai DIAMBIL (misal: ambil 7,8).")
-    print("- Ketik 'skip <nomor>'          -> hapus tanda diambil pada nomor zona di jurnal (misal: skip 9).")
-    print("- Ketik 'refresh' atau 'update' -> tarik ulang data terbaru dari MT5.")
-    print("- Ketik 'zona' atau 'scan'      -> tampilkan laporan scanner zona SMC Python-only.")
-    print("- Ketik 'simpan'                -> simpan hasil analisa, tanya jawab, & tabel jurnal ke file Jurnal (.md).")
-    print("- Ketik 'exit' atau 'keluar'    -> berhenti.")
-    print("=" * 70)
+    riwayat_chat = []
 
     while True:
         try:
-            tanya = input("\n[Tanya AI] > ").strip()
+            tanya = input("\n[XAUUSD SMC] > ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nSelesai. Semoga trading Anda lancar!")
             break
@@ -249,7 +181,7 @@ def main():
                     print(f"   • Rasio R:R      : TP1 1:{mm_s['rrr_tp1']:.1f} | TP2 1:{mm_s['rrr_tp2']:.1f} (Jarak SL: {mm_s['jarak_sl']:.2f} pt)")
                     if kat_t == "HIGH RISK":
                         print(f"   • Lot High Risk  : {mm_s.get('lot_025', mm_s['lot_05']):.2f} lot (Risiko mini 0.25%: -${mm_s.get('risk_025_usd', mm_s['risk_05_usd']):.2f}) [batas maksimum bila tetap diambil]")
-                    print(f"   • Rekomendasi Lot: 0.5% (Disiplin): {mm_s['lot_05']:.2f} lot (-${mm_s['risk_05_usd']:.2f}) | 1.0% (Standar): {mm_s['lot_10']:.2f} lot (-${mm_s['risk_10_usd']:.2f})")
+                    print(f"   • Rekomendasi Lot: 0.5% (Konservatif): {mm_s['lot_05']:.2f} lot (-${mm_s['risk_05_usd']:.2f}) | 1.0% (Risiko Lebih Tinggi): {mm_s['lot_10']:.2f} lot (-${mm_s['risk_10_usd']:.2f})")
                     if mm_s.get("melebihi_batas"):
                         print(f"   ⚠️ Lot minimum broker ({mm_s['lot_05']:.2f}) membuat risiko melebihi 0.5% modal — pertimbangkan SL lebih dekat atau lewati setup.")
             else:
@@ -309,15 +241,76 @@ def main():
             tampilkan_rekap()
             continue
 
+        if cmd in ("scan detail", "scanner detail", "zona detail", "zone detail"):
+            try:
+                hasil_scan = scan_xauusd_zones()
+                dec = evaluate_trade_decision()
+                print("\n" + format_scan_presentation(hasil_scan, dec, detailed=True))
+            except Exception as e_sc:
+                print(f"Gagal menjalankan Zone Scanner Detail: {e_sc}")
+            continue
+
         if cmd in ("zona", "zone", "scanner", "scan", "smc"):
             try:
-                print("\n" + "=" * 70)
-                print("🔍 [PYTHON-ONLY XAUUSD ZONE SCANNER (SMC ENGINE)]")
                 hasil_scan = scan_xauusd_zones()
-                print(hasil_scan.get("summary_text", "Tidak ada data."))
-                print("=" * 70)
+                dec = evaluate_trade_decision()
+                print("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
             except Exception as e_sc:
                 print(f"Gagal menjalankan Zone Scanner: {e_sc}")
+            continue
+
+        if cmd in ("audit", "audit mt5", "cek akun", "cek order", "audit order"):
+            try:
+                print("\n" + "=" * 70)
+                print("AUDIT FAKTA AKUN MT5, PENDING ORDER & VOLATILITAS PASAR")
+                print("=" * 70)
+                info_mt5 = cek_posisi_terbuka_mt5(SYMBOL)
+                print(info_mt5)
+                try:
+                    df_d1 = ambil_data(SYMBOL, "D1", 20)
+                    if df_d1 is not None and len(df_d1) >= 14:
+                        ref_price = float(df_d1["Close"].iloc[-1])
+                        adr_text = analisa_adr_exhaustion(df_d1, ref_price)
+                        print(adr_text)
+                except Exception as e_adr:
+                    print(f"ADR Info tidak dapat dimuat: {e_adr}")
+                print("=" * 70)
+            except Exception as e_aud:
+                print(f"Gagal melakukan audit MT5: {e_aud}")
+            continue
+
+        if cmd in ("diag", "diagnostik", "diagnostic", "scan diag"):
+            try:
+                hasil_scan = scan_xauusd_zones()
+                print("\n" + format_diagnostic_report(hasil_scan))
+            except Exception as e_diag:
+                print(f"Gagal menjalankan diagnostik scanner: {e_diag}")
+            continue
+
+        if cmd in ("help", "bantuan", "menu", "?", "panduan"):
+            print("\n" + "=" * 70)
+            print("📖 DAFTAR PERINTAH XAUUSD SMC SCANNER")
+            print("=" * 70)
+            print("1. PERINTAH SCAN & ANALISIS:")
+            print("   • scan         : Ringkasan 5 bagian (Kondisi Pasar, Radar Zone, Entry Plan,")
+            print("                    Keputusan Resmi Python Scanner, Risk Warning)")
+            print("   • scan detail  : Analisis lengkap seluruh kandidat zona HTF & detail teknis")
+            print("   • zona         : Cek status zona supply & demand aktif")
+            print("   • diag         : Diagnostik lengkap filter dan zona yang terdeteksi/ditolak")
+            print("\n2. PERINTAH PEMANTAUAN & EKSEKUSI:")
+            print("   • pantau       : Mode pemantauan real-time MT5 hingga zona tersentuh")
+            print("   • sinyal       : Cek status sinyal aktif yang tersimpan di sistem")
+            print("   • audit        : Audit fakta akun MT5, floating order, pending order & ADR")
+            print("\n3. PERINTAH JURNAL & MANAJEMEN:")
+            print("   • jurnal       : Rekap riwayat sinyal, winrate, dan evaluasi performa")
+            print("   • ambil <no>   : Tandai sinyal pada jurnal sebagai diambil")
+            print("   • skip <no>    : Batalkan tanda diambil pada sinyal jurnal")
+            print("   • simpan       : Simpan hasil analisis & jurnal ke file Markdown")
+            print("   • refresh      : Perbarui analisis dengan data market MT5 terkini")
+            print("\n4. SISTEM:")
+            print("   • help         : Menampilkan panduan dan daftar perintah ini")
+            print("   • exit         : Keluar dari aplikasi (q / quit / keluar)")
+            print("=" * 70)
             continue
 
         if cmd in ("simpan", "save"):
@@ -336,6 +329,16 @@ def main():
             continue
 
         if cmd in ("refresh", "update"):
+            if client is None:
+                print("\n   [INFO]: Gemini AI tidak aktif. Memperbarui data market dan Python Scanner...")
+                try:
+                    hasil_scan = scan_xauusd_zones()
+                    dec = evaluate_trade_decision()
+                    print("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
+                except Exception as e_rf:
+                    print(f"Gagal memperbarui scanner: {e_rf}")
+                continue
+
             # Jika user ketik refresh manual, cek juga apakah zona dari AI sebelumnya sudah ditembus oleh harga terbaru
             teks_ai_lama = next((m["parts"][0]["text"] for m in reversed(riwayat_chat) if m["role"] == "model"), "")
             target_lama = ekstrak_target_ai(teks_ai_lama)
@@ -376,6 +379,7 @@ def main():
             print("   Mengirim data live ke AI (streaming real-time)...", end="\r")
             jwb_baru, mdl = panggil_gemini(client, prompt_baru, stream_output=True)
             if jwb_baru:
+                jwb_baru = sanitasi_output_gemini(jwb_baru)
                 _tgt_baru = ekstrak_target_ai(jwb_baru)
                 _cand_baru = _tgt_baru.get("sinyal")
                 if _cand_baru and mdl:
@@ -479,15 +483,20 @@ def main():
                 "6. Gunakan gaya bahasa profesional, lugas, santai namun presisi seperti rekan trader ahli (tanpa basa-basi)."
             )
 
-        # Untuk sesi Tanya Jawab, gunakan hanya percakapan Q&A terakhir (tanpa prompt startup yang membawa template A/B/C)
-        percakapan_qa = [m for m in riwayat_chat[2:]] if len(riwayat_chat) > 2 else []
-        if len(percakapan_qa) > 6:
-            percakapan_qa = percakapan_qa[-6:]
+        # Jika Gemini AI offline, infokan kepada trader dan arahkan ke perintah lokal
+        if client is None:
+            print("\n   [INFO]: Layanan Gemini AI tidak aktif (GEMINI_API_KEY belum dikonfigurasi atau offline).")
+            print("   Gunakan perintah lokal scanner seperti 'scan', 'zona', 'pantau', 'jurnal', 'audit', atau 'help'.")
+            continue
+
+        # Untuk sesi Tanya Jawab, gunakan hanya percakapan Q&A terakhir (hingga 6 giliran terakhir)
+        percakapan_qa = list(riwayat_chat[-6:]) if riwayat_chat else []
         konten_qa = percakapan_qa + [{"role": "user", "parts": [{"text": instruksi_qa}]}]
 
         print("   Menghubungi server AI...", end="\r")
         jawaban_qa, mdl = panggil_gemini(client, konten_qa, stream_output=True)
         if jawaban_qa:
+            jawaban_qa = sanitasi_output_gemini(jawaban_qa)
             if minta_baru:
                 _tgt_qa = ekstrak_target_ai(jawaban_qa)
                 _cand_qa = _tgt_qa.get("sinyal")

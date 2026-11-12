@@ -8,6 +8,7 @@ import MetaTrader5 as mt5
 
 # Direktori root project
 _DIR_SCRIPT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+APP_VERSION = "v2.5"
 
 
 def _muat_api_key():
@@ -73,6 +74,9 @@ JARAK_CONFLUENCE_MAKS = 100.0      # confluence yang lebih jauh dari ini tidak d
 FILE_JURNAL_SINYAL = os.path.join(_DIR_SCRIPT, "jurnal_sinyal_xauusd.csv")
 FILE_ERROR_LOG = os.path.join(_DIR_SCRIPT, "error_xauusd.log")
 FILE_STATE_SINYAL = os.path.join(_DIR_SCRIPT, "state_sinyal_xauusd.json")
+FILE_STATE_ZONE_TRACKER = os.path.join(_DIR_SCRIPT, "state_zone_tracker.json")
+DEFAULT_PENDING_EXPIRATION_HOURS = 8
+ZONE_APPROACH_DISTANCE_POINTS = 5.0
 
 # Flag penanganan berita
 BLOKIR_JIKA_BERITA_GAGAL = False

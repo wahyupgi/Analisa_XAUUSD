@@ -15,7 +15,8 @@ except ImportError:
     winsound = None
 
 import pandas as pd
-from modules.config import FILE_ERROR_LOG
+from typing import Optional, Any
+from modules.config import FILE_ERROR_LOG, SYMBOL, APP_VERSION, API_KEY
 
 _ANTRIAN_BUNYI = queue.Queue()
 _THREAD_BUNYI = None
@@ -92,3 +93,103 @@ def deteksi_offset(tick, df_m5=None):
         if last_ts.weekday() == 4 and last_ts.hour in (22, 23):
             return 2 if last_ts.hour == 22 else 3
     return None
+
+
+def format_startup_presentation(
+    symbol: str = SYMBOL,
+    mt5_connected: Optional[bool] = None,
+    tick: Optional[Any] = None,
+    engine_ready: Optional[bool] = None,
+    ai_status: Optional[str] = None,
+    version: str = APP_VERSION,
+) -> str:
+    """
+    Format tampilan startup awal XAUUSD SMC Scanner:
+    1. HEADER (Nama, deskripsi singkat, versi aplikasi)
+    2. SYSTEM STATUS (MT5 Connection, Market Data, Python Scanner Engine, Gemini AI)
+    3. MARKET OVERVIEW (Harga XAUUSD terkini, waktu update terakhir atau DATA UNAVAILABLE)
+    4. COMMAND MENU (Daftar perintah utama ringkas)
+    """
+    out = []
+    out.append("=" * 70)
+    out.append(f"XAUUSD SMC SCANNER {version}".center(70))
+    out.append("=" * 70)
+    out.append("")
+
+    # 1. Header
+    out.append("1. HEADER")
+    out.append("• Aplikasi             : XAUUSD SMC SCANNER")
+    out.append("• Deskripsi            : SMC Multi-Timeframe Analysis & Institutional Risk Management")
+    out.append(f"• Versi                : {version}")
+    out.append("")
+
+    # 2. System Status
+    if mt5_connected is None:
+        try:
+            import MetaTrader5 as mt5
+            mt5_connected = bool(mt5.terminal_info() is not None)
+        except Exception:
+            mt5_connected = False
+
+    st_mt5 = "CONNECTED" if mt5_connected else "DISCONNECTED"
+
+    if tick is None and mt5_connected:
+        try:
+            import MetaTrader5 as mt5
+            tick = mt5.symbol_info_tick(symbol)
+        except Exception:
+            tick = None
+
+    has_tick = bool(tick and getattr(tick, "bid", 0) > 0)
+    if mt5_connected:
+        st_market = f"READY ({symbol})" if has_tick else "DATA UNAVAILABLE"
+    else:
+        st_market = "DISCONNECTED"
+
+    if engine_ready is None:
+        engine_ready = True
+    st_engine = "READY" if engine_ready else "ERROR"
+
+    if ai_status is None:
+        api_k = os.environ.get("GEMINI_API_KEY", "").strip() or API_KEY
+        st_ai = "READY" if api_k else "DISCONNECTED"
+    else:
+        st_ai = ai_status
+
+    out.append("2. SYSTEM STATUS")
+    out.append(f"• MT5 Connection       : {st_mt5}")
+    out.append(f"• Market Data          : {st_market}")
+    out.append(f"• Python Scanner Engine: {st_engine}")
+    out.append(f"• Gemini AI            : {st_ai}")
+    out.append("")
+
+    # 3. Market Overview
+    out.append("3. MARKET OVERVIEW")
+    if has_tick:
+        bid_p = float(tick.bid)
+        ask_p = float(tick.ask)
+        spread_pt = abs(ask_p - bid_p)
+        t_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WIB")
+        out.append(f"• Simbol               : {symbol}")
+        out.append(f"• Harga Terkini        : Bid {bid_p:.2f} | Ask {ask_p:.2f} (Spread: {spread_pt:.2f} pt)")
+        out.append(f"• Waktu Update         : {t_str}")
+    else:
+        out.append(f"• Simbol               : {symbol}")
+        out.append("• Harga Terkini        : DATA UNAVAILABLE")
+        out.append("• Waktu Update         : DATA UNAVAILABLE")
+    out.append("")
+
+    # 4. Command Menu
+    out.append("4. COMMAND MENU")
+    out.append("• scan       : Jalankan Scanner Zona SMC (5 Bagian Ringkas)")
+    out.append("• scan detail: Analisis detail seluruh kandidat zona & breakdown skor")
+    out.append("• zona       : Radar zona Order Block & FVG aktif")
+    out.append("• pantau     : Monitor interaktif live price & kawal posisi terbuka")
+    out.append("• jurnal     : Lihat riwayat & rekap performa sinyal jurnal")
+    out.append("• audit      : Audit fakta akun MT5, pending order & status ADR")
+    out.append("• refresh    : Update data real-time MT5 & perbarui analisa")
+    out.append("• help       : Panduan lengkap seluruh perintah terminal")
+    out.append("• exit       : Keluar dari aplikasi")
+    out.append("=" * 70)
+
+    return "\n".join(out)

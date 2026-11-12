@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import MetaTrader5 as mt5
@@ -120,32 +121,103 @@ def kumpulkan_konteks_mt5(is_refresh=False):
     smc_text = "".join(analisa_metode(n, frames[n], offset, harga_ref) for n in ("H4", "H1", "M30", "M5"))
     smc_text += analisa_sesi(frames["M30"], frames["M5"], offset)
 
-    # Hitung kandidat zona algoritmik siap pakai (BUY & SELL) dari data MT5 agar AI punya jangkar angka presisi
-    z_buy_k, z_buy_c2 = _cari_zona_valid_berikutnya_mt5("BUY", harga_ref, harga_ref, atr_m5_val)
-    z_sell_k, z_sell_c2 = _cari_zona_valid_berikutnya_mt5("SELL", harga_ref, harga_ref, atr_m5_val)
-    kandidat_algo_txt = "\n===== KANDIDAT SETUP ALGORITMIK MT5 SIAP PAKAI (JANGKAR PRESISI ANTI-HALUSINASI) =====\n"
-    kandidat_algo_txt += "  (Gunakan angka di bawah ini sebagai acuan utama ZONA_BAWAH / ZONA_ATAS dan SINYAL_AKTIF agar 100% akurat sesuai struktur MT5 & lolos gerbang jarak <= 20 poin):\n"
-    if z_buy_k:
-        kandidat_algo_txt += (
-            f"  * KANDIDAT BUY #1 (Terdekat): ENTRY {z_buy_k['lo']:.2f}-{z_buy_k['hi']:.2f} | SL {z_buy_k['sl']:.2f} | "
-            f"TP1 {z_buy_k['tp1']:.2f} | TP2 {z_buy_k['tp2']:.2f} (Jarak {harga_ref - z_buy_k['hi']:.2f} pt | {z_buy_k['sumber']})\n"
+    # Evaluasi keputusan teknikal dari Python Scanner secara langsung
+    try:
+        dec_scan = evaluate_trade_decision(frames=frames, current_price=harga_ref)
+        scan_res = scan_xauusd_zones(frames=frames, current_price=harga_ref)
+    except Exception:
+        dec_scan = {"status": "WAIT", "reasons": ["Scanner dalam mode fallback"]}
+        scan_res = {}
+
+    st_dec = dec_scan.get("status", "WAIT")
+    dir_dec = dec_scan.get("direction")
+    plan_dec = dec_scan.get("plan")
+    reasons_dec = dec_scan.get("reasons", [])
+    reasons_txt = "; ".join(reasons_dec) if reasons_dec else "Konfirmasi scanner belum terpenuhi"
+    ctx_htf = scan_res.get("htf_context", {})
+    h4_bias_txt = ctx_htf.get("H4", "NETRAL")
+    h1_struct_txt = ctx_htf.get("H1", "NETRAL")
+
+    if st_dec == "VALID" and plan_dec and dir_dec:
+        kandidat_algo_txt = (
+            f"\n===== KEPUTUSAN RESMI PYTHON SCANNER: VALID ({dir_dec}) =====\n"
+            f"  * STATUS FINAL PYTHON SCANNER: VALID ({dir_dec})\n"
+            f"  * REKOMENDASI RESMI ENTRY     : {dir_dec} @ {plan_dec['entry_min']:.2f} - {plan_dec['entry_max']:.2f}\n"
+            f"  * STOP LOSS RESMI             : {plan_dec['sl']:.2f}\n"
+            f"  * TARGET TP1 / TP2            : TP1 {plan_dec['tp1']:.2f} | TP2 {plan_dec['tp2']:.2f}\n"
+            f"  * RISK/REWARD RESMI           : 1:{plan_dec['rr']:.1f}\n"
+            f"  * ALASAN VALIDASI             : {reasons_txt}\n"
+            f"  (AI WAJIB MENGIKUTI DAN MENGUNCI ANGKA RESMI PYTHON SCANNER DI ATAS 100%!)\n"
         )
-    if z_buy_c2:
-        kandidat_algo_txt += (
-            f"  * KANDIDAT BUY #2 (Cadangan): ENTRY {z_buy_c2['lo']:.2f}-{z_buy_c2['hi']:.2f} | SL {z_buy_c2['sl']:.2f} | "
-            f"TP1 {z_buy_c2['tp1']:.2f} | TP2 {z_buy_c2['tp2']:.2f} (Jarak {harga_ref - z_buy_c2['hi']:.2f} pt | {z_buy_c2['sumber']})\n"
-        )
-    if z_sell_k:
-        kandidat_algo_txt += (
-            f"  * KANDIDAT SELL #1 (Terdekat): ENTRY {z_sell_k['lo']:.2f}-{z_sell_k['hi']:.2f} | SL {z_sell_k['sl']:.2f} | "
-            f"TP1 {z_sell_k['tp1']:.2f} | TP2 {z_sell_k['tp2']:.2f} (Jarak {z_sell_k['lo'] - harga_ref:.2f} pt | {z_sell_k['sumber']})\n"
-        )
-    if z_sell_c2:
-        kandidat_algo_txt += (
-            f"  * KANDIDAT SELL #2 (Cadangan): ENTRY {z_sell_c2['lo']:.2f}-{z_sell_c2['hi']:.2f} | SL {z_sell_c2['sl']:.2f} | "
-            f"TP1 {z_sell_c2['tp1']:.2f} | TP2 {z_sell_c2['tp2']:.2f} (Jarak {z_sell_c2['lo'] - harga_ref:.2f} pt | {z_sell_c2['sumber']})\n"
-        )
+    else:
+        # Ambil zona radar resmi langsung dari Python zone_scanner.py
+        all_radar = scan_res.get("radar_zones") or scan_res.get("active_zones", [])
+        if not all_radar:
+            kandidat_algo_txt = "\n===== RADAR ZONE PYTHON SCANNER =====\nNO RADAR ZONE DETECTED.\n(Python Scanner tidak menemukan zona yang memenuhi syarat; AI DILARANG mengarang zona!)\n"
+        else:
+            kandidat_algo_txt = f"\n===== RADAR ZONE PYTHON SCANNER (STATUS SCANNER: {st_dec} — BUKAN SINYAL ENTRY / PENDING ORDER) =====\n"
+            kandidat_algo_txt += (
+                f"  (PERINGATAN KERAS OTORITAS PYTHON SCANNER: Status saat ini {st_dec} [{reasons_txt}].\n"
+                f"   Semua zona di bawah WAJIB bersumber dari Python zone_scanner.py tanpa interpretasi perkiraan!\n"
+                f"   DILARANG KERAS memberikan sinyal rekomendasi BUY atau SELL dalam bentuk apapun!\n"
+                f"   DILARANG memberikan rekomendasi pending order (BUY LIMIT / SELL LIMIT) seolah-olah sudah valid!\n"
+                f"   Zona di bawah HANYA kandidat radar untuk dipantau, BUKAN rekomendasi entry aktif):\n"
+            )
+            demands = [z for z in all_radar if z.get("zone_type") == "DEMAND"]
+            supplies = [z for z in all_radar if z.get("zone_type") == "SUPPLY"]
+            for i, zd in enumerate(demands[:2], 1):
+                z_lo, z_hi = float(zd.get("price_low", 0.0)), float(zd.get("price_high", 0.0))
+                inval = float(zd.get("invalidation_price", z_lo))
+                tf = zd.get("timeframe", "H1")
+                st = zd.get("status", "RADAR")
+                ob = zd.get("origin_bos", {}).get("tipe", "OB")
+                fvg = (zd.get("fvg_confirmation") or {}).get("status", "-")
+                dist = 0.0 if (z_lo <= harga_ref <= z_hi) else (z_lo - harga_ref if harga_ref < z_lo else harga_ref - z_hi)
+                kandidat_algo_txt += (
+                    f"  * DEMAND ZONE #{i}: {tf} DEMAND {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
+                    f"OB: {ob} | FVG: {fvg} | Jarak: {dist:.2f} pt di bawah harga [HANYA PANTAU, BUKAN ENTRY]\n"
+                )
+            for i, zs in enumerate(supplies[:2], 1):
+                z_lo, z_hi = float(zs.get("price_low", 0.0)), float(zs.get("price_high", 0.0))
+                inval = float(zs.get("invalidation_price", z_hi))
+                tf = zs.get("timeframe", "H1")
+                st = zs.get("status", "RADAR")
+                ob = zs.get("origin_bos", {}).get("tipe", "OB")
+                fvg = (zs.get("fvg_confirmation") or {}).get("status", "-")
+                dist = 0.0 if (z_lo <= harga_ref <= z_hi) else (z_lo - harga_ref if harga_ref < z_lo else harga_ref - z_hi)
+                kandidat_algo_txt += (
+                    f"  * SUPPLY ZONE #{i}: {tf} SUPPLY {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
+                    f"OB: {ob} | FVG: {fvg} | Jarak: {dist:.2f} pt di atas harga [HANYA PANTAU, BUKAN ENTRY]\n"
+                )
     zona_text += kandidat_algo_txt
+
+    if st_dec != "VALID":
+        otoritas_scanner_txt = f"""
+🛡️ [OTORITAS MUTLAK PYTHON SCANNER — KEPUTUSAN FINAL: {st_dec}]:
+- Hasil Evaluasi Python Scanner: {st_dec} (Directional Bias H4: {h4_bias_txt}, Struktur H1: {h1_struct_txt})
+- Catatan / Alasan: {reasons_txt}
+- LARANGAN KERAS UNTUK ANALISIS AI (WAJIB DITAATI 100% TANPA PENGECUALIAN):
+  1. DILARANG KERAS MENGELUARKAN REKOMENDASI BUY ATAU SELL DALAM BENTUK APAPUN!
+  2. DILARANG MEMBERIKAN PENDING ORDER (BUY LIMIT / SELL LIMIT) SEOLAH-OLAH SUDAH VALID!
+  3. DILARANG MENETAPKAN AREA ENTRY, STOP LOSS, DAN TAKE PROFIT SEBAGAI REKOMENDASI RESMI!
+  4. DILARANG MENGUBAH STATUS WAIT MENJADI LOW RISK MAUPUN MEDIUM RISK!
+  5. DILARANG MENGGUNAKAN SKOR KONFLUENSI INTERNAL AI UNTUK MELEWATI VALIDASI PYTHON SCANNER!
+  6. AI WAJIB menuliskan status keputusan secara tegas: "WAIT: Belum ada setup valid ({reasons_txt})".
+  7. Pada blok [RADAR_TARGET] di akhir jawaban, WAJIB menuliskan:
+     SINYAL_AKTIF: WAIT | ENTRY: 0.00-0.00 | SL: 0.00 | TP1: 0.00 | TP2: 0.00
+"""
+    else:
+        otoritas_scanner_txt = f"""
+🎯 [OTORITAS MUTLAK PYTHON SCANNER — KEPUTUSAN FINAL: VALID ({dir_dec})]:
+- Python Scanner telah MENYETUJUI dan MEMVALIDASI setup {dir_dec}!
+- Parameter Resmi Terkonfirmasi:
+  * Arah       : {dir_dec}
+  * Area Entry : {plan_dec['entry_min']:.2f} - {plan_dec['entry_max']:.2f}
+  * Stop Loss  : {plan_dec['sl']:.2f}
+  * TP1 / TP2  : {plan_dec['tp1']:.2f} / {plan_dec['tp2']:.2f}
+  * Risk/Reward: 1:{plan_dec['rr']:.1f}
+- AI WAJIB menyelaraskan analisa dengan angka resmi di atas tanpa mengubah angka sedikitpun!
+"""
 
     data_text = (ringkas_tf("W1", frames["W1"], 6)
                  + ringkas_tf("D1", frames["D1"], 10)
@@ -160,6 +232,8 @@ Gunakan 100% HANYA fakta angka dari data MT5 di bawah ini (waktu = waktu server 
 Semua candle di tabel sudah CLOSE (valid). Swing high/low, Order Block, FVG, dan Golden Confluence sudah dihitung secara matematis oleh Python dari data real-time MT5 — GUNAKAN ANGKA TERSEBUT, DILARANG KERAS MENGARANG ANGKA SENDIRI!
 Harga saat ini: {harga_sekarang}
 
+{otoritas_scanner_txt}
+
 🛡️ [ATURAN KERAS ANTI-HALUSINASI & AUDIT AKUN REAL MT5 (WAJIB DITAATI MUTLAK)]:
 1. DILARANG MENGARANG LEVEL HARGA / INDIKATOR: Setiap angka Support/Resistance, Order Block, FVG, High/Low candle, EMA, RSI, ATR, maupun Balance/Equity/Lot yang kamu sebutkan WAJIB ada secara eksplisit di dalam data di bawah. Jangan pernah menebak atau mengira-ngira angka di luar data!
 2. BACA MATA UANG & POSISI AKUN REAL DENGAN TELITI:
@@ -170,6 +244,12 @@ Harga saat ini: {harga_sekarang}
    - Jika memberikan sinyal BUY LIMIT di bawah harga sekarang, pastikan TP1 berada di atas area entry dengan R:R >= 1:1.5.
    - Jika memberikan sinyal SELL LIMIT di atas harga sekarang, pastikan TP1 berada di bawah area entry dengan R:R >= 1:1.5.
 4. KONSISTENSI 100% ANTARA TEKS DAN [RADAR_TARGET]: Angka Area Entry, SL, TP1, dan TP2 yang kamu tulis di bagian penjelasan sinyal WAJIB SAMA PERSIS 100% sampai ke desimalnya dengan yang kamu tulis di blok `[RADAR_TARGET]` paling bawah!
+5. OUTPUT RINGKAS, PROFESIONAL & FOKUS KONTEKS:
+   - DILARANG menduplikasi atau mencetak ulang tabel OHLC mentah berbaris-baris atau mengulang daftar seluruh kandidat zona di dalam respons penjelasanmu.
+   - FOKUSKAN penjelasanmu pada konteks makroekonomi, katalis berita High-Impact USD, korelasi Dollar Index (DXY), SMT Divergence (XAU vs XAG), dan konteks ADR (Average Daily Range) batas bensin harian.
+6. PATUHI KEPUTUSAN PYTHON SCANNER 100%:
+   - Python Scanner adalah SATU-SATUNYA otoritas keputusan teknikal.
+   - Jika Python Scanner berstatus WAIT: dilarang memberikan rekomendasi entry aktif baru atau mengarang level sendiri. Jelaskan alasan WAIT secara logis, disiplin, dan profesional.
 
 {zona_text}
 
@@ -253,11 +333,13 @@ B. Daftar sinyal. HANYA tampilkan sinyal berlabel LOW RISK atau MEDIUM RISK. DIL
         * Sarankan pasang Limit di tepi depan / 50% tengah zona (Equilibrium) + buffer spread (atau bagi 2 peluru), JANGAN taruh 100% di ujung paling dalam zona!
         * Jika harga sudah menyentuh tepi zona (misal zona BUY 4107-4110 tapi harga cuma turun ke 4108 lalu naik): selama kenaikan belum melewati 60% jarak ke TP1, Limit di 4107 MASIH VALID ditunggu untuk retest kedua. TETAPI jika harga sudah terbang >= 60% jarak ke TP1 (atau mencapai TP1), WAJIB CANCEL Limit karena zona sudah mitigated (habis bensin & rawan jebol jika balik lagi).
    5. UKURAN LOT & MANAJEMEN RISIKO MT5 REALISTIS:
-      - Ambil langsung rekomendasi ukuran lot dan mata uang akun (`IDC` / `USD`) dari bagian "MANAJEMEN RISIKO & KALKULATOR LOT OTOMATIS" sesuai jarak SL dan equity akun MT5 (1% untuk Low Risk, 0.5% untuk Medium Risk).
+      - Ambil langsung rekomendasi ukuran lot dan mata uang akun (`IDC` / `USD`) dari bagian "MANAJEMEN RISIKO & KALKULATOR LOT OTOMATIS" sesuai jarak SL dan equity akun MT5 (0.5% untuk risiko lebih konservatif, 1.0% untuk risiko lebih tinggi dibandingkan 0.5%).
+      - Jika data kalkulasi lot atau kontrak simbol MT5 tidak lengkap/tersedia, tampilkan "DATA UNAVAILABLE: Kalkulasi lot belum tersedia" dan DILARANG MENGARANG ukuran lot!
+      - Bedakan persentase risiko modal dari ukuran lot. DILARANG MENGUBAH Entry, SL, TP, atau RR resmi dari Python Scanner!
 
    FORMAT SETIAP SINYAL WAJIB DITULIS RAPI SEPERTI INI:
    ----------------------------------------------------------------------
-   [SINYAL <LOW RISK / MEDIUM RISK>] <BUY / SELL> XAUUSD (<Tipe Order: Limit Pullback / Confirmed Break>)
+   [SINYAL <KONSERVATIF (0.5%) / STANDAR (1.0%)>] <BUY / SELL> XAUUSD (<Tipe Order: Limit Pullback / Confirmed Break>)
    • Area Entry   : <bawah> - <atas> (Jarak dari harga sekarang: X pt)
    • Stop Loss    : <angka> (Jarak risiko: X pt / X pips | Alasan: X pt di balik wick/level X)
    • Target TP    :
@@ -276,15 +358,13 @@ B. Daftar sinyal. HANYA tampilkan sinyal berlabel LOW RISK atau MEDIUM RISK. DIL
      Total Skor: X / 4 Pilar
    ----------------------------------------------------------------------
 
-   Kriteria Klasifikasi Risiko:
-   - LOW RISK (Swing / Setup Utama A+):
-     * Skor: 4/4 Pilar Terpenuhi.
-     * Berpijak pada zona OB fresh + FVG untouched yang overlap di H4/H1, ada Sweep M5 + CISD/CHoCH searah, R:R minimal 1:2.
-     * Alokasi risiko lot 1.0% modal.
-   - MEDIUM RISK (Intraday / Scalping Reaksi Zona Terdekat B+):
-     * Skor: minimal 3/4 Pilar, tetapi Pilar 2 (zona OB+FVG valid) dan Pilar 3 (trigger M5) wajib terpenuhi.
-     * Jika harga SAAT INI sedang menyentuh Zona zona OB+FVG terdekat (H1/M30/H4) dan di M5 sudah muncul Liquidity Sweep, CISD, CHoCH, atau pola rejection (Pin Bar/Engulfing) — selama TIDAK ada Institutional Impulse ekstrem lawan arah — berikan rencana eksekusi MEDIUM RISK di zona terdekat tersebut jika tetap lolos 3/4 Pilar dan R:R >= 1:1.5 (jangan hanya menyuruh tunggu di zona yang jauh, tetapi jangan memaksa entry bila syarat tidak terpenuhi). R:R minimal 1:1.5.
-     * Alokasi risiko lot 0.5% modal.
+   Kriteria Klasifikasi Risiko & Alokasi Modal:
+   - RISIKO LEBIH KONSERVATIF (0.5% modal):
+     * Risiko lebih konservatif, perlindungan modal lebih disiplin.
+   - RISIKO LEBIH TINGGI (1.0% modal):
+     * Memiliki eksposur risiko lebih besar dibandingkan 0.5%.
+     * DILARANG menyebut 1.0% sebagai Low Risk jika 0.5% disebut Medium Risk!
+     * Bedakan persentase risiko modal dari ukuran lot fisik.
    - HIGH RISK (Kurang dari 3 pilar, melawan Institutional Impulse aktif, di tengah range kosong tanpa zona, atau R:R di bawah 1:1.5): DILARANG ditampilkan.
 C. Jika tidak ada sinyal yang memenuhi minimal 3/4 Pilar, tulis jelas "WAIT: belum ada setup LOW/MEDIUM RISK", jelaskan pilar mana yang belum terpenuhi,
    dan sebutkan level/kondisi apa yang perlu ditunggu (Golden Zone mana, sweep/CHoCH apa, jam kill zone berikutnya) sebelum entry.
@@ -485,9 +565,190 @@ def _terapkan_otoritas_scanner(target):
     return target
 
 
+def sanitasi_output_gemini(
+    teks_ai: str,
+    dec: Optional[Dict[str, Any]] = None,
+    scan: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Menegakkan OTORITAS MUTLAK PYTHON SCANNER terhadap output Gemini:
+    1. Python VALID: sinyal resmi boleh ditampilkan, angka entry/SL/TP dikunci ke rencana Python.
+    2. Python WAIT / INVALID:
+       - DILARANG menampilkan rekomendasi sinyal BUY/SELL atau pending limit aktif.
+       - Blok [SINYAL ...] dinetralisir menjadi [STATUS TRADING: WAIT / INVALID].
+       - Area Entry, SL, TP dinonaktifkan (diisi tanda strip '-' / WAIT).
+       - Blok [RADAR_TARGET] disanitasi: SINYAL_AKTIF menjadi WAIT.
+       - Menambahkan keterangan jelas bahwa Python Scanner berstatus WAIT/INVALID.
+    3. Sumber Radar Zone:
+       - Jika Python Scanner tidak menemukan zona: tampilkan NO RADAR ZONE DETECTED.
+       - Jika Python Scanner memiliki radar zone: kunci harga zona ke hasil Python (AI dilarang mengubah harga).
+    """
+    if not teks_ai or not isinstance(teks_ai, str):
+        return teks_ai
+
+    if dec is None:
+        try:
+            from modules.zone_scanner import evaluate_trade_decision
+            dec = evaluate_trade_decision()
+        except Exception:
+            dec = {"status": "WAIT", "direction": None, "reasons": ["Evaluasi scanner default WAIT"]}
+
+    status_scanner = str(dec.get("status", "WAIT")).upper()
+    direction_scanner = dec.get("direction")
+    plan = dec.get("plan")
+    reasons = dec.get("reasons", [])
+    alasan_txt = "; ".join(reasons) if reasons else "Persyaratan validasi scanner belum terpenuhi"
+
+    # Penegakan Sumber Radar Zone (Section 1 Audit)
+    if scan is not None:
+        radar_list = scan.get("radar_zones") or scan.get("active_zones", [])
+        if not radar_list:
+            def _bersihkan_radar_kosong(m):
+                isi = m.group(1)
+                isi = re.sub(r"ZONA_ATAS:[^\n]+", "ZONA_ATAS: NO RADAR ZONE DETECTED", isi, flags=re.I)
+                isi = re.sub(r"ZONA_BAWAH:[^\n]+", "ZONA_BAWAH: NO RADAR ZONE DETECTED", isi, flags=re.I)
+                if "NO RADAR ZONE DETECTED" not in isi:
+                    isi += "\nZONA_ATAS: NO RADAR ZONE DETECTED\nZONA_BAWAH: NO RADAR ZONE DETECTED"
+                return f"[RADAR_TARGET]{isi}[/RADAR_TARGET]"
+
+            if "[RADAR_TARGET]" in teks_ai:
+                teks_ai = re.sub(r"\[RADAR_TARGET\](.*?)\[/RADAR_TARGET\]", _bersihkan_radar_kosong, teks_ai, flags=re.S | re.I)
+            else:
+                teks_ai += "\n[RADAR_TARGET]\nZONA_ATAS: NO RADAR ZONE DETECTED\nZONA_BAWAH: NO RADAR ZONE DETECTED\nSINYAL_AKTIF: WAIT | ENTRY: 0.00-0.00 | SL: 0.00 | TP1: 0.00 | TP2: 0.00\n[/RADAR_TARGET]\n"
+
+            teks_ai = re.sub(r"(?:•|\*|-)?\s*Kandidat\s+(?:Demand|Supply)[^\n]+", "NO RADAR ZONE DETECTED.", teks_ai, flags=re.I)
+            if "NO RADAR ZONE DETECTED" not in teks_ai:
+                teks_ai += "\n[RADAR ZONE]: NO RADAR ZONE DETECTED.\n"
+        else:
+            bs = scan.get("best_supply") or next((z for z in radar_list if z.get("zone_type") == "SUPPLY"), None)
+            bd = scan.get("best_demand") or next((z for z in radar_list if z.get("zone_type") == "DEMAND"), None)
+
+            def _kunci_radar_python(m):
+                isi = m.group(1)
+                if bs:
+                    sl_s = bs.get('sl_recommended', bs.get('invalidation_price', bs['price_high']))
+                    garis_atas = f"ZONA_ATAS: {bs['price_low']:.2f}-{bs['price_high']:.2f} (batas_jebol: {sl_s:.2f})"
+                    isi = re.sub(r"ZONA_ATAS:[^\n]+", garis_atas, isi, flags=re.I)
+                if bd:
+                    sl_d = bd.get('sl_recommended', bd.get('invalidation_price', bd['price_low']))
+                    garis_bawah = f"ZONA_BAWAH: {bd['price_low']:.2f}-{bd['price_high']:.2f} (batas_jebol: {sl_d:.2f})"
+                    isi = re.sub(r"ZONA_BAWAH:[^\n]+", garis_bawah, isi, flags=re.I)
+                return f"[RADAR_TARGET]{isi}[/RADAR_TARGET]"
+
+            if "[RADAR_TARGET]" in teks_ai:
+                teks_ai = re.sub(r"\[RADAR_TARGET\](.*?)\[/RADAR_TARGET\]", _kunci_radar_python, teks_ai, flags=re.S | re.I)
+
+    if status_scanner == "VALID" and plan and direction_scanner:
+        # Valid setup! Ensure AI output matches Python direction and plan
+        teks_hasil = teks_ai
+        def _perbaiki_radar_valid(m):
+            isi = m.group(1)
+            garis_sig = f"SINYAL_AKTIF: {direction_scanner} | ENTRY: {plan['entry_min']:.2f}-{plan['entry_max']:.2f} | SL: {plan['sl']:.2f} | TP1: {plan['tp1']:.2f} | TP2: {plan['tp2']:.2f}"
+            isi_baru = re.sub(r"SINYAL_AKTIF:[^\n]+", garis_sig, isi, flags=re.I)
+            if "SINYAL_AKTIF:" not in isi_baru:
+                isi_baru += f"\n{garis_sig}"
+            return f"[RADAR_TARGET]{isi_baru}[/RADAR_TARGET]"
+
+        if "[RADAR_TARGET]" in teks_hasil:
+            teks_hasil = re.sub(r"\[RADAR_TARGET\](.*?)\[/RADAR_TARGET\]", _perbaiki_radar_valid, teks_hasil, flags=re.S | re.I)
+        return teks_hasil
+
+    # JIKA SCANNER WAIT ATAU INVALID:
+    # Netralisir seluruh rekomendasi sinyal BUY/SELL dan pending limit!
+    teks_bersih = teks_ai
+
+    # 1. Netralisir blok header sinyal [SINYAL <RISK>] <BUY/SELL>
+    teks_bersih = re.sub(
+        r"(?:###\s*)?(?:\*\*)?\[SINYAL[^\]]*\](?:\*\*)?\s*(?:BUY|SELL)[^\n]*",
+        f"[STATUS TRADING: {status_scanner} — TIDAK ADA REKOMENDASI ENTRY AKTIF]",
+        teks_bersih,
+        flags=re.I
+    )
+
+    # 2. Netralisir rekomendasi langsung BUY/SELL LIMIT di baris terpisah
+    teks_bersih = re.sub(
+        r"([•\*\-]?\s*(?:Rekomendasi|Sinyal|Order)\s*(?:Utama|Aktif)?\s*:\s*)(?:BUY|SELL)\s*(?:LIMIT|STOP)?[^\n]*",
+        rf"\1WAIT (Tidak ada pending order aktif — status scanner {status_scanner})",
+        teks_bersih,
+        flags=re.I
+    )
+
+    # 3. Netralisir baris Area Entry
+    teks_bersih = re.sub(
+        r"([•\*\-]?\s*(?:Area\s*Entry|Entry\s*Zone|Entry)\s*:\s*)[^\n]+",
+        rf"\1- (WAIT: Tidak ada rekomendasi entry aktif dari Python Scanner)",
+        teks_bersih,
+        flags=re.I
+    )
+
+    # 4. Netralisir baris Stop Loss yang menyertai sinyal
+    teks_bersih = re.sub(
+        r"([•\*\-]?\s*(?:Stop\s*Loss|SL)\s*:\s*)\d{4}(?:\.\d+)?[^\n]*",
+        r"\1- (Tidak ada posisi aktif)",
+        teks_bersih,
+        flags=re.I
+    )
+
+    # 5. Netralisir baris Target TP (TP1 & TP2)
+    teks_bersih = re.sub(
+        r"([•\*\-]?\s*Target\s*TP\s*:)[^\n]*",
+        r"\1 -",
+        teks_bersih,
+        flags=re.I
+    )
+    teks_bersih = re.sub(
+        r"(\s*-\s*TP1\s*:\s*)\d{4}(?:\.\d+)?[^\n]*",
+        r"\1-",
+        teks_bersih,
+        flags=re.I
+    )
+    teks_bersih = re.sub(
+        r"(\s*-\s*TP2\s*:\s*)\d{4}(?:\.\d+)?[^\n]*",
+        r"\1-",
+        teks_bersih,
+        flags=re.I
+    )
+
+    # 6. Netralisir Manajemen Lot jika merekomendasikan lot aktif
+    teks_bersih = re.sub(
+        r"([•\*\-]?\s*Manajemen\s*Lot\s*:\s*)\d+(?:\.\d+)?\s*lot[^\n]*",
+        r"\g<1>0.00 lot (Menunggu sinyal valid)",
+        teks_bersih,
+        flags=re.I
+    )
+
+    # 7. Netralisir Note Limit (Anti Kena Kentut) jika menyuruh pasang limit
+    teks_bersih = re.sub(
+        r"([•\*\-]?\s*Note\s*Limit[^\n:]*:\s*)[^\n]+",
+        r"\1Jangan memasang pending limit; scanner belum memvalidasi setup.",
+        teks_bersih,
+        flags=re.I
+    )
+
+    # 8. Netralisir [RADAR_TARGET]
+    def _perbaiki_radar_wait(m):
+        isi = m.group(1)
+        garis_sig = "SINYAL_AKTIF: WAIT | ENTRY: 0.00-0.00 | SL: 0.00 | TP1: 0.00 | TP2: 0.00"
+        isi_baru = re.sub(r"SINYAL_AKTIF:[^\n]+", garis_sig, isi, flags=re.I)
+        if "SINYAL_AKTIF:" not in isi_baru:
+            isi_baru += f"\n{garis_sig}"
+        return f"[RADAR_TARGET]{isi_baru}[/RADAR_TARGET]"
+
+    if "[RADAR_TARGET]" in teks_bersih:
+        teks_bersih = re.sub(r"\[RADAR_TARGET\](.*?)\[/RADAR_TARGET\]", _perbaiki_radar_wait, teks_bersih, flags=re.S | re.I)
+
+    # 9. Pastikan ada peringatan otoritas scanner jika teks tampak memberikan sinyal
+    header_otoritas = f"\n[OTORITAS PYTHON SCANNER — KEPUTUSAN FINAL: {status_scanner}]\nCatatan: {alasan_txt}\nTidak ada rekomendasi BUY/SELL atau pending order yang aktif.\n"
+    if "[OTORITAS PYTHON SCANNER" not in teks_bersih:
+        teks_bersih = header_otoritas + teks_bersih
+
+    return teks_bersih
+
+
 def ekstrak_target_ai(teks_ai):
     """Membaca target dan sinyal dengan Python Zone Scanner sebagai satu-satunya sumber kebenaran teknikal.
     AI Gemini hanya memberikan narasi dan analisis tambahan, tanpa otoritas mengubah angka teknikal."""
+    teks_ai = sanitasi_output_gemini(teks_ai)
     target = {"atas": None, "bawah": None, "sinyal": None}
     _STATE_PARSER["ditolak"] = []
 
@@ -563,33 +824,57 @@ def snapshot_live_qa():
             htf_running_txt += f"H1 High {float(cur_h1['high']):.2f} Low {float(cur_h1['low']):.2f}"
         htf_running_txt = htf_running_txt.rstrip(" |") + "\n"
 
-    # Sertakan Zona Demand (BUY) & Supply (SELL) Valid Terdekat hasil kalkulasi algoritmik MT5 (H4/H1/M30/M15)
-    # agar di mode Q&A AI TIDAK PERNAH mengarang/menebak angka zona sendiri!
-    z_buy_qa, z_buy_cad = _cari_zona_valid_berikutnya_mt5("BUY", harga, harga, float(atr5[-1]))
-    z_sell_qa, z_sell_cad = _cari_zona_valid_berikutnya_mt5("SELL", harga, harga, float(atr5[-1]))
-    zona_mt5_qa_txt = "- [REFERENSI ZONA TEKNIKAL DARI DATA MT5 REAL-TIME]:\n"
-    if z_buy_qa:
-        zona_mt5_qa_txt += (
-            f"  * KANDIDAT BUY LIMIT UTAMA (DEMAND BAWAH TERDEKAT): ENTRY {z_buy_qa['lo']:.2f}-{z_buy_qa['hi']:.2f} | "
-            f"SL {z_buy_qa['sl']:.2f} | TP1 {z_buy_qa['tp1']:.2f} | TP2 {z_buy_qa['tp2']:.2f} "
-            f"(Jarak: {harga - z_buy_qa['hi']:.2f} pt di bawah harga sekarang | Sumber: {z_buy_qa['ket']})\n"
+    # Periksa status scanner lebih awal agar penamaan zona sinkron dengan otoritas Python
+    scan_qa_txt = ""
+    st_qa = "WAIT"
+    dec_qa = {"status": "WAIT", "reasons": []}
+    try:
+        from modules.zone_scanner import scan_xauusd_zones, evaluate_trade_decision
+        dec_qa = evaluate_trade_decision()
+        scan_qa = scan_xauusd_zones()
+        st_qa = dec_qa.get("status", "WAIT")
+        reasons_qa = "; ".join(dec_qa.get("reasons", [])) or "tidak ada alasan"
+        scan_qa_txt = f"- Status Python Zone Scanner: [{st_qa}] | Bias: {scan_qa.get('bias', '-')} | Catatan: {reasons_qa}\n"
+    except Exception:
+        pass
+
+    # Ambil zona radar resmi langsung dari Python zone_scanner.py
+    radar_qa_list = scan_qa.get("radar_zones") or scan_qa.get("active_zones", [])
+    if st_qa == "VALID" and dec_qa.get("plan"):
+        plan_qa = dec_qa["plan"]
+        zona_mt5_qa_txt = (
+            f"- [SINYAL RESMI TERKONFIRMASI PYTHON SCANNER DETIK INI]:\n"
+            f"  * ARAH: {dec_qa.get('direction')} | ENTRY: {plan_qa['entry_min']:.2f}-{plan_qa['entry_max']:.2f} | "
+            f"SL: {plan_qa['sl']:.2f} | TP1: {plan_qa['tp1']:.2f} | TP2: {plan_qa['tp2']:.2f} (RR 1:{plan_qa['rr']:.1f})\n"
         )
-    if z_buy_cad:
-        zona_mt5_qa_txt += (
-            f"  * KANDIDAT BUY LIMIT KE-2 (DEMAND CADANGAN): ENTRY {z_buy_cad['lo']:.2f}-{z_buy_cad['hi']:.2f} | "
-            f"SL {z_buy_cad['sl']:.2f} | TP1 {z_buy_cad['tp1']:.2f} | TP2 {z_buy_cad['tp2']:.2f} ({z_buy_cad['ket']})\n"
-        )
-    if z_sell_qa:
-        zona_mt5_qa_txt += (
-            f"  * KANDIDAT SELL LIMIT UTAMA (SUPPLY ATAS TERDEKAT): ENTRY {z_sell_qa['lo']:.2f}-{z_sell_qa['hi']:.2f} | "
-            f"SL {z_sell_qa['sl']:.2f} | TP1 {z_sell_qa['tp1']:.2f} | TP2 {z_sell_qa['tp2']:.2f} "
-            f"(Jarak: {z_sell_qa['lo'] - harga:.2f} pt di atas harga sekarang | Sumber: {z_sell_qa['ket']})\n"
-        )
-    if z_sell_cad:
-        zona_mt5_qa_txt += (
-            f"  * KANDIDAT SELL LIMIT KE-2 (SUPPLY CADANGAN): ENTRY {z_sell_cad['lo']:.2f}-{z_sell_cad['hi']:.2f} | "
-            f"SL {z_sell_cad['sl']:.2f} | TP1 {z_sell_cad['tp1']:.2f} | TP2 {z_sell_cad['tp2']:.2f} ({z_sell_cad['ket']})\n"
-        )
+    elif not radar_qa_list:
+        zona_mt5_qa_txt = "- [RADAR ZONE PYTHON SCANNER]: NO RADAR ZONE DETECTED. (Tidak ada zona pemantauan valid).\n"
+        scan_qa_txt += "  [ATURAN OTORITAS MUTLAK]: Status Python Scanner WAIT/INVALID. Dilarang memberikan rekomendasi BUY/SELL atau pending order limit!\n"
+    else:
+        zona_mt5_qa_txt = "- [RADAR ZONA PEMANTAUAN MT5 — BUKAN REKOMENDASI PENDING ORDER / ENTRY AKTIF]:\n"
+        demands_qa = [z for z in radar_qa_list if z.get("zone_type") == "DEMAND"]
+        supplies_qa = [z for z in radar_qa_list if z.get("zone_type") == "SUPPLY"]
+        for i, zd in enumerate(demands_qa[:2], 1):
+            z_lo, z_hi = float(zd.get("price_low", 0.0)), float(zd.get("price_high", 0.0))
+            inval = float(zd.get("invalidation_price", z_lo))
+            tf = zd.get("timeframe", "H1")
+            st = zd.get("status", "RADAR")
+            dist = 0.0 if (z_lo <= harga <= z_hi) else (z_lo - harga if harga < z_lo else harga - z_hi)
+            zona_mt5_qa_txt += (
+                f"  * DEMAND ZONE #{i}: {tf} DEMAND {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
+                f"Jarak: {dist:.2f} pt di bawah harga [HANYA PANTAU, BUKAN ENTRY]\n"
+            )
+        for i, zs in enumerate(supplies_qa[:2], 1):
+            z_lo, z_hi = float(zs.get("price_low", 0.0)), float(zs.get("price_high", 0.0))
+            inval = float(zs.get("invalidation_price", z_hi))
+            tf = zs.get("timeframe", "H1")
+            st = zs.get("status", "RADAR")
+            dist = 0.0 if (z_lo <= harga <= z_hi) else (z_lo - harga if harga < z_lo else harga - z_hi)
+            zona_mt5_qa_txt += (
+                f"  * SUPPLY ZONE #{i}: {tf} SUPPLY {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
+                f"Jarak: {dist:.2f} pt di atas harga [HANYA PANTAU, BUKAN ENTRY]\n"
+            )
+        scan_qa_txt += "  [ATURAN OTORITAS MUTLAK]: Status Python Scanner WAIT/INVALID. Dilarang memberikan rekomendasi BUY/SELL atau pending order limit!\n"
 
     # Sertakan analisa akun & tabel lot presisi
     acc_qa = mt5.account_info()
@@ -610,15 +895,6 @@ def snapshot_live_qa():
         else:
             sig_live_txt = f"- Status Sinyal Sebelumnya: SUDAH SELESAI/BATAL [{st_sd}]. Status Saat Ini: WAIT (Mencari peluang setup baru).\n"
 
-    scan_qa_txt = ""
-    try:
-        from modules.zone_scanner import scan_xauusd_zones
-        scan_qa = scan_xauusd_zones()
-        dec_qa = scan_qa.get("decision", {})
-        reasons_qa = "; ".join(dec_qa.get("reasons", [])) or "tidak ada alasan"
-        scan_qa_txt = f"- Status Python Zone Scanner: [{dec_qa.get('status', 'WAIT')}] | Bias: {scan_qa.get('bias', '-')} | Catatan: {reasons_qa}\n"
-    except Exception:
-        pass
 
     _bias_qa = bias_htf_cached()
     _detail_qa = _bias_qa.get("detail", {}) if isinstance(_bias_qa, dict) else {}
@@ -662,6 +938,9 @@ def panggil_gemini(client, contents, stream_output=False):
     - Jika gagal/lambat, menembak beberapa server kandidat secara paralel (balapan server tercepat)."""
     global MODEL_AKTIF_TERCEPAT
 
+    if client is None:
+        return None, None
+
     now = time.time()
     kandidat = [
         m for m in MODELS_TO_TRY
@@ -695,8 +974,12 @@ def panggil_gemini(client, contents, stream_output=False):
                         teks_penuh.append(chunk.text)
                 if teks_penuh:
                     print()
+                    raw_text = "".join(teks_penuh)
                     MODEL_AKTIF_TERCEPAT = model_name
-                    return "".join(teks_penuh), model_name
+                    sanitized_text = sanitasi_output_gemini(raw_text)
+                    if sanitized_text != raw_text:
+                        print("\n[🛡️ OTORITAS PYTHON SCANNER]: Rekomendasi sinyal dinetralisir sesuai keputusan resmi Python Scanner (WAIT/INVALID).")
+                    return sanitized_text, model_name
             except Exception as e:
                 print(f"\n   [⚠️ Server {model_name} padat/kendala ({type(e).__name__}). Mencoba cadangan...]")
                 _tangani_error_model(model_name, e)
@@ -714,6 +997,7 @@ def panggil_gemini(client, contents, stream_output=False):
                     teks, mdl, durasi = fut.result()
                     if teks:
                         MODEL_AKTIF_TERCEPAT = mdl
+                        teks = sanitasi_output_gemini(teks)
                         if stream_output:
                             print(f"\n[Jawaban AI ({mdl} — {durasi:.1f} dtk)]:\n{teks}")
                         return teks, mdl
@@ -730,6 +1014,7 @@ def panggil_gemini(client, contents, stream_output=False):
             teks, mdl, _ = _coba_satu_model(client, model_name, contents)
             if teks:
                 MODEL_AKTIF_TERCEPAT = mdl
+                teks = sanitasi_output_gemini(teks)
                 if stream_output:
                     print(f"\n[Jawaban AI ({mdl})]:\n{teks}")
                 return teks, mdl

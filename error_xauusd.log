@@ -390,3 +390,12 @@ Traceback (most recent call last):
     raise RuntimeError("scanner rusak")
 RuntimeError: scanner rusak
 
+[2026-11-11 08:02:00] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 434, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+

@@ -597,16 +597,18 @@ def snapshot_live_qa():
     info_akun_qa = analisa_akun_dan_lot(acc_qa, sym_qa, float(atr5[-1]), harga)
 
     sig_live_txt = ""
-    if SINYAL_AKTIF_DINAMIS:
+    if SINYAL_AKTIF_DINAMIS and isinstance(SINYAL_AKTIF_DINAMIS, dict) and SINYAL_AKTIF_DINAMIS.get("lo"):
         sd = SINYAL_AKTIF_DINAMIS
         st_sd, al_sd = evaluasi_validitas_sinyal(sd, harga)
-        lbl_eks_sd, _, info_eks_sd = cek_status_eksekusi_sinyal(sd)
-        kunci_sd = "TERKUNCI AKTIF — DILARANG UBAH ANGKA ENTRY/SL/TP!" if sinyal_masih_aktif(st_sd) else "BELUM ADA SINYAL AKTIF / SELESAI (Status Pasar: WAIT)"
-        sig_live_txt = (
-            f"- 🔒 SINYAL UTAMA SAAT INI [{kunci_sd}]: "
-            f"{sd['arah']} | ENTRY: {sd['lo']:.2f}-{sd['hi']:.2f} | SL: {sd['sl']:.2f} | TP1: {sd['tp1']:.2f} | TP2: {sd.get('tp2', sd['tp1']):.2f} "
-            f"-> Status Real-Time: [{st_sd}] ({al_sd}) | Status di Akun MT5: [{lbl_eks_sd}] ({info_eks_sd})\n"
-        )
+        if sinyal_masih_aktif(st_sd):
+            lbl_eks_sd, _, info_eks_sd = cek_status_eksekusi_sinyal(sd)
+            sig_live_txt = (
+                f"- 🔒 SINYAL UTAMA AKTIF (TERKUNCI): "
+                f"{sd['arah']} | ENTRY: {sd['lo']:.2f}-{sd['hi']:.2f} | SL: {sd['sl']:.2f} | TP1: {sd['tp1']:.2f} | TP2: {sd.get('tp2', sd['tp1']):.2f} "
+                f"-> Status Real-Time: [{st_sd}] ({al_sd}) | Status di Akun MT5: [{lbl_eks_sd}] ({info_eks_sd})\n"
+            )
+        else:
+            sig_live_txt = f"- Status Sinyal Sebelumnya: SUDAH SELESAI/BATAL [{st_sd}]. Status Saat Ini: WAIT (Mencari peluang setup baru).\n"
 
     scan_qa_txt = ""
     try:

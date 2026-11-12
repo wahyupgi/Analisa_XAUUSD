@@ -41,81 +41,54 @@ for _mod in (_m_config, _m_utils, _m_mt5, _m_tek, _m_pasar, _m_jurnal, _m_state,
 
 def main():
     global SINYAL_AKTIF_DINAMIS, SINYAL_SEBELUMNYA_DINAMIS, ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS
-    state_sebelumnya = muat_state_sinyal()
-    sig_sebelumnya = None
-    sig_riwayat_lama = None
-    if state_sebelumnya:
-        cand_s = state_sebelumnya.get("sinyal")
-        if not (cand_s and isinstance(cand_s, dict) and cand_s.get("lo")):
-            cand_s = state_sebelumnya.get("sinyal_sebelumnya")
-        if cand_s and isinstance(cand_s, dict) and cand_s.get("lo"):
-            sig_sebelumnya = cand_s
-        # Ambil juga riwayat sinyal yang lebih lama
-        cand_r = state_sebelumnya.get("sinyal_sebelumnya")
-        if cand_r and isinstance(cand_r, dict) and cand_r.get("lo") and cand_r != sig_sebelumnya:
-            sig_riwayat_lama = cand_r
+    state_sebelumnya = muat_state_sinyal() or {}
 
+    # Hubungkan MT5 lebih awal agar evaluasi harga real-time akurat
+    pastikan_mt5_aktif()
+    tick_cek = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
+    bid_cek = tick_cek.bid if tick_cek else 0.0
+
+    # Ambil kandidat sinyal dari state sebelumnya (prioritaskan sinyal aktif, lalu sinyal_sebelumnya)
+    cand_s = state_sebelumnya.get("sinyal")
+    if not (cand_s and isinstance(cand_s, dict) and cand_s.get("lo")):
+        cand_s = state_sebelumnya.get("sinyal_sebelumnya")
+
+    sig_sebelumnya = None
     teks_memori_prompt = ""
 
-    if sig_sebelumnya and isinstance(sig_sebelumnya, dict):
-        SINYAL_SEBELUMNYA_DINAMIS = sig_sebelumnya
-        tick_cek = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
-        bid_cek = tick_cek.bid if tick_cek else 0.0
-        status_lama, alasan_lama = evaluasi_validitas_sinyal(sig_sebelumnya, bid_cek)
-        lbl_eks_start, kode_eks_start, info_eks_start = cek_status_eksekusi_sinyal(sig_sebelumnya)
+    if cand_s and isinstance(cand_s, dict) and cand_s.get("lo"):
+        status_lama, alasan_lama = evaluasi_validitas_sinyal(cand_s, bid_cek)
 
-        print("\n" + "=" * 70)
-        print("📌 [MEMORI SINYAL DARI SESI SEBELUMNYA DITEMUKAN]")
-        print(f"• Waktu Dicatat     : {state_sebelumnya.get('waktu_simpan', '-')}")
+        # Sesuai permintaan user: HANYA tampilkan & pertahankan sinyal yang BENAR-BENAR MASIH VALID.
+        # Jika sudah tidak valid (batal / kena SL / expired / target selesai / unknown), HAPUS dari memori!
+        if sinyal_masih_aktif(status_lama):
+            sig_sebelumnya = cand_s
+            SINYAL_AKTIF_DINAMIS = sig_sebelumnya
+            SINYAL_SEBELUMNYA_DINAMIS = sig_sebelumnya
 
-        # Tampilkan riwayat sinyal yang lebih lama terlebih dahulu (jika ada)
-        if sig_riwayat_lama:
-            st_riwayat, al_riwayat = evaluasi_validitas_sinyal(sig_riwayat_lama, bid_cek)
-            lbl_rw, _, info_rw = cek_status_eksekusi_sinyal(sig_riwayat_lama)
-            print("─" * 70)
-            print(f"  📜 Riwayat Sinyal Lama: {sig_riwayat_lama['arah']} @ {sig_riwayat_lama['lo']:.2f} - {sig_riwayat_lama['hi']:.2f} | SL {sig_riwayat_lama['sl']:.2f} | TP1 {sig_riwayat_lama['tp1']:.2f}")
-            print(f"     Status: [{st_riwayat}] | Akun: [{lbl_rw}]")
-            print(f"     Sumber: {sig_riwayat_lama.get('ket', '-')}")
-            print(f"     Alasan: {al_riwayat}")
-            print("─" * 70)
+            lbl_eks_start, kode_eks_start, info_eks_start = cek_status_eksekusi_sinyal(sig_sebelumnya)
+            kat_start, ket_r_start = tentukan_klasifikasi_risiko_sinyal(sig_sebelumnya)
+            tag_start = "⚠️ [HIGH RISK]" if kat_start == "HIGH RISK" else ("🛡️ [LOW RISK]" if kat_start == "LOW RISK" else "⚡ [MEDIUM RISK]")
 
-        print(f"• Setup Sinyal Aktif: {sig_sebelumnya['arah']} @ {sig_sebelumnya['lo']:.2f} - {sig_sebelumnya['hi']:.2f}")
-        print(f"• Stop Loss & TP    : SL {sig_sebelumnya['sl']:.2f} | TP1 {sig_sebelumnya['tp1']:.2f} | TP2 {sig_sebelumnya.get('tp2', sig_sebelumnya['tp1']):.2f}")
-        print(f"• Status Validitas  : [{status_lama}]")
-        print(f"• Keterangan Fakta  : {alasan_lama}")
-        kat_start, ket_r_start = tentukan_klasifikasi_risiko_sinyal(sig_sebelumnya)
-        tag_start = "⚠️ [HIGH RISK]" if kat_start == "HIGH RISK" else ("🛡️ [LOW RISK]" if kat_start == "LOW RISK" else "⚡ [MEDIUM RISK]")
-        print(f"• Tingkat Risiko    : {tag_start} ({ket_r_start})")
-        if kat_start == "HIGH RISK":
-            print("  -> Panduan Trader : Sinyal dadakan LTF. Anda bebas mempertimbangkan untuk ambil atau skip!")
-        print(f"• Status di Akun MT5: [{lbl_eks_start}] ({info_eks_start})")
-        print(f"• Sumber Setup      : {sig_sebelumnya.get('ket', '-')}")
-        print("=" * 70 + "\n")
+            print("\n" + "=" * 65)
+            print("📌 [SINYAL AKTIF DARI SESI SEBELUMNYA — MASIH VALID]")
+            print(f"• Setup  : {sig_sebelumnya['arah']} @ {sig_sebelumnya['lo']:.2f} - {sig_sebelumnya['hi']:.2f} | SL {sig_sebelumnya['sl']:.2f} | TP1 {sig_sebelumnya['tp1']:.2f}")
+            print(f"• Status : [{status_lama}] | Akun MT5: [{lbl_eks_start}] | Risiko: {tag_start}")
+            print("=" * 65 + "\n")
 
-        _riwayat_teks = ""
-        if sig_riwayat_lama:
-            st_riwayat2, al_riwayat2 = evaluasi_validitas_sinyal(sig_riwayat_lama, bid_cek)
-            _riwayat_teks = (
-                f"- Riwayat Sinyal Lama (HISTORIS): {sig_riwayat_lama['arah']} @ {sig_riwayat_lama['lo']:.2f} - {sig_riwayat_lama['hi']:.2f} | SL {sig_riwayat_lama['sl']:.2f} | TP1 {sig_riwayat_lama['tp1']:.2f} ({sig_riwayat_lama.get('ket', '-')}) -> [{st_riwayat2}]\n"
+            teks_memori_prompt = (
+                f"\n\n[MEMORI SINYAL AKTIF DARI SESI SEBELUMNYA — WAJIB DIKAWAL]:\n"
+                f"- 🔒 SINYAL AKTIF TERKUNCI: {sig_sebelumnya['arah']} | ENTRY: {sig_sebelumnya['lo']:.2f}-{sig_sebelumnya['hi']:.2f} | SL: {sig_sebelumnya['sl']:.2f} | TP1: {sig_sebelumnya['tp1']:.2f} | TP2: {sig_sebelumnya.get('tp2', sig_sebelumnya['tp1']):.2f} ({sig_sebelumnya.get('ket', '-')})\n"
+                f"- Status Validitas Saat Ini ({bid_cek:.2f}): [{status_lama}] -> {alasan_lama}\n"
+                f"- Status Akun MT5: [{lbl_eks_start}] ({info_eks_start})\n"
+                f"INSTRUKSI: Sinyal di atas masih valid dan aktif. Dilarang mengubah angka Entry/SL selama belum tersentuh SL atau TP2!\n"
             )
-
-        teks_memori_prompt = (
-            f"\n\n[MEMORI SINYAL DARI SESI SEBELUMNYA — WAJIB DITAMPILKAN & DIEVALUASI VALIDITASNYA]:\n"
-            f"Trader pada sesi sebelumnya memegang sinyal berikut:\n"
-            f"{_riwayat_teks}"
-            f"- 🔒 SINYAL AKTIF TERKUNCI: {sig_sebelumnya['arah']} | ENTRY: {sig_sebelumnya['lo']:.2f}-{sig_sebelumnya['hi']:.2f} | SL: {sig_sebelumnya['sl']:.2f} | TP1: {sig_sebelumnya['tp1']:.2f} | TP2: {sig_sebelumnya.get('tp2', sig_sebelumnya['tp1']):.2f} ({sig_sebelumnya.get('ket', '-')})\n"
-            f"- Status Akun MT5: [{lbl_eks_start}] ({info_eks_start})\n"
-            f"- Fakta Algoritmik Harga Sekarang ({bid_cek:.2f}): [{status_lama}] -> {alasan_lama}\n\n"
-            f"INSTRUKSI ANTI-PLIN-PLAN & PENGUNCIAN ANGKA SINYAL (WAJIB DIPATUHI 100%):\n"
-            f"1. BAGIAN WAJIB 1 — STATUS SINYAL SEBELUMNYA:\n"
-            f"   Tampilkan kembali setup Sinyal Sebelumnya di atas dengan angka yang SAMA PERSIS. Beri label tegas: [MASIH VALID & AKTIF] atau [SUDAH TIDAK VALID / BATAL] / [TARGET TERCAPAI].\n"
-            f"2. BAGIAN WAJIB 2 — LARANGAN MENGGESER ANGKA ENTRY/SL SELAMA MASIH VALID:\n"
-            f"   - JIKA Fakta Algoritmik di atas menyatakan sinyal MASIH VALID (belum kena SL {sig_sebelumnya['sl']:.2f}, belum kedaluwarsa, dan belum TP2), Anda DILARANG KERAS mengubah/menggeser angka Area Entry ({sig_sebelumnya['lo']:.2f}-{sig_sebelumnya['hi']:.2f}) maupun SL ({sig_sebelumnya['sl']:.2f})!\n"
-            f"   - Menggeser-geser angka entry setiap kali ditanya (misal dari {sig_sebelumnya['lo']:.2f}-{sig_sebelumnya['hi']:.2f} menjadi angka lain padahal SL {sig_sebelumnya['sl']:.2f} belum jebol) membuat trader bingung dan kehilangan kepercayaan!\n"
-            f"   - Pada blok [RADAR_TARGET] di akhir jawaban, jika sinyal masih valid, wajib tulis ulang PERSIS:\n"
-            f"     SINYAL_AKTIF: {sig_sebelumnya['arah']} | ENTRY: {sig_sebelumnya['lo']:.2f}-{sig_sebelumnya['hi']:.2f} | SL: {sig_sebelumnya['sl']:.2f} | TP1: {sig_sebelumnya['tp1']:.2f} | TP2: {sig_sebelumnya.get('tp2', sig_sebelumnya['tp1']):.2f}\n"
-            f"   - Anda HANYA BOLEH menerbitkan angka Entry/SL baru jika sinyal lama SUDAH TERBUKTI BATAL (kena SL / lewat TTL / terlewat ke TP1).\n"
-        )
+        else:
+            # Sinyal sudah tidak valid / selesai / batal -> Bersihkan dari state agar tidak terus berulang
+            simpan_state_sinyal(None, None, state_sebelumnya.get("atas"), state_sebelumnya.get("bawah"), "Reset Sinyal Invalid", hapus_riwayat=True)
+            SINYAL_AKTIF_DINAMIS = None
+            SINYAL_SEBELUMNYA_DINAMIS = None
+            sig_sebelumnya = None
 
     if not API_KEY:
         sys.exit("API key Gemini belum diset. Isi variabel lingkungan GEMINI_API_KEY (mis. setx GEMINI_API_KEY \"...\" lalu buka terminal baru).")
@@ -230,55 +203,59 @@ def main():
             bid_now = tick_now.bid if tick_now else 0.0
 
             print("\n" + "=" * 70)
-            print("📊 [MONITORING DUA GENERASI SINYAL: SEBELUMNYA vs TERBARU]")
+            print("📊 [MONITORING STATUS SINYAL]")
             print(f"• Harga Bid MT5 Saat Ini: {bid_now:.2f}")
 
-            # 1. Tampilkan Sinyal Sebelumnya & Keterangan Validitasnya
-            if sig_lama and isinstance(sig_lama, dict) and sig_lama.get("lo"):
-                st_lama, al_lama = evaluasi_validitas_sinyal(sig_lama, bid_now)
-                lbl_eks_lama, _, info_lama = cek_status_eksekusi_sinyal(sig_lama)
-                print("\n" + "─" * 70)
-                print(f"1. 📌 SINYAL SEBELUMNYA (SESI LALU) — [{lbl_eks_lama}]:")
-                print(f"   • Setup Sinyal   : {sig_lama['arah']} @ {sig_lama['lo']:.2f} - {sig_lama['hi']:.2f}")
-                print(f"   • Stop Loss & TP : SL {sig_lama['sl']:.2f} | TP1 {sig_lama['tp1']:.2f} | TP2 {sig_lama.get('tp2', sig_lama['tp1']):.2f}")
-                print(f"   • STATUS VALID   : [{st_lama}]")
-                print(f"   • Keterangan     : {al_lama}")
-                print(f"   • Status di Akun : {lbl_eks_lama} ({info_lama})")
-                print(f"   • Sumber Setup   : {sig_lama.get('ket', '-')}")
-            else:
-                print("\n" + "─" * 70)
-                print("1. 📌 SINYAL SEBELUMNYA: Tidak ada riwayat sinyal sebelumnya yang tersimpan.")
-
-            # 2. Tampilkan Sinyal Aktif Terbaru
-            print("\n" + "─" * 70)
+            # Evaluasi apakah ada sinyal yang benar-benar MASIH VALID
+            sinyal_ditampilkan = None
             if sig_aktif and isinstance(sig_aktif, dict) and sig_aktif.get("lo"):
                 st_aktif, al_aktif = evaluasi_validitas_sinyal(sig_aktif, bid_now)
-                lbl_eks_aktif, _, info_aktif = cek_status_eksekusi_sinyal(sig_aktif)
-                kat_aktif, ket_r_aktif = tentukan_klasifikasi_risiko_sinyal(sig_aktif)
-                tag_risk_icon = "⚠️" if kat_aktif == "HIGH RISK" else ("🛡️" if kat_aktif == "LOW RISK" else "⚡")
+                if sinyal_masih_aktif(st_aktif):
+                    sinyal_ditampilkan = (sig_aktif, st_aktif, al_aktif)
+                else:
+                    # Sinyal sudah tidak valid -> bersihkan dari memori
+                    simpan_state_sinyal(None, None, state_aktif.get("atas") if state_aktif else None, state_aktif.get("bawah") if state_aktif else None, "Reset Sinyal Invalid", hapus_riwayat=True)
+                    SINYAL_AKTIF_DINAMIS = None
 
-                print(f"2. 🎯 SINYAL AKTIF TERBARU — [{lbl_eks_aktif}]:")
-                print(f"   • Setup Sinyal   : {sig_aktif['arah']} @ {sig_aktif['lo']:.2f} - {sig_aktif['hi']:.2f}")
-                print(f"   • Tingkat Risiko : {tag_risk_icon} [{kat_aktif}] ({ket_r_aktif})")
-                if kat_aktif == "HIGH RISK":
+            if not sinyal_ditampilkan and sig_lama and isinstance(sig_lama, dict) and sig_lama.get("lo"):
+                st_lama, al_lama = evaluasi_validitas_sinyal(sig_lama, bid_now)
+                if sinyal_masih_aktif(st_lama):
+                    sinyal_ditampilkan = (sig_lama, st_lama, al_lama)
+                else:
+                    simpan_state_sinyal(None, None, state_aktif.get("atas") if state_aktif else None, state_aktif.get("bawah") if state_aktif else None, "Reset Sinyal Invalid", hapus_riwayat=True)
+                    SINYAL_SEBELUMNYA_DINAMIS = None
+
+            if sinyal_ditampilkan:
+                sig_t, st_t, al_t = sinyal_ditampilkan
+                lbl_eks_t, _, info_eks_t = cek_status_eksekusi_sinyal(sig_t)
+                kat_t, ket_r_t = tentukan_klasifikasi_risiko_sinyal(sig_t)
+                tag_risk_icon = "⚠️" if kat_t == "HIGH RISK" else ("🛡️" if kat_t == "LOW RISK" else "⚡")
+
+                print("\n" + "─" * 70)
+                print(f"🎯 SINYAL AKTIF (MASIH VALID) — [{lbl_eks_t}]:")
+                print(f"   • Setup Sinyal   : {sig_t['arah']} @ {sig_t['lo']:.2f} - {sig_t['hi']:.2f}")
+                print(f"   • Tingkat Risiko : {tag_risk_icon} [{kat_t}] ({ket_r_t})")
+                if kat_t == "HIGH RISK":
                     print("   • Pertimbangan   : ⚠️ Sinyal ini dadakan di LTF M5. Anda bebas SKIP / TIDAK DIAMBIL jika ingin santai, ATAU ambil dengan lot mini (0.25%).")
-                print(f"   • Stop Loss & TP : SL {sig_aktif['sl']:.2f} | TP1 {sig_aktif['tp1']:.2f} | TP2 {sig_aktif.get('tp2', sig_aktif['tp1']):.2f}")
-                print(f"   • Status Saat Ini: [{st_aktif}] -> {al_aktif}")
-                print(f"   • Status di Akun : {lbl_eks_aktif} ({info_aktif})")
-                info_kentut_st = evaluasi_limit_kena_kentut(sig_aktif, bid_now)
+                print(f"   • Stop Loss & TP : SL {sig_t['sl']:.2f} | TP1 {sig_t['tp1']:.2f} | TP2 {sig_t.get('tp2', sig_t['tp1']):.2f}")
+                print(f"   • Status Saat Ini: [{st_t}] -> {al_t}")
+                print(f"   • Status di Akun : {lbl_eks_t} ({info_eks_t})")
+                info_kentut_st = evaluasi_limit_kena_kentut(sig_t, bid_now)
                 if info_kentut_st:
                     print(f"   • Note Limit     : [{info_kentut_st['judul']}]")
                     print(f"     (Anti Kentut)    {info_kentut_st['catatan']}")
-                mm_s = hitung_mm_sinyal(sig_aktif['lo'], sig_aktif['hi'], sig_aktif['sl'], sig_aktif['tp1'], sig_aktif.get('tp2', 0))
+                mm_s = hitung_mm_sinyal(sig_t['lo'], sig_t['hi'], sig_t['sl'], sig_t['tp1'], sig_t.get('tp2', 0))
                 if mm_s:
                     print(f"   • Rasio R:R      : TP1 1:{mm_s['rrr_tp1']:.1f} | TP2 1:{mm_s['rrr_tp2']:.1f} (Jarak SL: {mm_s['jarak_sl']:.2f} pt)")
-                    if kat_aktif == "HIGH RISK":
+                    if kat_t == "HIGH RISK":
                         print(f"   • Lot High Risk  : {mm_s.get('lot_025', mm_s['lot_05']):.2f} lot (Risiko mini 0.25%: -${mm_s.get('risk_025_usd', mm_s['risk_05_usd']):.2f}) [batas maksimum bila tetap diambil]")
                     print(f"   • Rekomendasi Lot: 0.5% (Disiplin): {mm_s['lot_05']:.2f} lot (-${mm_s['risk_05_usd']:.2f}) | 1.0% (Standar): {mm_s['lot_10']:.2f} lot (-${mm_s['risk_10_usd']:.2f})")
                     if mm_s.get("melebihi_batas"):
                         print(f"   ⚠️ Lot minimum broker ({mm_s['lot_05']:.2f}) membuat risiko melebihi 0.5% modal — pertimbangkan SL lebih dekat atau lewati setup.")
             else:
-                print("2. 🎯 SINYAL AKTIF TERBARU: WAIT / BELUM ADA SETUP (Menunggu konfirmasi jemputan zona).")
+                print("\n" + "─" * 70)
+                print("🎯 STATUS SINYAL: WAIT / BELUM ADA SETUP AKTIF (Menunggu konfirmasi jemputan zona baru).")
+                print("   (Sinyal sebelumnya yang sudah tidak valid/selesai telah dibersihkan).")
 
             if state_aktif:
                 print("\n" + "─" * 70)

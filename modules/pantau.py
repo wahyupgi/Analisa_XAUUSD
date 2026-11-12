@@ -318,18 +318,18 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
     tick_awal = mt5.symbol_info_tick(SYMBOL)
     harga_awal_pantau = tick_awal.bid if tick_awal else 0.0
 
-    # Tampilkan riwayat sinyal sebelumnya (jika ada) di awal mode pantau
+    # Tampilkan riwayat sinyal sebelumnya (HANYA jika masih valid) di awal mode pantau
     state_pantau = muat_state_sinyal()
     sig_prev_pantau = SINYAL_SEBELUMNYA_DINAMIS or (state_pantau.get("sinyal_sebelumnya") if state_pantau else None)
     if sig_prev_pantau and isinstance(sig_prev_pantau, dict) and sig_prev_pantau.get("lo"):
         st_prev, al_prev = evaluasi_validitas_sinyal(sig_prev_pantau, harga_awal_pantau)
-        lbl_eks_prev, _, info_eks_prev = cek_status_eksekusi_sinyal(sig_prev_pantau, pos_awal, orders_awal)
-        print("─" * 70)
-        print(f"  📜 RIWAYAT SINYAL SEBELUMNYA [{lbl_eks_prev}]:")
-        print(f"     {sig_prev_pantau['arah']} @ {sig_prev_pantau['lo']:.2f} - {sig_prev_pantau['hi']:.2f} | SL {sig_prev_pantau['sl']:.2f} | TP1 {sig_prev_pantau['tp1']:.2f} | TP2 {sig_prev_pantau.get('tp2', sig_prev_pantau['tp1']):.2f}")
-        print(f"     Status: [{st_prev}] -> {al_prev}")
-        print(f"     Sumber: {sig_prev_pantau.get('ket', '-')}")
-        print("─" * 70)
+        if sinyal_masih_aktif(st_prev):
+            lbl_eks_prev, _, info_eks_prev = cek_status_eksekusi_sinyal(sig_prev_pantau, pos_awal, orders_awal)
+            print("─" * 70)
+            print(f"  📌 SINYAL SEBELUMNYA (MASIH VALID) [{lbl_eks_prev}]:")
+            print(f"     {sig_prev_pantau['arah']} @ {sig_prev_pantau['lo']:.2f} - {sig_prev_pantau['hi']:.2f} | SL {sig_prev_pantau['sl']:.2f} | TP1 {sig_prev_pantau['tp1']:.2f}")
+            print(f"     Status: [{st_prev}]")
+            print("─" * 70)
 
     if lo_manual is not None:
         batas_atas = sl_manual if (sl_manual and sl_manual > hi_manual) else hi_manual + 3.0
@@ -549,53 +549,40 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                                 for _ in range(3):
                                     bunyi(520, 300)
 
-                        # (1) Peringatan jika Pending Order belum dipasang SL
+                        # (1) Peringatan jika Pending Order belum dipasang SL (informatif, tenang)
                         if o.sl == 0 and f"ord_nosl_{tkt_o}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"ord_nosl_{tkt_o}")
                             jarak_sl_aman = max(3.0, round(1.5 * atr_m5, 2))
                             sl_saran = (p_limit - jarak_sl_aman) if arah_o == "BUY" else (p_limit + jarak_sl_aman)
-                            print(f"\n\n[PERINGATAN PENDING TANPA SL #{tkt_o}!] {nm_o} @ {p_limit:.2f} BELUM DIPASANG STOP LOSS!")
-                            print(f"   -> SARAN: Segera set SL pada {nm_o} Anda di sekitar {sl_saran:.2f} (~{jarak_sl_aman:.2f} pt) agar jika terjemput tidak terbuka tanpa pengaman.")
-                            for _ in range(2):
-                                bunyi(850, 250)
+                            print(f"\n[Catatan Pending #{tkt_o}] {nm_o} @ {p_limit:.2f} belum dipasang Stop Loss (saran pengaman: ~{sl_saran:.2f}).")
 
-                        # (2) Evaluasi saat harga mendekati Zona Limit Order (<= max(5.0, 2.5x ATR M5))
-                        radius_evaluasi = max(5.0, round(2.5 * atr_m5, 2))
+                        # (2) Evaluasi HANYA saat harga benar-benar mendekati Zona Limit Order (<= max(3.5, 1.5x ATR M5))
+                        radius_evaluasi = max(3.5, round(1.5 * atr_m5, 2))
                         if jarak_skrg <= radius_evaluasi and "LIMIT" in nm_o:
                             # Cek apakah harga menghantam ke arah limit dengan Candle Impuls Kuat / Marubozu Lawan Arah
                             impuls_menghantam_limit = (
-                                (arah_o == "BUY" and c_last_c < o_last_c and bodi_last_c >= 1.35 * atr_m5)
-                                or (arah_o == "SELL" and c_last_c > o_last_c and bodi_last_c >= 1.35 * atr_m5)
+                                (arah_o == "BUY" and c_last_c < o_last_c and bodi_last_c >= 1.6 * atr_m5)
+                                or (arah_o == "SELL" and c_last_c > o_last_c and bodi_last_c >= 1.6 * atr_m5)
                             )
                             key_bahaya_lim = f"ord_danger_{tkt_o}_{t_candle_last_c}"
                             if impuls_menghantam_limit and key_bahaya_lim not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(key_bahaya_lim)
-                                print(f"\n\n[🚨 PERINGATAN ZONA {nm_o} TIDAK VALID / RAWAN JEBOL #{tkt_o}!]")
-                                print(f"   Harga mendekati {nm_o} @ {p_limit:.2f} (sisa jarak {jarak_skrg:.2f} pt), TETAPI dihantam Candle Impuls/Marubozu M5 kuat (Body {bodi_last_c:.2f} pt)!")
-                                print(f"   -> STATUS ZONA: TIDAK VALID UNTUK LIMIT PASIF (Risiko 'Pisau Jatuh' / langsung bablas menembus SL!).")
-                                print(f"   -> TINDAKAN: Segera HAPUS / CANCEL {nm_o} #{tkt_o} sekarang! Tunggu di luar sampai muncul Sweep + CHoCH/CISD M5 baru entry manual!")
-                                for _ in range(5):
-                                    bunyi(620, 320)
-                            elif jarak_skrg <= max(2.5, round(1.2 * atr_m5, 2)) and not impuls_menghantam_limit and f"ord_valid_{tkt_o}" not in sudah_notif_masuk:
+                                print(f"\n[Catatan Limit #{tkt_o}] Harga mendekati {nm_o} @ {p_limit:.2f} (sisa jarak {jarak_skrg:.2f} pt) dengan candle impuls M5 (Bodi {bodi_last_c:.2f} pt).")
+                                print("   -> Saran: Pantau apakah terbentuk reaksi/rejection di level ini sebelum order terjemput.")
+                                bunyi(620, 200)
+                            elif jarak_skrg <= max(2.0, round(1.0 * atr_m5, 2)) and not impuls_menghantam_limit and f"ord_valid_{tkt_o}" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(f"ord_valid_{tkt_o}")
-                                print(f"\n\n[✅ SIAGA {nm_o} — ZONA MASIH VALID #{tkt_o}!]")
-                                print(f"   Harga mendekati {nm_o} @ {p_limit:.2f} (jarak {jarak_skrg:.2f} pt) dengan ritme pullback/koreksi yang terkendali (Body M5 {bodi_last_c:.2f} pt, tidak ada impuls penghancur).")
-                                print(f"   -> STATUS ZONA: MASIH VALID & AMAN. Order siap terjemput, pastikan SL ({o.sl if o.sl > 0 else 'BELUM DISET!'}) sudah terpasang!")
-                                for _ in range(2):
-                                    bunyi(1300, 220)
+                                print(f"\n[Siaga #{tkt_o}] Harga mendekati {nm_o} @ {p_limit:.2f} (jarak {jarak_skrg:.2f} pt) dengan ritme pullback wajar.")
+                                bunyi(1300, 150)
 
-                        # (3) Deteksi Zona Limit Sudah Terpakai / Front-Run (Harga nyaris sentuh <= 1.2 pt lalu terbang jauh >= 6.0 pt)
-                        batas_frontrun = max(1.2, round(0.6 * atr_m5, 2))
-                        batas_terbang = max(6.0, round(3.0 * atr_m5, 2))
+                        # (3) Deteksi Zona Limit Sudah Terpakai / Front-Run (Hanya jika benar-benar nyaris sentuh <= 0.8 pt lalu memantul jauh >= 8.0 pt)
+                        batas_frontrun = max(0.8, round(0.4 * atr_m5, 2))
+                        batas_terbang = max(8.0, round(3.5 * atr_m5, 2))
                         arah_terbang_benar = (arah_o == "BUY" and harga > p_limit) or (arah_o == "SELL" and harga < p_limit)
                         if "LIMIT" in nm_o and min_jrk_hist <= batas_frontrun and jarak_skrg >= batas_terbang and arah_terbang_benar and f"ord_mit_{tkt_o}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"ord_mit_{tkt_o}")
-                            print(f"\n\n[⚠️ PERINGATAN ZONA {nm_o} SUDAH TERPAKAI (FRONT-RUN / MITIGATED) #{tkt_o}!]")
-                            print(f"   Harga tadi sudah nyaris menyentuh {nm_o} @ {p_limit:.2f} (jarak terdekat {min_jrk_hist:.2f} pt) lalu memantul terbang sejauh {jarak_skrg:.2f} pt tanpa menjemput order Anda!")
-                            print(f"   -> STATUS ZONA: SUDAH LEMAH / MITIGATED (Jika harga balik lagi ke {p_limit:.2f} untuk kedua kalinya, zona ini sudah tidak fresh dan rawan jebol!).")
-                            print(f"   -> TINDAKAN: Disarankan HAPUS / CANCEL {nm_o} #{tkt_o} agar tidak terjebak sapuan likuiditas saat harga kembali.")
-                            for _ in range(4):
-                                bunyi(780, 280)
+                            print(f"\n[Catatan #{tkt_o}] Harga sempat mendekati {nm_o} @ {p_limit:.2f} ({min_jrk_hist:.2f} pt) lalu memantul {jarak_skrg:.2f} pt tanpa menjemput order. Zona ini sudah mengalami mitigasi dini.")
+                            bunyi(780, 200)
 
                     # Cek jika ada Pending Order yang baru saja hilang (karena TEREKSEKUSI jadi posisi running atau DIHAPUS manual)
                     tiket_pos_skrg = {p.ticket for p in pos_live}
@@ -1274,19 +1261,20 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                     if "PERINGATAN LONJAKAN MOMENTUM (TICK-VOLUME, BUKAN DATA INSTITUSI)" in info_inst and "inst" not in sudah_notif_masuk:
                         sudah_notif_masuk.add("inst")
                         baris_inst = info_inst.split("\n")[0]
-                        print(f"\n\n[ALERT INSTITUSI!] {baris_inst}")
+                        print(f"\n\n[INFO MOMENTUM M5] {baris_inst}")
+                        # HANYA ingatkan pending order jika harga sudah DEKAT (<= max(6.0, 2.0x ATR M5) poin)
+                        radius_bahaya_pending = max(6.0, round(2.0 * atr_m5, 2))
                         for tkt_o, inf_o in pending_terpantau.items():
+                            jrk_o = abs(harga - inf_o["open"])
                             lawan_inst = (inf_o["arah"] == "BUY" and "BEARISH" in baris_inst.upper()) or (inf_o["arah"] == "SELL" and "BULLISH" in baris_inst.upper())
-                            if lawan_inst and "LIMIT" in inf_o["nama"]:
-                                print(f"   -> [🚨 PERINGATAN PENDING ORDER #{tkt_o}!] {inf_o['nama']} Anda @ {inf_o['open']:.2f} MELAWAN Orderan Besar Institusi (One-Way Impulse)!")
-                                print(f"      STATUS ZONA: TIDAK VALID / RAWAN JEBOL! Segera CANCEL/HAPUS {inf_o['nama']} #{tkt_o} agar tidak tertabrak impuls institusi!")
+                            if lawan_inst and "LIMIT" in inf_o["nama"] and jrk_o <= radius_bahaya_pending:
+                                print(f"   -> [Catatan Pending Order #{tkt_o}]: {inf_o['nama']} @ {inf_o['open']:.2f} berjarak dekat ({jrk_o:.2f} pt) dan berlawanan dengan impuls M5. Pantau reaksi sebelum terjemput.")
                         if otomatis["sinyal"]:
                             sg_now = otomatis["sinyal"]
                             sig_lawan_inst = (sg_now["arah"] == "BUY" and "BEARISH" in baris_inst.upper()) or (sg_now["arah"] == "SELL" and "BULLISH" in baris_inst.upper())
                             if sig_lawan_inst:
                                 _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, None, f"Dibatalkan Otomatis karena melawan {baris_inst}")
-                        for _ in range(4):
-                            bunyi(900, 300)
+                        bunyi(900, 200)
                     if "SINYAL PEMBALIKAN" in info_inst and "rev_box" not in sudah_notif_masuk:
                         sudah_notif_masuk.add("rev_box")
                         print(f"\n\n[ALERT PEMBALIKAN PASCA-SIDEWAYS!] {info_inst.split('->')[-1].strip()}")

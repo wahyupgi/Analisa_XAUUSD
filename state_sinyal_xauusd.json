@@ -1,19 +1,7 @@
 {
-  "waktu_simpan": "2026-11-11 06:13:15",
+  "waktu_simpan": "2026-11-12 10:45:35",
   "sinyal": null,
-  "sinyal_sebelumnya": {
-    "arah": "BUY",
-    "lo": 4114.16,
-    "hi": 4117.36,
-    "sl": 4109.54,
-    "tp1": 4129.87,
-    "tp2": 4140.82,
-    "ket": "Terkonfirmasi Reaksi Zona Demand Bawah (Trigger M5 Valid)",
-    "risiko": "MEDIUM RISK",
-    "t_buat": 1794294910,
-    "harga_buat": 4118.109,
-    "spread_buat": 0.24
-  },
+  "sinyal_sebelumnya": null,
   "atas": [
     4127.15,
     4130.15,

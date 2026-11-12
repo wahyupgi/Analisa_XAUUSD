@@ -312,7 +312,7 @@ def putuskan_sinyal_terkunci(
       - disetujui_ubah: boolean True bila sinyal_kandidat diterima menggantikan sinyal_aktif.
     """
     pesan_log = []
-    masih_aktif = sinyal_masih_aktif(status_aktif) if (status_aktif and status_aktif != "UNKNOWN") else True
+    masih_aktif = sinyal_masih_aktif(status_aktif) if status_aktif else False
 
     if not sinyal_kandidat or not isinstance(sinyal_kandidat, dict) or not sinyal_kandidat.get("lo"):
         if sinyal_aktif and isinstance(sinyal_aktif, dict) and sinyal_aktif.get("lo") and not masih_aktif:

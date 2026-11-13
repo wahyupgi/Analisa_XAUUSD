@@ -12,7 +12,7 @@ import re
 import shutil
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
@@ -45,6 +45,1574 @@ from modules.state_manager import (
     ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, CATATAN_JEBOL_PANTAU
 )
 import modules.state_manager as SM
+from modules.zone_scanner import (
+    create_market_snapshot,
+    scan_xauusd_zones,
+    evaluate_trade_decision,
+)
+
+WIB_TZ = timezone(timedelta(hours=7))
+
+
+def _format_wib_time(ts=None):
+    """Format timestamp (epoch detik atau None untuk waktu saat ini) ke string WIB (UTC+7)."""
+    if ts is not None and isinstance(ts, (int, float)) and math.isfinite(ts) and ts > 0:
+        dt = datetime.fromtimestamp(float(ts), tz=WIB_TZ)
+    else:
+        dt = datetime.now(WIB_TZ)
+    return dt.strftime("%Y-%m-%d %H:%M:%S WIB")
+
+
+def audit_position_profit(
+    pos,
+    tick,
+    acc_info=None,
+    sym_info=None,
+    expected_symbol=SYMBOL,
+    calc_profit_fn=None,
+):
+    """Mengaudit floating profit posisi MT5 menggunakan nilai broker `pos.profit` sebagai sumber utama.
+
+    Tidak pernah mengganti nilai broker dengan estimasi manual; jika ditemukan inkonsistensi
+    (simbol/volume/harga/tick tidak valid, tick lebih tua dari update posisi, arah sign
+    berlawanan jauh di luar spread, atau anomali skala seperti $87,193 pada 0.01 lot USD),
+    mengembalikan status `PROFIT_DATA_SUSPECT` sehingga angka mencurigakan tidak disajikan valid.
+    """
+    ticket = getattr(pos, "ticket", None)
+    pos_symbol = str(getattr(pos, "symbol", expected_symbol) or expected_symbol)
+    pos_type = getattr(pos, "type", None)
+    raw_profit = getattr(pos, "profit", None)
+    volume = getattr(pos, "volume", None)
+    price_open = getattr(pos, "price_open", None)
+    swap = float(getattr(pos, "swap", 0.0) or 0.0)
+    raw_comm = getattr(pos, "commission", None)
+    has_commission = isinstance(raw_comm, (int, float)) and math.isfinite(raw_comm)
+    commission = float(raw_comm) if has_commission else None
+    raw_currency = getattr(acc_info, "currency", None) if acc_info is not None else None
+    currency = str(raw_currency or "").strip().upper()
+    profit_currency = str(getattr(sym_info, "currency_profit", "") or "").strip().upper() if sym_info is not None else ""
+    contract_size = float(getattr(sym_info, "trade_contract_size", 0.0) or 0.0) if sym_info is not None else 0.0
+
+    buy_code = getattr(mt5, "ORDER_TYPE_BUY", 0)
+    sell_code = getattr(mt5, "ORDER_TYPE_SELL", 1)
+    is_buy = pos_type == buy_code
+    is_sell = pos_type == sell_code
+
+    def _suspect(reason, points=0.0, close_price=0.0, expected_profit=None, status_code="PROFIT_DATA_SUSPECT"):
+        diag = (
+            f"MT5_RAW(ticket={ticket}, sym={pos_symbol}, profit={raw_profit}, swap={swap}, "
+            f"comm={raw_comm}, acc_cur={currency or 'MISSING'}, sym_cur_prof={profit_currency or 'MISSING'}, "
+            f"contract={contract_size}) -> STATUS={status_code} ({reason})"
+        )
+        return {
+            "valid": False,
+            "status": status_code,
+            "reason": reason,
+            "ticket": ticket,
+            "symbol": pos_symbol,
+            "arah": "BUY" if is_buy else ("SELL" if is_sell else "UNKNOWN"),
+            "profit": None,
+            "raw_profit": raw_profit,
+            "swap": swap,
+            "commission": commission,
+            "net_profit": None,
+            "currency": currency or "UNVERIFIED",
+            "profit_currency": profit_currency,
+            "contract_size": contract_size,
+            "display": status_code,
+            "points": points,
+            "close_price": close_price,
+            "expected_profit": expected_profit,
+            "timestamp": getattr(tick, "time", None) if tick is not None else None,
+            "diagnostic_log": diag,
+        }
+
+    if not currency:
+        return _suspect("ACCOUNT_CURRENCY_MISSING", status_code="CURRENCY_OR_PNL_UNVERIFIED")
+    if ticket is None or not (is_buy or is_sell):
+        return _suspect("INVALID_POSITION_OBJECT")
+    if expected_symbol and pos_symbol != expected_symbol:
+        return _suspect("SYMBOL_MISMATCH")
+    if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
+        return _suspect("INVALID_VOLUME")
+    if not isinstance(price_open, (int, float)) or not math.isfinite(price_open) or price_open <= 0:
+        return _suspect("INVALID_ENTRY_PRICE")
+    if not isinstance(raw_profit, (int, float)) or not math.isfinite(raw_profit):
+        return _suspect("NON_FINITE_PROFIT")
+    if tick is None:
+        return _suspect("MISSING_TICK")
+
+    bid = getattr(tick, "bid", None)
+    ask = getattr(tick, "ask", None)
+    if (
+        not isinstance(bid, (int, float)) or not math.isfinite(bid) or bid <= 0
+        or not isinstance(ask, (int, float)) or not math.isfinite(ask) or ask <= 0
+    ):
+        return _suspect("INVALID_TICK_PRICE")
+
+    tick_time = getattr(tick, "time", None)
+    pos_time_upd = getattr(pos, "time_update", getattr(pos, "time", None))
+    if (
+        isinstance(tick_time, (int, float)) and isinstance(pos_time_upd, (int, float))
+        and tick_time > 0 and pos_time_upd > 0 and (pos_time_upd - tick_time) > 60
+    ):
+        return _suspect("STALE_TICK_OLDER_THAN_POSITION")
+
+    close_price = float(bid) if is_buy else float(ask)
+    points = (close_price - float(price_open)) if is_buy else (float(price_open) - close_price)
+    spread = max(0.0, float(ask) - float(bid))
+
+    # Hitung referensi pembanding dalam mata uang akun (hanya untuk validasi konsistensi)
+    expected_profit = None
+    fn_calc = calc_profit_fn if calc_profit_fn is not None else getattr(mt5, "order_calc_profit", None)
+    if callable(fn_calc):
+        try:
+            calc_val = fn_calc(pos_type, pos_symbol, float(volume), float(price_open), close_price)
+            if isinstance(calc_val, (int, float)) and math.isfinite(calc_val):
+                expected_profit = float(calc_val)
+        except Exception:
+            expected_profit = None
+
+    if expected_profit is None and sym_info is not None:
+        t_size = float(getattr(sym_info, "trade_tick_size", 0.0) or 0.0)
+        t_val = float(getattr(sym_info, "trade_tick_value", 0.0) or 0.0)
+        if t_size > 0 and t_val > 0:
+            expected_profit = (points / t_size) * t_val * float(volume)
+
+    if expected_profit is None and currency in ("USD", "USC"):
+        c_size = float(getattr(sym_info, "trade_contract_size", 100.0) or 100.0) if sym_info is not None else 100.0
+        mult = 100.0 if currency == "USC" else 1.0
+        expected_profit = points * c_size * float(volume) * mult
+
+    broker_profit = float(raw_profit)
+
+    if expected_profit is not None:
+        # 1) Sign berlawanan jauh di luar batas spread/komisi
+        if abs(points) > max(spread * 2.0, 1.0) and expected_profit != 0.0:
+            if (broker_profit * expected_profit) < 0 and abs(broker_profit - expected_profit) > max(5.0, abs(expected_profit) * 0.5):
+                return _suspect("SIGN_MISMATCH", points=points, close_price=close_price, expected_profit=expected_profit)
+
+        # 2) Anomali skala besar (mis. $87,193.10 pada 0.01 lot +5.10 pt di akun USD)
+        abs_exp = abs(expected_profit)
+        abs_brk = abs(broker_profit)
+        tol_abs = max(50.0, abs_exp * 2.5)
+        if abs_exp >= 0.01 and abs(broker_profit - expected_profit) > tol_abs:
+            if (abs_brk / max(abs_exp, 0.01)) > 5.0 or (abs_exp / max(abs_brk, 0.01)) > 5.0:
+                return _suspect("SCALE_ANOMALY", points=points, close_price=close_price, expected_profit=expected_profit)
+        elif abs_exp < 0.01 and abs_brk > 50.0 and abs(points) < 0.5:
+            return _suspect("SCALE_ANOMALY_NEAR_ZERO", points=points, close_price=close_price, expected_profit=expected_profit)
+    else:
+        # Mata uang non-USD tanpa order_calc_profit / tick_value tidak dapat diverifikasi skalanya
+        if currency not in ("USD", "USC"):
+            return _suspect(
+                "CURRENCY_SCALE_UNVERIFIED",
+                points=points,
+                close_price=close_price,
+                expected_profit=None,
+                status_code="CURRENCY_OR_PNL_UNVERIFIED",
+            )
+        if abs(points) > max(spread * 3.0, 2.0):
+            if (points > 0 and broker_profit < -5.0) or (points < 0 and broker_profit > 5.0):
+                return _suspect("SIGN_MISMATCH_NO_FX_REF", points=points, close_price=close_price, expected_profit=None)
+
+    display_str = f"{broker_profit:+,.2f} {currency}"
+    net_profit = (broker_profit + swap + commission) if has_commission else None
+    diag_ok = (
+        f"MT5_RAW(ticket={ticket}, sym={pos_symbol}, profit={raw_profit}, swap={swap}, "
+        f"comm={raw_comm}, acc_cur={currency}, sym_cur_prof={profit_currency or 'N/A'}, "
+        f"contract={contract_size}) -> DISPLAY={display_str}"
+    )
+    return {
+        "valid": True,
+        "status": "VALID",
+        "reason": "",
+        "ticket": ticket,
+        "symbol": pos_symbol,
+        "arah": "BUY" if is_buy else "SELL",
+        "profit": broker_profit,
+        "raw_profit": raw_profit,
+        "swap": swap,
+        "commission": commission,
+        "net_profit": net_profit,
+        "currency": currency,
+        "profit_currency": profit_currency,
+        "contract_size": contract_size,
+        "display": display_str,
+        "points": points,
+        "close_price": close_price,
+        "expected_profit": expected_profit,
+        "timestamp": tick_time,
+        "diagnostic_log": diag_ok,
+    }
+
+
+def format_portfolio_profit(
+    pos_list,
+    tick,
+    acc_info=None,
+    sym_info=None,
+    expected_symbol=SYMBOL,
+    compact=False,
+    calc_profit_fn=None,
+):
+    """Mengaudit seluruh posisi terbuka dan memformat total floating profit secara aman.
+
+    Jika salah satu posisi berstatus PROFIT_DATA_SUSPECT, seluruh ringkasan mengembalikan
+    `PROFIT_DATA_SUSPECT` agar angka yang korup tidak pernah disajikan sebagai profit valid.
+    """
+    audits = [
+        audit_position_profit(
+            p, tick, acc_info=acc_info, sym_info=sym_info,
+            expected_symbol=expected_symbol, calc_profit_fn=calc_profit_fn,
+        )
+        for p in (pos_list or ())
+    ]
+    if not audits:
+        cur = str(getattr(acc_info, "currency", "") or "").strip().upper()
+        if not cur:
+            return "CURRENCY_OR_PNL_UNVERIFIED", audits
+        return (f"0.0 {cur}" if compact else f"0.00 {cur}"), audits
+    if any(a["status"] == "PROFIT_DATA_SUSPECT" for a in audits):
+        return "PROFIT_DATA_SUSPECT", audits
+    if any(a["status"] in ("CURRENCY_OR_PNL_UNVERIFIED", "PROFIT_CURRENCY_UNVERIFIED") for a in audits):
+        return "CURRENCY_OR_PNL_UNVERIFIED", audits
+    cur = audits[0]["currency"]
+    total = sum(float(a["profit"]) for a in audits)
+    fmt = f"{total:+,.1f} {cur}" if compact else f"{total:+,.2f} {cur}"
+    return fmt, audits
+
+
+def build_profit_protection_suggestion(pos, tick, sym_info=None, acc_info=None):
+    """Menghitung PROFIT PROTECTION SUGGESTION yang valid secara arah & aturan broker (manual, tanpa klaim bebas risiko)."""
+    arah = "BUY" if getattr(pos, "type", 0) == getattr(mt5, "ORDER_TYPE_BUY", 0) else "SELL"
+    entry = float(getattr(pos, "price_open", 0.0) or 0.0)
+    vol = float(getattr(pos, "volume", 0.0) or 0.0)
+    raw_swap = getattr(pos, "swap", None)
+    raw_comm = getattr(pos, "commission", None)
+    has_swap = isinstance(raw_swap, (int, float)) and math.isfinite(raw_swap)
+    has_comm = isinstance(raw_comm, (int, float)) and math.isfinite(raw_comm)
+    swap = float(raw_swap) if has_swap else 0.0
+    comm = float(raw_comm) if has_comm else 0.0
+    bid = float(getattr(tick, "bid", 0.0) or 0.0) if tick is not None else 0.0
+    ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else 0.0
+
+    def _unavail(reason):
+        return {
+            "allowed": False,
+            "status": "PROFIT_PROTECTION_UNAVAILABLE",
+            "label": "PROFIT PROTECTION SUGGESTION",
+            "arah": arah,
+            "entry_price": entry,
+            "current_bid": bid,
+            "current_ask": ask,
+            "suggested_sl": None,
+            "gross_profit_locked_pts": None,
+            "estimated_net_profit": None,
+            "buffer_pts": None,
+            "calculation_basis": "",
+            "reason": reason,
+            "disclaimer": "",
+        }
+
+    if sym_info is None or tick is None or entry <= 0 or bid <= 0 or ask <= 0:
+        return _unavail("PROFIT_PROTECTION_UNAVAILABLE")
+
+    digits = int(getattr(sym_info, "digits", 2) or 2)
+    point = float(getattr(sym_info, "point", 0.01) or 0.01)
+    tick_size = float(getattr(sym_info, "trade_tick_size", point) or point)
+    tick_value = float(getattr(sym_info, "trade_tick_value", 0.0) or 0.0)
+    contract_size = float(getattr(sym_info, "trade_contract_size", 100.0) or 100.0)
+    stops_level_pts = float(getattr(sym_info, "trade_stops_level", 0) or 0) * point
+    freeze_level_pts = float(getattr(sym_info, "trade_freeze_level", 0) or 0) * point
+    spread = max(0.0, ask - bid)
+    acc_cur = str(getattr(acc_info, "currency", "") or "").strip().upper()
+
+    # Hitung offset biaya swap+komisi ke dalam poin jika seluruh komponen tersedia
+    cost_neg = max(0.0, -(swap + comm))
+    cost_pts = 0.0
+    can_convert_money = False
+    if vol > 0 and tick_value > 0 and tick_size > 0:
+        can_convert_money = True
+        if cost_neg > 0:
+            cost_pts = (cost_neg / (tick_value * vol)) * tick_size
+    elif vol > 0 and acc_cur == "USD" and contract_size > 0:
+        can_convert_money = True
+        if cost_neg > 0:
+            cost_pts = cost_neg / (contract_size * vol)
+
+    buffer_pts = max(tick_size, spread * 0.5, cost_pts + tick_size, 0.30)
+    raw_sl = (entry + buffer_pts) if arah == "BUY" else (entry - buffer_pts)
+    if tick_size > 0:
+        raw_sl = round(round(raw_sl / tick_size) * tick_size, digits)
+    else:
+        raw_sl = round(raw_sl, digits)
+
+    # Validasi arah & batas Stop Level / Freeze Level broker terhadap Bid (BUY) / Ask (SELL)
+    if arah == "BUY":
+        if raw_sl <= entry:
+            return _unavail("INVALID_DIRECTION_BUY")
+        dist_broker = bid - raw_sl
+        if dist_broker <= 0 or dist_broker < stops_level_pts:
+            return _unavail("STOP_LEVEL_RESTRICTION")
+        if freeze_level_pts > 0 and dist_broker <= freeze_level_pts:
+            return _unavail("FREEZE_LEVEL_RESTRICTION")
+        gross_pts = raw_sl - entry
+    else:
+        if raw_sl >= entry:
+            return _unavail("INVALID_DIRECTION_SELL")
+        dist_broker = raw_sl - ask
+        if dist_broker <= 0 or dist_broker < stops_level_pts:
+            return _unavail("STOP_LEVEL_RESTRICTION")
+        if freeze_level_pts > 0 and dist_broker <= freeze_level_pts:
+            return _unavail("FREEZE_LEVEL_RESTRICTION")
+        gross_pts = entry - raw_sl
+
+    est_net_profit = None
+    if has_swap and has_comm and can_convert_money:
+        if tick_value > 0 and tick_size > 0:
+            est_gross_money = (gross_pts / tick_size) * tick_value * vol
+        else:
+            est_gross_money = gross_pts * contract_size * vol
+        est_net_profit = round(est_gross_money + swap + comm, 2)
+
+    basis_str = f"spread({spread:.{digits}f}) + cost_pts({cost_pts:.{digits}f}) + tick_size({tick_size:.{digits}f})"
+    return {
+        "allowed": True,
+        "status": "AVAILABLE",
+        "label": "PROFIT PROTECTION SUGGESTION",
+        "arah": arah,
+        "entry_price": entry,
+        "current_bid": bid,
+        "current_ask": ask,
+        "suggested_sl": raw_sl,
+        "gross_profit_locked_pts": round(gross_pts, digits),
+        "estimated_net_profit": est_net_profit,
+        "currency": acc_cur or None,
+        "buffer_pts": round(gross_pts, digits),
+        "cost_buffer_pts": round(buffer_pts, digits),
+        "calculation_basis": basis_str,
+        "reason": "VALID_BROKER_CONSTRAINTS",
+        "disclaimer": (
+            "SL yang disarankan berpotensi mengunci sebagian keuntungan jika tersentuh dan dieksekusi. "
+            "Risiko slippage, biaya transaksi, dan gap harga tetap ada. Tindakan manual oleh trader."
+        ),
+    }
+
+
+def audit_pending_orders(orders, tick, radar_zones=None, sym_info=None):
+    """Mengaudit seluruh pending order secara READ-ONLY (tanpa modifikasi/hapus order)."""
+    bid = float(getattr(tick, "bid", 0.0) or 0.0) if tick is not None else 0.0
+    ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else 0.0
+    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else bid
+    results = []
+    for o in (orders or ()):
+        nm_o, arah_o = _info_tipe_pending(getattr(o, "type", 2))
+        vol_o = float(getattr(o, "volume_current", getattr(o, "volume_initial", 0.0)) or 0.0)
+        p_open = float(getattr(o, "price_open", 0.0) or 0.0)
+        sl_o = float(getattr(o, "sl", 0.0) or 0.0)
+        tp_o = float(getattr(o, "tp", 0.0) or 0.0)
+        ref_px = ask if arah_o == "BUY" else bid
+        if ref_px <= 0:
+            ref_px = mid
+        dist_o = abs(ref_px - p_open) if (ref_px > 0 and p_open > 0) else 0.0
+
+        # Validasi posisi harga limit/stop terhadap harga pasar
+        price_valid = p_open > 0 and ref_px > 0
+        if price_valid:
+            if "BUY LIMIT" in nm_o:
+                price_valid = p_open < ask
+            elif "SELL LIMIT" in nm_o:
+                price_valid = p_open > bid
+            elif "BUY STOP" in nm_o:
+                price_valid = p_open > ask
+            elif "SELL STOP" in nm_o:
+                price_valid = p_open < bid
+
+        structural_sl = None
+        if sl_o <= 0:
+            structural_sl = resolve_structural_sl_recommendation(arah_o, p_open, radar_zones=radar_zones)
+
+        results.append({
+            "ticket": getattr(o, "ticket", None),
+            "symbol": str(getattr(o, "symbol", SYMBOL) or SYMBOL),
+            "order_type": nm_o,
+            "arah": arah_o,
+            "volume": vol_o,
+            "entry_price": p_open,
+            "sl": sl_o,
+            "tp": tp_o,
+            "distance_pt": round(dist_o, 2),
+            "price_validity": "VALID_PRICE" if price_valid else "PRICE_OUT_OF_RANGE",
+            "status": "ACTIVE_PENDING",
+            "structural_sl": structural_sl if structural_sl is not None else "STRUCTURAL_SL_UNAVAILABLE",
+        })
+    return results
+    cur = audits[0]["currency"]
+    total = sum(float(a["profit"]) for a in audits)
+    fmt = f"{total:+,.1f} {cur}" if compact else f"{total:+,.2f} {cur}"
+    return fmt, audits
+
+
+def resolve_structural_sl_recommendation(arah, ref_price, radar_zones=None, active_zones=None):
+    """Mencari rekomendasi SL berbasis invalidasi struktur zona aktif; mengembalikan None jika tidak tersedia.
+
+    Mode Pantau tidak pernah mengarang SL berbasis ATR sembarang ketika struktur invalidasi tidak tersedia.
+    """
+    want_kind = "DEMAND" if str(arah).upper() == "BUY" else "SUPPLY"
+    candidates = []
+    for src in (radar_zones or ()), (active_zones or ()):
+        for z in src:
+            if not isinstance(z, dict):
+                continue
+            z_kind = str(z.get("zone_type", z.get("kind", ""))).upper()
+            if z_kind != want_kind:
+                continue
+            lo = z.get("price_low", z.get("lo"))
+            hi = z.get("price_high", z.get("hi"))
+            inv = z.get("invalidation", z.get("sl", z.get("jebol")))
+            if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)) or not isinstance(inv, (int, float)):
+                continue
+            if want_kind == "DEMAND" and inv < ref_price:
+                dist = 0.0 if lo <= ref_price <= hi else min(abs(ref_price - lo), abs(ref_price - hi))
+                candidates.append((dist, float(inv)))
+            elif want_kind == "SUPPLY" and inv > ref_price:
+                dist = 0.0 if lo <= ref_price <= hi else min(abs(ref_price - lo), abs(ref_price - hi))
+                candidates.append((dist, float(inv)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    return round(candidates[0][1], 2)
+
+
+def _normalize_radar_zone_entry(z):
+    """Menormalisasi objek/dict zona dari Python Scanner menjadi dict standar dengan stable zone_id."""
+    if not isinstance(z, dict):
+        z_id = getattr(z, "zone_id", "")
+        tf = getattr(z, "timeframe", getattr(z, "tf", ""))
+        kind = str(getattr(z, "kind", getattr(z, "zone_type", ""))).upper()
+        lo = float(getattr(z, "price_low", getattr(z, "lo", 0.0)))
+        hi = float(getattr(z, "price_high", getattr(z, "hi", 0.0)))
+        inv = float(getattr(z, "invalidation", getattr(z, "sl", 0.0)))
+        tier = str(getattr(z, "risk_tier", "") or "UNCLASSIFIED").upper()
+        grade = str(getattr(z, "grade", ""))
+        score = float(getattr(z, "score", 0.0) or 0.0)
+        status = str(getattr(z, "status", "RADAR")).upper()
+        approach = str(getattr(z, "approach", "UNTOUCHED")).upper()
+        eligibility = str(getattr(z, "radar_eligibility", "QUALIFIED")).upper()
+    else:
+        z_id = z.get("zone_id", "")
+        tf = z.get("timeframe", z.get("tf", ""))
+        kind = str(z.get("zone_type", z.get("kind", ""))).upper()
+        lo = float(z.get("price_low", z.get("lo", 0.0)))
+        hi = float(z.get("price_high", z.get("hi", 0.0)))
+        inv = float(z.get("invalidation", z.get("sl", 0.0)))
+        tier = str(z.get("risk_tier", "") or "UNCLASSIFIED").upper()
+        grade = str(z.get("grade", ""))
+        score = float(z.get("score", 0.0) or 0.0)
+        status = str(z.get("status", "RADAR")).upper()
+        approach = str(z.get("approach", "UNTOUCHED")).upper()
+        eligibility = str(z.get("radar_eligibility", "QUALIFIED")).upper()
+
+    if lo > hi:
+        lo, hi = hi, lo
+    if not z_id:
+        z_id = f"{tf}_{kind}_{lo:.2f}_{hi:.2f}"
+    if status == "TOUCHED":
+        status = "ZONE_TOUCHED"
+    return {
+        "zone_id": str(z_id),
+        "timeframe": str(tf),
+        "zone_type": kind,
+        "arah": "SELL" if kind == "SUPPLY" else "BUY",
+        "price_low": lo,
+        "price_high": hi,
+        "invalidation": inv,
+        "risk_tier": tier,
+        "grade": grade,
+        "score": score,
+        "status": status,
+        "approach": approach,
+        "radar_eligibility": eligibility,
+        "expired": bool(z.get("expired", False)) if isinstance(z, dict) else bool(getattr(z, "expired", False)),
+        "mitigated": bool(z.get("mitigated", False)) if isinstance(z, dict) else bool(getattr(z, "mitigated", False)),
+        "invalidated": bool(z.get("invalidated", False)) if isinstance(z, dict) else bool(getattr(z, "invalidated", False)),
+    }
+
+
+def collect_radar_watchlist_with_reconciliation(scan_result, decision=None):
+    """Mengumpulkan SELURUH zona Radar Qualified aktif dari Python Scanner + rekonsiliasi audit eksklusi.
+
+    Invariant: `Scanner Radar Qualified == Monitor Active + Validly Excluded (from Radar Qualified)`.
+    Zona non-qualified dari `all_prioritized` (mis. FAR_ZONE / NOT_RADAR_QUALIFIED / INVALIDATED)
+    tetap dicatat dalam `excluded_details` dengan alasan eksplisit agar transparan.
+    """
+    if not isinstance(scan_result, dict):
+        return [], {
+            "scanner_radar_qualified_count": 0,
+            "monitor_received_count": 0,
+            "monitor_active_count": 0,
+            "excluded_count": 0,
+            "excluded_from_radar_qualified_count": 0,
+            "excluded_details": [],
+            "exclusion_reasons": ["DATA_INCOMPLETE"],
+            "snapshot_id": None,
+            "transfer_status": "OK",
+        }
+    rp = scan_result.get("radar_priority") if isinstance(scan_result.get("radar_priority"), dict) else {}
+    radar_qualified_raw = list(rp.get("radar_qualified") or ())
+    scanner_rq_count = len(radar_qualified_raw)
+    snap_id = scan_result.get("snapshot_id") or rp.get("snapshot_id")
+
+    seen = {}
+    excluded_details = []
+    exclusion_reasons = []
+    received_ids = set()
+    excluded_ids = set()
+    excluded_from_rq_count = 0
+
+    def _record_excl(nz_item, reason_code, final_st=None, from_rq=False):
+        nonlocal excluded_from_rq_count
+        zid = nz_item["zone_id"]
+        if zid in excluded_ids:
+            return
+        excluded_ids.add(zid)
+        if from_rq:
+            excluded_from_rq_count += 1
+        rec = {
+            "zone_id": zid,
+            "timeframe": nz_item.get("timeframe", ""),
+            "zone_type": nz_item.get("zone_type", ""),
+            "initial_status": nz_item.get("status", "RADAR"),
+            "final_status": final_st or reason_code,
+            "reason": reason_code,
+            "snapshot_id": snap_id,
+        }
+        excluded_details.append(rec)
+        exclusion_reasons.append(f"{zid}:{reason_code}")
+
+    def _classify_exclusion(nz_item, from_all_prio=False):
+        if nz_item["zone_type"] not in ("SUPPLY", "DEMAND") or nz_item["price_high"] <= 0:
+            return "DATA_INCOMPLETE", "DATA_INCOMPLETE"
+        if nz_item["risk_tier"] == "FAR_ZONE":
+            return "FAR_ZONE_EXCLUDED", "FAR_ZONE"
+        if nz_item["invalidated"] or nz_item["status"] == "INVALIDATED":
+            return "INVALIDATED", "INVALIDATED"
+        if nz_item["expired"] or nz_item["status"] == "EXPIRED":
+            return "EXPIRED", "EXPIRED"
+        if nz_item["mitigated"] or nz_item["status"] == "MITIGATED":
+            return "MITIGATED", "MITIGATED"
+        if from_all_prio and nz_item["radar_eligibility"] != "QUALIFIED":
+            return "NOT_RADAR_QUALIFIED", "NOT_RADAR_QUALIFIED"
+        return None, None
+
+    # 1) Proses Radar Qualified resmi dari scanner + tier lists (out-of-tier tetap masuk)
+    rq_sources = [
+        (radar_qualified_raw, True),
+        (rp.get("high_risk_zones", ()), False),
+        (rp.get("medium_risk_zones", ()), False),
+        (rp.get("low_risk_zones", ()), False),
+        (scan_result.get("high_risk_zones", ()), False),
+        (scan_result.get("medium_risk_zones", ()), False),
+        (scan_result.get("low_risk_zones", ()), False),
+    ]
+    for src, is_rq_primary in rq_sources:
+        for raw_z in (src or ()):
+            nz = _normalize_radar_zone_entry(raw_z)
+            zid = nz["zone_id"]
+            if zid in seen:
+                if is_rq_primary:
+                    _record_excl(nz, "DUPLICATE", final_st="DUPLICATE", from_rq=True)
+                continue
+            received_ids.add(zid)
+            excl_reason, final_st = _classify_exclusion(nz, from_all_prio=False)
+            if excl_reason:
+                _record_excl(nz, excl_reason, final_st=final_st, from_rq=is_rq_primary)
+                continue
+            seen[zid] = nz
+
+    # 2) Audit kandidat lain di all_prioritized agar setiap zona yang tidak aktif punya alasan eksplisit
+    for raw_z in (rp.get("all_prioritized") or ()):
+        nz = _normalize_radar_zone_entry(raw_z)
+        zid = nz["zone_id"]
+        received_ids.add(zid)
+        if zid in seen or zid in excluded_ids:
+            continue
+        excl_reason, final_st = _classify_exclusion(nz, from_all_prio=True)
+        if excl_reason:
+            _record_excl(nz, excl_reason, final_st=final_st, from_rq=False)
+        elif nz["radar_eligibility"] == "QUALIFIED":
+            seen[zid] = nz
+        else:
+            _record_excl(nz, "OTHER_FILTER_REASON", final_st="EXCLUDED", from_rq=False)
+
+    watchlist = list(seen.values())
+    invariant_ok = (scanner_rq_count == len(watchlist) + excluded_from_rq_count) or (
+        len(watchlist) >= scanner_rq_count and excluded_from_rq_count == 0
+    )
+    transfer_status = "ZONE_TRANSFER_MISMATCH" if ((scanner_rq_count > 0 and len(watchlist) == 0) or not invariant_ok) else "OK"
+    reconciliation = {
+        "scanner_radar_qualified_count": scanner_rq_count,
+        "monitor_received_count": len(received_ids),
+        "monitor_active_count": len(watchlist),
+        "excluded_count": len(excluded_details),
+        "excluded_from_radar_qualified_count": excluded_from_rq_count,
+        "excluded_details": excluded_details,
+        "exclusion_reasons": exclusion_reasons,
+        "snapshot_id": snap_id,
+        "transfer_status": transfer_status,
+    }
+    return watchlist, reconciliation
+
+
+def extract_m5_validation_scopes(global_m5_label, decision=None):
+    """Memisahkan scope Global M5 Structure dari Zone-Specific Entry Validation."""
+    dec = decision if isinstance(decision, dict) else {}
+    stages = dec.get("m5_stages") if isinstance(dec.get("m5_stages"), dict) else {}
+    if not stages and isinstance(dec.get("entry_validation"), dict):
+        stages = dec.get("entry_validation", {})
+
+    def _st(key):
+        val = stages.get(key)
+        if isinstance(val, dict):
+            return str(val.get("status", "NOT_CHECKED")).upper()
+        if isinstance(val, str) and val:
+            return val.upper()
+        return "NOT_CHECKED"
+
+    zone_touch = _st("zone_touch")
+    sweep = _st("liquidity_sweep")
+    choch_bos_cisd = _st("structure_trigger")
+    displacement = _st("displacement")
+    # Prasyarat: jika Zone Touch belum PASS/CONFIRMED, stage lanjutan tidak boleh dihitung FAIL
+    if zone_touch not in ("CONFIRMED", "PASS", "PASSED"):
+        if sweep == "FAIL":
+            sweep = "NOT_CHECKED"
+        if choch_bos_cisd == "FAIL":
+            choch_bos_cisd = "NOT_CHECKED"
+        if displacement == "FAIL":
+            displacement = "NOT_CHECKED"
+
+    confirmed_st = str(dec.get("confirmed_status", dec.get("final_decision", "WAIT"))).upper()
+    if zone_touch not in ("CONFIRMED", "PASS", "PASSED"):
+        confirmed_st = "WAIT"
+
+    return {
+        "GLOBAL_M5_STRUCTURE": str(global_m5_label or "-"),
+        "ZONE_TOUCH": zone_touch,
+        "ZONE_SPECIFIC_SWEEP": sweep,
+        "ZONE_SPECIFIC_CHOCH_BOS_CISD": choch_bos_cisd,
+        "ZONE_SPECIFIC_DISPLACEMENT": displacement,
+        "CONFIRMED_ENTRY_STATUS": confirmed_st,
+    }
+
+
+def collect_radar_watchlist(scan_result, decision=None):
+    """Mengumpulkan SELURUH zona Radar Qualified aktif dari Python Scanner (Single Source of Truth)."""
+    watchlist, _ = collect_radar_watchlist_with_reconciliation(scan_result, decision=decision)
+    return watchlist
+
+
+def evaluate_zone_status(zone, bid, ask, mid, close_m5=None, atr_m5=1.0, prev_status=None):
+    """Mengevaluasi status independen satu zona: RADAR, APPROACHING, ZONE_TOUCHED, MITIGATED, INVALIDATED, EXPIRED."""
+    lo = float(zone["price_low"])
+    hi = float(zone["price_high"])
+    inv = float(zone.get("invalidation", 0.0) or 0.0)
+    kind = str(zone["zone_type"]).upper()
+
+    # Jarak berbasis Mid (konsisten dengan snapshot_price)
+    if lo <= mid <= hi:
+        dist_pt = 0.0
+    elif mid < lo:
+        dist_pt = lo - mid
+    else:
+        dist_pt = mid - hi
+
+    # Cek EXPIRED / INVALIDATED / MITIGATED terlebih dahulu
+    if zone.get("expired") or zone.get("status") == "EXPIRED":
+        return {"status": "EXPIRED", "distance_pt": round(dist_pt, 2), "reason": "Zona kedaluwarsa (EXPIRED)"}
+
+    if zone.get("invalidated") or zone.get("status") == "INVALIDATED":
+        return {"status": "INVALIDATED", "distance_pt": round(dist_pt, 2), "reason": "Struktur zona terinvalidasi"}
+
+    if close_m5 is not None and inv > 0:
+        if kind == "SUPPLY" and close_m5 > inv:
+            return {"status": "INVALIDATED", "distance_pt": round(dist_pt, 2), "reason": f"Close M5 ({close_m5:.2f}) menembus invalidasi Supply ({inv:.2f})"}
+        if kind == "DEMAND" and close_m5 < inv:
+            return {"status": "INVALIDATED", "distance_pt": round(dist_pt, 2), "reason": f"Close M5 ({close_m5:.2f}) menembus invalidasi Demand ({inv:.2f})"}
+
+    if zone.get("mitigated") or zone.get("status") == "MITIGATED":
+        return {"status": "MITIGATED", "distance_pt": round(dist_pt, 2), "reason": "Zona sudah termitigasi"}
+
+    # Cek ZONE_TOUCHED (sentuh zona oleh Bid/Ask/Mid)
+    touched_now = (lo <= mid <= hi) or (lo <= bid <= hi) or (lo <= ask <= hi)
+    if touched_now:
+        return {"status": "ZONE_TOUCHED", "distance_pt": 0.0, "reason": f"Harga menyentuh zona {lo:.2f}-{hi:.2f}"}
+
+    # Jika sebelumnya ZONE_TOUCHED dan kini harga keluar menjauh tanpa invalidasi -> MITIGATED
+    exit_buf = max(0.8, 0.4 * float(atr_m5 or 1.0))
+    if prev_status == "ZONE_TOUCHED":
+        if (kind == "SUPPLY" and mid < lo - exit_buf) or (kind == "DEMAND" and mid > hi + exit_buf):
+            return {"status": "MITIGATED", "distance_pt": round(dist_pt, 2), "reason": "Harga memantul meninggalkan zona setelah tersentuh (MITIGATED)"}
+
+    # Cek APPROACHING
+    app_thr = max(3.0, 1.5 * float(atr_m5 or 1.0))
+    if dist_pt <= app_thr:
+        return {"status": "APPROACHING", "distance_pt": round(dist_pt, 2), "reason": f"Harga mendekati zona ({dist_pt:.2f} pt <= {app_thr:.2f} pt)"}
+
+    return {"status": "RADAR", "distance_pt": round(dist_pt, 2), "reason": f"Zona aktif dalam radar (jarak {dist_pt:.2f} pt)"}
+
+
+class ZoneMonitorState:
+    """Pelacak transisi status independen per zona Radar Qualified dengan baseline awal tanpa alert palsu."""
+
+    def __init__(self, symbol=SYMBOL):
+        self.symbol = symbol
+        self.states = {}
+        self.initialized = False
+
+    def initialize_baseline(self, zones, snapshot, close_m5=None, atr_m5=1.0):
+        bid = float(snapshot.get("bid") or snapshot.get("snapshot_price") or 0.0)
+        ask = float(snapshot.get("ask") or bid)
+        mid = float(snapshot.get("mid") or snapshot.get("snapshot_price") or ((bid + ask) / 2.0))
+        self.states = {}
+        for z in zones:
+            ev = evaluate_zone_status(z, bid, ask, mid, close_m5=close_m5, atr_m5=atr_m5, prev_status=None)
+            self.states[z["zone_id"]] = ev["status"]
+        self.initialized = True
+        return dict(self.states)
+
+    def update(self, zones, snapshot, close_m5=None, atr_m5=1.0):
+        if not self.initialized:
+            self.initialize_baseline(zones, snapshot, close_m5=close_m5, atr_m5=atr_m5)
+            return []
+        bid = float(snapshot.get("bid") or snapshot.get("snapshot_price") or 0.0)
+        ask = float(snapshot.get("ask") or bid)
+        mid = float(snapshot.get("mid") or snapshot.get("snapshot_price") or ((bid + ask) / 2.0))
+        ts_wib = _format_wib_time(snapshot.get("server_time") or snapshot.get("timestamp"))
+        transitions = []
+        for z in zones:
+            zid = z["zone_id"]
+            prev = self.states.get(zid)
+            ev = evaluate_zone_status(z, bid, ask, mid, close_m5=close_m5, atr_m5=atr_m5, prev_status=prev)
+            new_st = ev["status"]
+            if prev is None:
+                self.states[zid] = new_st
+                continue
+            if new_st != prev:
+                self.states[zid] = new_st
+                transitions.append({
+                    "timestamp_wib": ts_wib,
+                    "symbol": self.symbol,
+                    "zone_id": zid,
+                    "timeframe": z.get("timeframe", ""),
+                    "zone_type": z.get("zone_type", ""),
+                    "prev_status": prev,
+                    "new_status": new_st,
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": mid,
+                    "distance_pt": ev["distance_pt"],
+                    "reason": ev["reason"],
+                })
+        return transitions
+
+    @staticmethod
+    def format_transition_alert(ev):
+        return (
+            f"\n[TRANSISI ZONA {ev['symbol']}] {ev['timestamp_wib']} | {ev['zone_id']} "
+            f"({ev['timeframe']} {ev['zone_type']}): {ev['prev_status']} -> {ev['new_status']} | "
+            f"Bid:{ev['bid']:.2f} Ask:{ev['ask']:.2f} Mid:{ev['mid']:.2f} | "
+            f"Jarak:{ev['distance_pt']:.2f}pt | {ev['reason']}"
+        )
+
+
+class PantauCycleEngine:
+    """Engine Single Snapshot untuk Mode Pantau: 1 snapshot/siklus, tanpa hidden rescan per detik."""
+
+    def __init__(self, symbol=SYMBOL):
+        self.symbol = symbol
+        self.snapshot = None
+        self.scan_result = None
+        self.decision = None
+        self.last_candle_ts = None
+        self.watchlist = []
+        self.reconciliation = {}
+        self.zone_monitor = ZoneMonitorState(symbol=symbol)
+        self.scan_count = 0
+
+    def step(
+        self,
+        tick,
+        frames=None,
+        df_m5=None,
+        atr_m5=1.0,
+        force_rescan=False,
+        mt5_connected=True,
+        snapshot_fn=create_market_snapshot,
+        scan_fn=scan_xauusd_zones,
+        eval_fn=evaluate_trade_decision,
+    ):
+        if not mt5_connected or tick is None:
+            return {
+                "data_status": "DATA_INCOMPLETE",
+                "final_decision": "WAIT",
+                "pending_status": "WAIT",
+                "confirmed_status": "WAIT",
+                "transitions": [],
+                "watchlist": self.watchlist,
+            }
+
+        candle_ts = df_m5.index[-1] if (df_m5 is not None and len(df_m5) > 0) else None
+        need_full_scan = force_rescan or (self.scan_result is None) or (
+            candle_ts is not None and self.last_candle_ts is not None and candle_ts != self.last_candle_ts
+        )
+
+        if need_full_scan:
+            snap = snapshot_fn(
+                symbol=self.symbol,
+                frames=frames,
+                tick=tick,
+                live=True,
+                force_refresh_frames=(frames is None),
+            )
+            self.snapshot = snap
+            snap_st = str(snap.get("snapshot_status") or snap.get("data_status") or "").upper()
+            data_ok = snap.get("data_ok")
+            snap_valid = (
+                (snap_st in ("OK", "COMPLETE") or (data_ok is True and snap_st != "DATA_INCOMPLETE"))
+                and bool(snap.get("snapshot_price"))
+            )
+            if not snap_valid:
+                return {
+                    "data_status": "DATA_INCOMPLETE",
+                    "final_decision": "WAIT",
+                    "pending_status": "WAIT",
+                    "confirmed_status": "WAIT",
+                    "transitions": [],
+                    "watchlist": self.watchlist,
+                    "reconciliation": self.reconciliation,
+                    "snapshot_mismatch": False,
+                    "snapshot_mismatch_reason": "",
+                }
+            self.scan_result = scan_fn(snapshot=snap)
+            self.decision = eval_fn(snapshot=snap, scan_result=self.scan_result)
+            self.last_candle_ts = candle_ts
+            self.scan_count += 1
+            self.watchlist, self.reconciliation = collect_radar_watchlist_with_reconciliation(self.scan_result, self.decision)
+            if not self.reconciliation.get("snapshot_id"):
+                self.reconciliation["snapshot_id"] = snap.get("snapshot_id")
+            close_m5 = float(df_m5["Close"].iloc[-1]) if (df_m5 is not None and len(df_m5) > 0) else None
+            if not self.zone_monitor.initialized:
+                self.zone_monitor.initialize_baseline(self.watchlist, snap, close_m5=close_m5, atr_m5=atr_m5)
+                transitions = []
+            else:
+                transitions = self.zone_monitor.update(self.watchlist, snap, close_m5=close_m5, atr_m5=atr_m5)
+        else:
+            # Tick-only update: gunakan tick terbaru tanpa memicu scan_xauusd_zones() ulang
+            bid = float(getattr(tick, "bid", 0.0) or 0.0)
+            ask = float(getattr(tick, "ask", 0.0) or 0.0)
+            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else bid
+            if bid <= 0 or ask <= 0:
+                return {
+                    "data_status": "DATA_INCOMPLETE",
+                    "final_decision": "WAIT",
+                    "pending_status": "WAIT",
+                    "confirmed_status": "WAIT",
+                    "transitions": [],
+                    "watchlist": self.watchlist,
+                }
+            snap_tick = dict(self.snapshot or {})
+            snap_tick["bid"] = bid
+            snap_tick["ask"] = ask
+            snap_tick["mid"] = mid
+            snap_tick["snapshot_price"] = mid
+            snap_tick["server_time"] = getattr(tick, "time", snap_tick.get("server_time"))
+            self.snapshot = snap_tick
+            close_m5 = float(df_m5["Close"].iloc[-1]) if (df_m5 is not None and len(df_m5) > 0) else None
+            transitions = self.zone_monitor.update(self.watchlist, snap_tick, close_m5=close_m5, atr_m5=atr_m5)
+
+        dec = self.decision or {}
+        pending_plan = dec.get("pending_plan") if isinstance(dec.get("pending_plan"), dict) else {}
+        pending_status = str(pending_plan.get("status", "NONE")).upper()
+        confirmed_status = str(dec.get("confirmed_status", dec.get("final_decision", "WAIT"))).upper()
+        snap_id_mon = (self.snapshot or {}).get("snapshot_id")
+        snap_id_scan = (self.scan_result or {}).get("snapshot_id") if isinstance(self.scan_result, dict) else None
+        snap_mismatch = bool(snap_id_mon and snap_id_scan and snap_id_mon != snap_id_scan)
+        snap_mismatch_reason = f"SNAPSHOT_ID_MISMATCH (monitor={snap_id_mon}, scanner={snap_id_scan})" if snap_mismatch else ""
+        return {
+            "data_status": "COMPLETE",
+            "snapshot": self.snapshot,
+            "scan_result": self.scan_result,
+            "decision": dec,
+            "final_decision": dec.get("final_decision", "WAIT"),
+            "pending_status": pending_status,
+            "confirmed_status": confirmed_status,
+            "transitions": transitions,
+            "watchlist": self.watchlist,
+            "reconciliation": self.reconciliation,
+            "snapshot_mismatch": snap_mismatch,
+            "snapshot_mismatch_reason": snap_mismatch_reason,
+        }
+
+
+def _short_bias_tag(val):
+    s = str(val or "N/A").strip().upper()
+    if s == "BULLISH":
+        return "BULL"
+    if s == "BEARISH":
+        return "BEAR"
+    return s
+
+
+def _build_monitor_snapshot(
+    tick=None,
+    price=None,
+    bias_info=None,
+    scan_result=None,
+    decision=None,
+    watchlist=None,
+    reconciliation=None,
+    evs=None,
+    sweeps=None,
+    cisd_m5=None,
+    df_m5=None,
+    positions=None,
+    orders=None,
+    acc_info=None,
+    sym_info=None,
+    otomatis=None,
+    monitor_status="MONITORING",
+    time_str=None,
+    extra_events=None,
+):
+    """Menyusun snapshot data terstruktur untuk formatter Smart Radar & SmartAlertTracker tanpa menghitung ulang indikator."""
+    if price is None and tick is not None:
+        bid = float(getattr(tick, "bid", 0.0) or 0.0)
+        ask = float(getattr(tick, "ask", 0.0) or 0.0)
+        price = bid if bid > 0 else ((bid + ask) / 2.0 if ask > 0 else 0.0)
+    try:
+        price_val = float(price) if price is not None else 0.0
+    except Exception:
+        price_val = 0.0
+
+    bid_val = float(getattr(tick, "bid", price_val) or price_val) if tick is not None else price_val
+    ask_val = float(getattr(tick, "ask", price_val) or price_val) if tick is not None else price_val
+    mid_val = (bid_val + ask_val) / 2.0 if (bid_val > 0 and ask_val > 0) else price_val
+
+    if not time_str:
+        time_str = datetime.now(WIB_TZ).strftime("%H:%M:%S")
+
+    # Market Bias (ambil dari scan_result atau bias_htf_cached dict)
+    ctx = (scan_result.get("htf_context") or scan_result.get("context") or {}) if isinstance(scan_result, dict) else {}
+    h4_bias = ctx.get("H4")
+    h1_bias = ctx.get("H1")
+    if not h4_bias and isinstance(bias_info, dict):
+        h4_bias = bias_info.get("bias", "N/A")
+    if not h1_bias and isinstance(bias_info, dict):
+        h1_bias = bias_info.get("h1_bias") or bias_info.get("H1") or "N/A"
+    h4_short = _short_bias_tag(h4_bias or "N/A")
+    h1_short = _short_bias_tag(h1_bias or "N/A")
+
+    # Global M5 label
+    m5_label = "WAIT"
+    last_structure = None
+    if evs:
+        last_ev = evs[-1]
+        ev_tipe = str(last_ev.get("tipe", "")).upper()
+        ev_arah = _short_bias_tag(last_ev.get("arah", ""))
+        ev_lvl = float(last_ev.get("level", 0.0) or 0.0)
+        ev_t = None
+        if df_m5 is not None and isinstance(last_ev.get("k"), int) and 0 <= last_ev["k"] < len(df_m5):
+            ev_t = str(df_m5.index[last_ev["k"]])
+        m5_label = f"{ev_tipe} {ev_arah} {ev_lvl:.2f}".strip()
+        last_structure = {
+            "key": f"{ev_t}|{ev_tipe}|{ev_arah}|{ev_lvl:.2f}",
+            "tipe": ev_tipe,
+            "arah": ev_arah,
+            "level": ev_lvl,
+            "time": ev_t,
+        }
+
+    last_sweep = None
+    if sweeps:
+        sw_item = sweeps[-1]
+        last_sweep = {
+            "key": f"{sw_item[0]}|{sw_item[1]}|{float(sw_item[2]):.2f}",
+            "time": str(sw_item[0]),
+            "label": str(sw_item[1]),
+            "level": float(sw_item[2]),
+            "wick": float(sw_item[3]),
+            "close": float(sw_item[4]),
+        }
+
+    # Signal & Validation Stages
+    dec = decision if isinstance(decision, dict) else {}
+    stages = dec.get("stages") or {}
+    confirmed_st = str(dec.get("status") or dec.get("confirmed_status") or "WAIT").upper()
+    sinyal_aktif = (otomatis or {}).get("sinyal") if isinstance(otomatis, dict) else None
+    if sinyal_aktif and isinstance(sinyal_aktif, dict) and sinyal_aktif.get("arah"):
+        signal_str = str(sinyal_aktif["arah"]).upper()
+    elif confirmed_st == "VALID" and dec.get("direction"):
+        signal_str = str(dec["direction"]).upper()
+    else:
+        signal_str = confirmed_st
+
+    rr_stage = stages.get("risk_reward") or {}
+    rr_status = str(rr_stage.get("status") or "NOT CHECKED").upper()
+    disp_stage = stages.get("displacement") or {}
+    disp_status = str(disp_stage.get("status") or "NOT CHECKED").upper()
+    zt_stage = stages.get("zone_touch") or {}
+    zt_status = str(zt_stage.get("status") or "WAIT").upper()
+
+    # Primary Zone
+    wl_list = list(watchlist or ())
+    r_prio = (
+        (dec.get("radar_priority") if isinstance(dec, dict) else None)
+        or (scan_result.get("radar_priority") if isinstance(scan_result, dict) else None)
+        or {}
+    )
+    pz = (
+        r_prio.get("primary_directional_zone")
+        or r_prio.get("primary_zone")
+        or r_prio.get("nearest_radar_zone")
+        or (wl_list[0] if wl_list else None)
+    )
+    primary_zone_info = None
+    if isinstance(pz, dict):
+        lo = float(pz.get("price_low", 0.0) or 0.0)
+        hi = float(pz.get("price_high", 0.0) or 0.0)
+        dist = pz.get("distance")
+        if dist is None and price_val > 0 and hi > 0:
+            if lo <= mid_val <= hi:
+                dist = 0.0
+            elif mid_val < lo:
+                dist = lo - mid_val
+            else:
+                dist = mid_val - hi
+        z_stat = str(pz.get("approach") or pz.get("status") or "RADAR").upper()
+        # Sinkronkan status zona terkini dari watchlist jika tersedia
+        for wz in wl_list:
+            if wz.get("zone_id") == pz.get("zone_id"):
+                z_stat = str(wz.get("approach") or wz.get("status") or z_stat).upper()
+                break
+        primary_zone_info = {
+            "zone_id": pz.get("zone_id", f"{pz.get('timeframe', '')}_{pz.get('zone_type', '')}_{lo:.2f}_{hi:.2f}"),
+            "timeframe": str(pz.get("timeframe", "N/A")),
+            "zone_type": str(pz.get("zone_type", "N/A")),
+            "price_low": lo,
+            "price_high": hi,
+            "distance": round(float(dist or 0.0), 2),
+            "status": z_stat,
+        }
+
+    # Positions summary
+    buy_code = getattr(mt5, "ORDER_TYPE_BUY", 0)
+    pos_items = []
+    for p in (positions or ()):
+        if isinstance(p, dict):
+            tkt = p.get("ticket")
+            arah_p = str(p.get("arah") or ("BUY" if p.get("type", 0) == buy_code else "SELL")).upper()
+            vol_p = float(p.get("volume", 0.0) or 0.0)
+            entry_p = float(p.get("price_open", p.get("entry", 0.0)) or 0.0)
+            sl_p = float(p.get("sl", 0.0) or 0.0)
+            tp_p = float(p.get("tp", 0.0) or 0.0)
+            pts_p = p.get("points")
+            if pts_p is None and price_val > 0 and entry_p > 0:
+                pts_p = (bid_val - entry_p) if arah_p == "BUY" else (entry_p - ask_val)
+        else:
+            tkt = getattr(p, "ticket", None)
+            arah_p = "BUY" if getattr(p, "type", 0) == buy_code else "SELL"
+            vol_p = float(getattr(p, "volume", 0.0) or 0.0)
+            entry_p = float(getattr(p, "price_open", 0.0) or 0.0)
+            sl_p = float(getattr(p, "sl", 0.0) or 0.0)
+            tp_p = float(getattr(p, "tp", 0.0) or 0.0)
+            if bid_val > 0 and ask_val > 0 and entry_p > 0:
+                pts_p = (bid_val - entry_p) if arah_p == "BUY" else (entry_p - ask_val)
+            else:
+                pts_p = 0.0
+        pos_items.append({
+            "ticket": tkt,
+            "arah": arah_p,
+            "volume": vol_p,
+            "price_open": entry_p,
+            "points": round(float(pts_p or 0.0), 1),
+            "sl": sl_p,
+            "tp": tp_p,
+        })
+
+    # Pending Orders summary
+    ord_raw = list(orders or ())
+    ord_audits = audit_pending_orders(ord_raw, tick, radar_zones=wl_list, sym_info=sym_info) if ord_raw else []
+    ord_without_sl = sum(1 for o in ord_raw if float(o.get("sl", 0.0) if isinstance(o, dict) else getattr(o, "sl", 0.0) or 0.0) <= 0.0)
+    ord_without_tp = sum(1 for o in ord_raw if float(o.get("tp", 0.0) if isinstance(o, dict) else getattr(o, "tp", 0.0) or 0.0) <= 0.0)
+
+    rec = reconciliation if isinstance(reconciliation, dict) else {}
+    radar_active_cnt = int(rec.get("monitor_active_count", len(wl_list)) or 0)
+    radar_excl_cnt = int(rec.get("excluded_count", 0) or 0)
+
+    return {
+        "time_str": time_str,
+        "price": price_val,
+        "bid": bid_val,
+        "ask": ask_val,
+        "h4_bias": h4_short,
+        "h1_bias": h1_short,
+        "m5_status": m5_label,
+        "signal": signal_str,
+        "confirmed_status": confirmed_st,
+        "zone_touch_status": zt_status,
+        "displacement_status": disp_status,
+        "rr_status": rr_status,
+        "primary_zone": primary_zone_info,
+        "positions": pos_items,
+        "pending_active_count": len(ord_raw),
+        "pending_without_sl": ord_without_sl,
+        "pending_without_tp": ord_without_tp,
+        "pending_audits": ord_audits,
+        "radar_active_count": radar_active_cnt,
+        "radar_excluded_count": radar_excl_cnt,
+        "watchlist": wl_list,
+        "reconciliation": rec,
+        "active_signal_obj": sinyal_aktif,
+        "last_structure": last_structure,
+        "last_sweep": last_sweep,
+        "last_cisd": dict(cisd_m5[-1]) if cisd_m5 else None,
+        "monitor_status": monitor_status,
+        "extra_events": list(extra_events or ()),
+        "symbol": SYMBOL,
+    }
+
+
+def format_monitor_summary(monitor_data: dict) -> str:
+    """
+    DEFAULT MODE formatter untuk command `pantau` (Smart Radar Alert ringkas).
+    Tidak mengulang daftar seluruh ticket pending order pada setiap interval.
+    """
+    d = monitor_data or {}
+    t_str = d.get("time_str") or datetime.now(WIB_TZ).strftime("%H:%M:%S")
+    price = d.get("price")
+    price_str = f"{float(price):.2f}" if isinstance(price, (int, float)) and price > 0 else "N/A"
+    h4 = _short_bias_tag(d.get("h4_bias", "N/A"))
+    h1 = _short_bias_tag(d.get("h1_bias", "N/A"))
+    m5 = d.get("m5_status") or "WAIT"
+    sig = str(d.get("signal") or "WAIT").upper()
+
+    lines = [
+        f"[XAUUSD SMART RADAR] {t_str}",
+        "",
+        f"PRICE : {price_str}",
+        f"MARKET: H4 {h4} | H1 {h1}",
+        f"M5    : {m5}",
+        "",
+        f"SIGNAL: {sig}",
+        "",
+        "PRIMARY ZONE:",
+    ]
+
+    pz = d.get("primary_zone")
+    if isinstance(pz, dict):
+        tf = pz.get("timeframe", "N/A")
+        zt = pz.get("zone_type", "N/A")
+        lo = float(pz.get("price_low", 0.0) or 0.0)
+        hi = float(pz.get("price_high", 0.0) or 0.0)
+        dist = pz.get("distance")
+        dist_str = f"{float(dist):.2f} pt" if isinstance(dist, (int, float)) else "N/A"
+        z_st = str(pz.get("status") or "RADAR").upper()
+        lines.append(f"{tf} {zt} {lo:.2f} - {hi:.2f}")
+        lines.append(f"Distance: {dist_str} | {z_st}")
+    else:
+        lines.append("NONE")
+
+    lines.append("")
+    lines.append("POSITION MONITOR:")
+    positions = d.get("positions") or []
+    if positions:
+        for idx, p in enumerate(positions):
+            arah = str(p.get("arah", "N/A")).upper()
+            vol = float(p.get("volume", 0.0) or 0.0)
+            entry = float(p.get("price_open", 0.0) or 0.0)
+            pts = p.get("points")
+            pts_str = f"{float(pts):+.1f} pt" if isinstance(pts, (int, float)) else "N/A"
+            sl_val = float(p.get("sl", 0.0) or 0.0)
+            sl_str = "NOT SET [WARNING]" if sl_val <= 0 else f"{sl_val:.2f}"
+            if idx > 0:
+                lines.append("---")
+            lines.append(f"{arah} {vol:.2f} @ {entry:.2f}")
+            lines.append(f"FLOATING: {pts_str}")
+            lines.append(f"SL: {sl_str}")
+    else:
+        lines.append("NONE")
+
+    p_active = int(d.get("pending_active_count", 0) or 0)
+    p_nosl = int(d.get("pending_without_sl", 0) or 0)
+    p_nosl_str = f"{p_nosl} [WARNING]" if p_nosl > 0 else f"{p_nosl}"
+
+    lines.extend([
+        "",
+        "PENDING ORDER:",
+        f"ACTIVE: {p_active}",
+        f"WITHOUT SL: {p_nosl_str}",
+        "",
+        "RADAR:",
+        f"ACTIVE: {int(d.get('radar_active_count', 0) or 0)}",
+        f"EXCLUDED: {int(d.get('radar_excluded_count', 0) or 0)}",
+        "",
+        f"STATUS: {d.get('monitor_status', 'MONITORING')}",
+    ])
+    return "\n".join(lines)
+
+
+def format_monitor_detail(monitor_data: dict) -> str:
+    """
+    DETAIL MODE formatter untuk command `pantau detail`.
+    Menampilkan seluruh informasi teknis monitoring termasuk zona radar, rekonsiliasi,
+    seluruh ticket posisi running, dan seluruh ticket pending order.
+    """
+    d = monitor_data or {}
+    t_str = d.get("time_str") or datetime.now(WIB_TZ).strftime("%H:%M:%S")
+    price = d.get("price")
+    price_str = f"{float(price):.2f}" if isinstance(price, (int, float)) and price > 0 else "N/A"
+    wl = d.get("watchlist") or []
+    rec = d.get("reconciliation") or {}
+    positions = d.get("positions") or []
+    ord_audits = d.get("pending_audits") or []
+
+    lines = [
+        "=" * 70,
+        f"MODE PANTAU PINTAR & SMART RADAR DETAIL — {t_str}",
+        "=" * 70,
+        f"- Current Price    : {price_str} | Market Bias: H4 {d.get('h4_bias', 'N/A')} | H1 {d.get('h1_bias', 'N/A')}",
+        f"- M5 Structure     : {d.get('m5_status', 'WAIT')} | Signal: {d.get('signal', 'WAIT')} | Confirmed: {d.get('confirmed_status', 'WAIT')}",
+        f"- Validation State : ZoneTouch={d.get('zone_touch_status', 'WAIT')} | Displacement={d.get('displacement_status', 'NOT CHECKED')} | R:R={d.get('rr_status', 'NOT CHECKED')}",
+        f"- Sumber Zona Aktif: Python Scanner Radar Qualified ({len(wl)} zona aktif terpantau, Single Snapshot)",
+    ]
+    if rec:
+        lines.append(
+            f"  * Rekonsiliasi: Scanner={rec.get('scanner_radar_qualified_count', 0)} | "
+            f"Monitor Received={rec.get('monitor_received_count', 0)} | "
+            f"Monitor Active={rec.get('monitor_active_count', 0)} | "
+            f"Excluded={rec.get('excluded_count', 0)} | Snapshot={rec.get('snapshot_id', '-')}"
+        )
+        for ex in rec.get("excluded_details", ()):
+            lines.append(
+                f"    - Excluded [{ex.get('zone_id')}] {ex.get('timeframe')} {ex.get('zone_type')} | "
+                f"{ex.get('initial_status')} -> {ex.get('final_status')} | Alasan: {ex.get('reason')}"
+            )
+    if wl:
+        for wz in wl:
+            lines.append(
+                f"  * [{wz.get('zone_id')}] {wz.get('timeframe')} {wz.get('zone_type')} "
+                f"{float(wz.get('price_low', 0.0)):.2f}-{float(wz.get('price_high', 0.0)):.2f} "
+                f"| Inv: {float(wz.get('invalidation', 0.0)):.2f} | Tier: {wz.get('risk_tier')} | "
+                f"Grade {wz.get('grade')} ({float(wz.get('score', 0.0)):.1f}) | Status: {wz.get('status')}"
+            )
+    else:
+        lines.append("  * Belum ada zona Radar Qualified aktif saat ini.")
+
+    if positions:
+        lines.append(f"- Pengawal Posisi Running Aktif ({len(positions)} posisi di {d.get('symbol', SYMBOL)}):")
+        for p in positions:
+            sl_txt = f"{float(p['sl']):.2f}" if float(p.get("sl", 0.0) or 0.0) > 0 else "BELUM DISET"
+            tp_txt = f"{float(p['tp']):.2f}" if float(p.get("tp", 0.0) or 0.0) > 0 else "BELUM DISET"
+            lines.append(
+                f"  * Ticket #{p.get('ticket')} | {p.get('arah')} {float(p.get('volume', 0.0)):.2f} lot @ {float(p.get('price_open', 0.0)):.2f} "
+                f"| SL: {sl_txt} | TP: {tp_txt} | Floating: {float(p.get('points', 0.0)):+.1f} pt"
+            )
+    else:
+        lines.append("- Pengawal Posisi Running Siaga: Tidak ada posisi running.")
+
+    if ord_audits:
+        lines.append(f"- Pengawal Validitas Pending Order Aktif ({len(ord_audits)} order, READ-ONLY):")
+        for oa in ord_audits:
+            sl_txt = f"{oa['sl']:.2f}" if float(oa.get("sl", 0.0) or 0.0) > 0 else f"BELUM DISET (Saran Struktur: {oa.get('structural_sl')})"
+            tp_txt = f"{oa['tp']:.2f}" if float(oa.get("tp", 0.0) or 0.0) > 0 else "BELUM DISET"
+            lines.append(
+                f"  * Ticket #{oa.get('ticket')} ({oa.get('symbol')}) | {oa.get('order_type')} {oa.get('volume')} lot @ {float(oa.get('entry_price', 0.0)):.2f} "
+                f"(Jarak: {float(oa.get('distance_pt', 0.0)):.2f} pt | {oa.get('price_validity')} | {oa.get('status')}) | SL: {sl_txt} | TP: {tp_txt}"
+            )
+    else:
+        lines.append(f"- Pending Order Aktif: {int(d.get('pending_active_count', 0) or 0)} (Tanpa SL: {int(d.get('pending_without_sl', 0) or 0)})")
+
+    lines.append(f"- STATUS: {d.get('monitor_status', 'MONITORING')}")
+    lines.append("=" * 70)
+    return "\n".join(lines)
+
+
+class SmartAlertTracker:
+    """
+    Mekanisme state/change detection untuk Smart Radar Alert (Default Mode `pantau`).
+    Menyaring informasi berulang ketika status tidak berubah, namun tidak pernah
+    menunda atau menyembunyikan peringatan risiko kritis (termasuk SL belum terpasang).
+    """
+
+    def __init__(self, critical_reminder_seconds=60.0):
+        self.initialized = False
+        self.prev_state = {}
+        self.critical_reminder_seconds = float(critical_reminder_seconds)
+        self._last_critical_emit_ts = 0.0
+
+    @staticmethod
+    def _build_state_signature(snapshot_data):
+        d = snapshot_data or {}
+        zones = {}
+        for z in (d.get("watchlist") or ()):
+            zid = str(z.get("zone_id") or "")
+            if zid:
+                zones[zid] = str(z.get("status") or z.get("approach") or "RADAR").upper()
+        pz = d.get("primary_zone")
+        if isinstance(pz, dict) and pz.get("zone_id"):
+            zones.setdefault(str(pz["zone_id"]), str(pz.get("status") or "RADAR").upper())
+
+        positions = {}
+        pos_no_sl_tickets = []
+        pos_no_tp_tickets = []
+        for p in (d.get("positions") or ()):
+            tkt = p.get("ticket")
+            sl_v = float(p.get("sl", 0.0) or 0.0)
+            tp_v = float(p.get("tp", 0.0) or 0.0)
+            risk_st = str(p.get("risk_status") or p.get("status") or "ACTIVE").upper()
+            positions[tkt] = {
+                "arah": str(p.get("arah", "")).upper(),
+                "sl": round(sl_v, 2),
+                "tp": round(tp_v, 2),
+                "risk_status": risk_st,
+            }
+            if sl_v <= 0:
+                pos_no_sl_tickets.append(tkt)
+            if tp_v <= 0:
+                pos_no_tp_tickets.append(tkt)
+
+        pending = {}
+        ord_no_sl_count = int(d.get("pending_without_sl", 0) or 0)
+        ord_no_tp_count = int(d.get("pending_without_tp", 0) or 0)
+        for oa in (d.get("pending_audits") or ()):
+            tkt = oa.get("ticket")
+            sl_v = float(oa.get("sl", 0.0) or 0.0)
+            tp_v = float(oa.get("tp", 0.0) or 0.0)
+            pending[tkt] = {
+                "price_validity": str(oa.get("price_validity", "VALID_PRICE")).upper(),
+                "status": str(oa.get("status", "ACTIVE_PENDING")).upper(),
+                "sl": round(sl_v, 2),
+                "tp": round(tp_v, 2),
+            }
+
+        last_sw = d.get("last_sweep")
+        sweep_key = (last_sw.get("key") if isinstance(last_sw, dict) else (str(last_sw) if last_sw else None))
+        last_st = d.get("last_structure")
+        struct_key = (last_st.get("key") if isinstance(last_st, dict) else (str(last_st) if last_st else d.get("m5_status")))
+        disp_st = str(d.get("displacement_status") or "NOT CHECKED").upper()
+        entry_st = str(d.get("confirmed_status") or "WAIT").upper()
+        sig_st = str(d.get("signal") or "WAIT").upper()
+        rr_st = str(d.get("rr_status") or "NOT CHECKED").upper()
+        risk_flags = tuple(sorted(str(x) for x in (d.get("risk_flags") or ()) if x))
+
+        return {
+            "zones": zones,
+            "sweep_key": sweep_key,
+            "struct_key": struct_key,
+            "disp_st": disp_st,
+            "entry_st": entry_st,
+            "sig_st": sig_st,
+            "rr_st": rr_st,
+            "positions": positions,
+            "pending": pending,
+            "pending_active_count": int(d.get("pending_active_count", len(pending)) or 0),
+            "pos_no_sl_tickets": sorted(str(t) for t in pos_no_sl_tickets),
+            "pos_no_tp_tickets": sorted(str(t) for t in pos_no_tp_tickets),
+            "ord_no_sl_count": ord_no_sl_count,
+            "ord_no_tp_count": ord_no_tp_count,
+            "risk_flags": risk_flags,
+        }
+
+    def evaluate(self, snapshot_data: dict, now_ts: float = None):
+        """
+        Membandingkan snapshot terbaru dengan state sebelumnya.
+        Mengembalikan dict:
+          - changed: bool (ada perubahan penting dari 15 kategori monitor)
+          - should_print: bool (True jika ada perubahan penting ATAU ada critical warning baru/reminder)
+          - change_types: list[str]
+          - alerts: list[str]
+          - critical_warnings: list[str] (selalu berisi peringatan SL/risiko kritis aktif tanpa pernah disembunyikan)
+        """
+        if now_ts is None:
+            now_ts = time.time()
+        cur = self._build_state_signature(snapshot_data)
+        d = snapshot_data or {}
+
+        # Peringatan risiko kritis selalu dievaluasi dan TIDAK PERNAH disembunyikan
+        critical_warnings = []
+        if cur["pos_no_sl_tickets"]:
+            critical_warnings.append(
+                f"CRITICAL RISK [SL NOT SET]: {len(cur['pos_no_sl_tickets'])} posisi running belum memiliki Stop Loss (Ticket: {', '.join(cur['pos_no_sl_tickets'])})."
+            )
+        if cur["ord_no_sl_count"] > 0:
+            critical_warnings.append(
+                f"CRITICAL RISK [SL NOT SET]: {cur['ord_no_sl_count']} pending order belum memiliki Stop Loss."
+            )
+        if cur["pos_no_tp_tickets"] or cur["ord_no_tp_count"] > 0:
+            critical_warnings.append(
+                f"RISK WARNING [TP NOT SET]: Posisi tanpa TP={len(cur['pos_no_tp_tickets'])} | Pending tanpa TP={cur['ord_no_tp_count']}."
+            )
+        for rf in cur["risk_flags"]:
+            if any(k in rf for k in ("NEAR_SL", "MINUS_NO_SL", "OVER_LEVERAGE", "PORTFOLIO_HIGH_RISK", "INVALIDATED", "OPPOSITE_M5")):
+                critical_warnings.append(f"RISK ALERT: {rf}")
+
+        extra_events = list(d.get("extra_events") or ())
+
+        if not self.initialized:
+            self.prev_state = cur
+            self.initialized = True
+            has_crit = bool(critical_warnings)
+            if has_crit:
+                self._last_critical_emit_ts = now_ts
+            return {
+                "changed": has_crit or bool(extra_events),
+                "should_print": has_crit or bool(extra_events),
+                "change_types": (["SL_NOT_SET"] if (cur["pos_no_sl_tickets"] or cur["ord_no_sl_count"] > 0) else []) + (["EXTRA_EVENT"] if extra_events else []),
+                "alerts": list(extra_events),
+                "critical_warnings": critical_warnings,
+            }
+
+        prev = self.prev_state
+        alerts = []
+        change_types = []
+
+        # 1-4. Perubahan status zona (TOUCHED, INSIDE, INVALIDATED, MITIGATED)
+        for zid, new_zst in cur["zones"].items():
+            old_zst = prev["zones"].get(zid)
+            if old_zst is not None and new_zst != old_zst:
+                if "TOUCH" in new_zst:
+                    change_types.append("ZONE_TOUCH")
+                    alerts.append(f"Zona {zid} tersentuh harga ({old_zst} -> {new_zst}).")
+                elif "INSIDE" in new_zst or "MASUK" in new_zst:
+                    change_types.append("ZONE_ENTER")
+                    alerts.append(f"Harga memasuki zona {zid} ({old_zst} -> {new_zst}).")
+                elif "INVALID" in new_zst:
+                    change_types.append("ZONE_INVALIDATED")
+                    alerts.append(f"Zona {zid} mengalami INVALIDATION ({old_zst} -> {new_zst}).")
+                elif "MITIGAT" in new_zst:
+                    change_types.append("ZONE_MITIGATED")
+                    alerts.append(f"Zona {zid} berubah menjadi MITIGATED ({old_zst} -> {new_zst}).")
+                else:
+                    change_types.append("ZONE_STATUS_CHANGE")
+                    alerts.append(f"Status zona {zid} berubah ({old_zst} -> {new_zst}).")
+
+        # 5. Liquidity sweep baru
+        if cur["sweep_key"] and cur["sweep_key"] != prev.get("sweep_key"):
+            change_types.append("LIQUIDITY_SWEEP")
+            alerts.append(f"Terdeteksi Liquidity Sweep M5: {cur['sweep_key']}.")
+
+        # 6. CHoCH / BOS baru
+        if cur["struct_key"] and cur["struct_key"] != prev.get("struct_key") and cur["struct_key"] != "WAIT":
+            change_types.append("CHOCH_BOS")
+            alerts.append(f"Struktur M5 baru terbentuk: {cur['struct_key']}.")
+
+        # 7. Displacement
+        if cur["disp_st"] != prev.get("disp_st") and cur["disp_st"] not in ("NOT CHECKED", "NOT_CHECKED", "WAIT"):
+            change_types.append("DISPLACEMENT")
+            alerts.append(f"Status Displacement berubah: {prev.get('disp_st')} -> {cur['disp_st']}.")
+
+        # 8. Entry berubah dari WAIT menjadi CONFIRMED (atau berubah status)
+        if cur["entry_st"] != prev.get("entry_st"):
+            change_types.append("ENTRY_STATUS_CHANGE")
+            alerts.append(f"Status Entry Validation berubah: {prev.get('entry_st')} -> {cur['entry_st']}.")
+
+        # 9. Sinyal BUY atau SELL valid muncul / berubah
+        if cur["sig_st"] != prev.get("sig_st") and cur["sig_st"] in ("BUY", "SELL", "BUY VALID", "SELL VALID"):
+            change_types.append("SIGNAL_VALID")
+            alerts.append(f"Sinyal VALID aktif muncul: {cur['sig_st']}.")
+
+        # 10. RR memenuhi atau gagal memenuhi standar
+        if cur["rr_st"] != prev.get("rr_st"):
+            change_types.append("RR_VALIDATION_CHANGE")
+            alerts.append(f"RR Validation berubah: {prev.get('rr_st')} -> {cur['rr_st']}.")
+
+        # 11. Posisi running mengalami perubahan status
+        if cur["positions"] != prev.get("positions"):
+            change_types.append("POSITION_STATUS_CHANGE")
+            opened = set(cur["positions"].keys()) - set(prev.get("positions", {}).keys())
+            closed = set(prev.get("positions", {}).keys()) - set(cur["positions"].keys())
+            if opened:
+                alerts.append(f"Posisi running baru dibuka: {', '.join('#' + str(x) for x in opened)}.")
+            if closed:
+                alerts.append(f"Posisi running ditutup: {', '.join('#' + str(x) for x in closed)}.")
+            for tkt in set(cur["positions"].keys()) & set(prev.get("positions", {}).keys()):
+                if cur["positions"][tkt] != prev["positions"][tkt]:
+                    alerts.append(
+                        f"Status posisi #{tkt} berubah: {prev['positions'][tkt]} -> {cur['positions'][tkt]}."
+                    )
+
+        # 12. Pending order mengalami perubahan validitas atau jumlah
+        if cur["pending"] != prev.get("pending") or cur["pending_active_count"] != prev.get("pending_active_count"):
+            change_types.append("PENDING_VALIDITY_CHANGE")
+            alerts.append(
+                f"Pending Order / validitas berubah (Aktif: {prev.get('pending_active_count')} -> {cur['pending_active_count']})."
+            )
+
+        # 13 & 14. SL atau TP belum terpasang (deteksi penambahan atau perubahan kondisi tanpa SL/TP)
+        if cur["pos_no_sl_tickets"] != prev.get("pos_no_sl_tickets") and cur["pos_no_sl_tickets"]:
+            change_types.append("SL_NOT_SET")
+            alerts.append(f"Posisi running tanpa SL terdeteksi: {', '.join(cur['pos_no_sl_tickets'])}.")
+        if cur["ord_no_sl_count"] != prev.get("ord_no_sl_count") and cur["ord_no_sl_count"] > 0:
+            change_types.append("SL_NOT_SET")
+            alerts.append(f"Pending order tanpa SL: {cur['ord_no_sl_count']}.")
+        if (cur["pos_no_tp_tickets"] != prev.get("pos_no_tp_tickets") and cur["pos_no_tp_tickets"]) or (
+            cur["ord_no_tp_count"] != prev.get("ord_no_tp_count") and cur["ord_no_tp_count"] > 0
+        ):
+            change_types.append("TP_NOT_SET")
+            alerts.append("Terdeteksi posisi/pending order tanpa Take Profit.")
+
+        # 15. Perubahan risiko posisi
+        if cur["risk_flags"] != prev.get("risk_flags"):
+            change_types.append("RISK_CHANGE")
+            added_flags = set(cur["risk_flags"]) - set(prev.get("risk_flags", ()))
+            if added_flags:
+                alerts.append(f"Perubahan risiko posisi terdeteksi: {', '.join(sorted(added_flags))}.")
+            else:
+                alerts.append("Status risiko posisi mengalami pembaruan.")
+
+        for ev_txt in extra_events:
+            if ev_txt:
+                change_types.append("MONITOR_EVENT")
+                alerts.append(str(ev_txt))
+
+        # Jangan menunda alert risiko kritis: jika ada critical_warnings & melewati interval reminder, emit ulang
+        crit_reminder_due = bool(
+            critical_warnings
+            and self.critical_reminder_seconds > 0
+            and (now_ts - self._last_critical_emit_ts) >= self.critical_reminder_seconds
+        )
+        should_print = bool(alerts) or crit_reminder_due
+        if critical_warnings and should_print:
+            self._last_critical_emit_ts = now_ts
+
+        self.prev_state = cur
+        return {
+            "changed": bool(alerts),
+            "should_print": should_print,
+            "change_types": list(dict.fromkeys(change_types)),
+            "alerts": alerts,
+            "critical_warnings": critical_warnings,
+        }
+
+    @staticmethod
+    def format_alert_block(eval_res: dict, monitor_data: dict = None) -> str:
+        """Memformat blok alert ringkas ketika terjadi perubahan penting atau peringatan risiko kritis."""
+        lines = []
+        alerts = eval_res.get("alerts") or []
+        crits = eval_res.get("critical_warnings") or []
+        if alerts or crits:
+            lines.append("-" * 56)
+            lines.append("[SMART RADAR ALERT]")
+            for a in alerts:
+                lines.append(f"  * {a}")
+            for c in crits:
+                lines.append(f"  ! {c}")
+            lines.append("-" * 56)
+        if monitor_data is not None:
+            lines.append(format_monitor_summary(monitor_data))
+        return "\n".join(lines)
+
 
 
 def diagnosa_forensik_penyebab_sl(df_m5):
@@ -114,7 +1682,7 @@ def bedah_forensik_jebol(df_m5, ket_zona, harga_jebol):
     )
 
 
-def _aktifkan_zona_valid_berikutnya(otomatis, sudah_notif_masuk, arah_cari, batas_lewat, harga_skrg, atr_m5, alasan_jebol, df_m5=None, hanya_preview=False):
+def _aktifkan_zona_valid_berikutnya(otomatis, sudah_notif_masuk, arah_cari, batas_lewat, harga_skrg, atr_m5, alasan_jebol, df_m5=None, hanya_preview=False, verbose=True):
     """Mendiagnosa penyebab SL/jebol, lalu mencari dan mengaktifkan Zona Selanjutnya sesuai logika:
     - Kena institusi -> Zona Paling Valid & Kuat
     - Kena normal -> Zona Terdekat persis setelah SL."""
@@ -128,57 +1696,58 @@ def _aktifkan_zona_valid_berikutnya(otomatis, sudah_notif_masuk, arah_cari, bata
         return None
 
     lbl_jenis = "DEMAND / BUY" if arah_cari == "BUY" else "SUPPLY / SELL"
-    print("\n   " + "━" * 70)
-    if diag:
-        icon_sebab = "🚨" if diag["is_institusi"] else "✅"
-        print(f"   [{icon_sebab} INVESTIGASI FORENSIK PENYEBAB KENAL SL / JEBOL]")
-        print(f"   • Pemicu Teknis      : {diag['alasan_singkat']}")
-        print(f"   • Fakta Data M5      : {', '.join(diag['faktor'])}")
-        print(f"   • Strategi Pemilihan : {diag['tipe_zona']}")
-        print(f"   • Pertimbangan AI    : {diag['saran_tindakan']}")
-        print("   " + "─" * 70)
+    if verbose:
+        print("\n   " + "━" * 70)
+        if diag:
+            icon_sebab = "🚨" if diag["is_institusi"] else "✅"
+            print(f"   [{icon_sebab} INVESTIGASI FORENSIK PENYEBAB KENAL SL / JEBOL]")
+            print(f"   • Pemicu Teknis      : {diag['alasan_singkat']}")
+            print(f"   • Fakta Data M5      : {', '.join(diag['faktor'])}")
+            print(f"   • Strategi Pemilihan : {diag['tipe_zona']}")
+            print(f"   • Pertimbangan AI    : {diag['saran_tindakan']}")
+            print("   " + "─" * 70)
 
-    if hanya_preview:
-        print(f"   [🔭 RADAR CADANGAN: ZONA {lbl_jenis} BERIKUTNYA (JIKA ZONA SAAT INI JEBOL TOTAL)]")
-        print("   • STATUS SISTEM      : Zona/Sinyal saat ini MASIH BERJALAN. Ini HANYA peta cadangan darurat jika lantai jebol!")
-        label_setup = "Rencana Setup Cadangan"
-    else:
-        print(f"   [⏳ ZONA {lbl_jenis} BERIKUTNYA DISIAGAKAN — WATCHLIST (Menunggu Harga Menjemput)]")
-        label_setup = "Setup Sinyal Baru"
-    print(f"   • Pemicu             : {alasan_jebol}")
-    print(f"   • Zona Rekomendasi   : {utama['lo']:.2f} - {utama['hi']:.2f} (Jarak ~{utama['jarak']:.2f} pt dari harga {harga_skrg:.2f})")
-    print(f"   • Kategori Zona      : {utama.get('tipe_strategi', 'Valid')}")
-    print(f"   • Dasar Konfluensi   : {utama['sumber']}")
-    print(f"   • {label_setup:<19} : {utama['arah']} @ {utama['lo']:.2f}-{utama['hi']:.2f} | SL/Invalidasi: {utama['sl']:.2f} | TP1: {utama['tp1']:.2f} | TP2: {utama['tp2']:.2f}")
-    mm_u = hitung_mm_sinyal(utama['lo'], utama['hi'], utama['sl'], utama['tp1'], utama['tp2'])
-    if mm_u:
-        print(f"   • Rasio Risk/Reward  : TP1 1:{mm_u['rrr_tp1']:.1f} | TP2 1:{mm_u['rrr_tp2']:.1f} (Jarak SL: {mm_u['jarak_sl']:.2f} pt)")
-        print(f"   • Rekomendasi Lot MM : {mm_u['lot_05']:.2f} lot (0.5% modal / -${mm_u['risk_05_usd']:.2f}) s/d {mm_u['lot_10']:.2f} lot (1.0% modal / -${mm_u['risk_10_usd']:.2f})")
-        print(f"   • Batas Toleransi MM : Maksimal lot {mm_u['lot_max']:.2f} lot (Maks 2.0% modal). DILARANG over-lot!")
-    if hanya_preview:
-        print(f"   • Catatan Eksekusi   : JANGAN terburu-buru entri di {utama['lo']:.2f}-{utama['hi']:.2f}! Zona atas masih aktif.")
-    else:
-        print(f"   • Protokol Eksekusi  : Tunggu harga menjemput {utama['lo']:.2f}-{utama['hi']:.2f} + muncul Rejection / Sweep / CISD M5!")
-    if cadangan:
-        mm_c = hitung_mm_sinyal(cadangan['lo'], cadangan['hi'], cadangan['sl'], cadangan['tp1'], cadangan['tp2'])
-        print("   " + "─" * 70)
-        print(f"   [🛡️ ZONA CADANGAN BERIKUTNYA — JIKA ZONA DI ATAS TERKENA SL LAGI]")
-        print(f"   • Area Pertahanan Ke-2 : {cadangan['arah']} @ {cadangan['lo']:.2f} - {cadangan['hi']:.2f} (Jarak ~{cadangan['jarak']:.2f} pt dari harga sekarang)")
-        print(f"   • Batas SL & Target TP : SL {cadangan['sl']:.2f} | TP1 {cadangan['tp1']:.2f} | TP2 {cadangan['tp2']:.2f}")
-        if mm_c:
-            print(f"   • Rasio R:R & Lot MM   : R:R TP1 1:{mm_c['rrr_tp1']:.1f} | TP2 1:{mm_c['rrr_tp2']:.1f} | Lot Disiplin: {mm_c['lot_05']:.2f} lot (0.5% / -${mm_c['risk_05_usd']:.2f}) s/d {mm_c['lot_10']:.2f} lot (1% / -${mm_c['risk_10_usd']:.2f})")
-        print(f"   • Dasar Konfluensi     : {cadangan['sumber']}")
+        if hanya_preview:
+            print(f"   [🔭 RADAR CADANGAN: ZONA {lbl_jenis} BERIKUTNYA (JIKA ZONA SAAT INI JEBOL TOTAL)]")
+            print("   • STATUS SISTEM      : Zona/Sinyal saat ini MASIH BERJALAN. Ini HANYA peta cadangan darurat jika lantai jebol!")
+            label_setup = "Rencana Setup Cadangan"
+        else:
+            print(f"   [⏳ ZONA {lbl_jenis} BERIKUTNYA DISIAGAKAN — WATCHLIST (Menunggu Harga Menjemput)]")
+            label_setup = "Setup Sinyal Baru"
+        print(f"   • Pemicu             : {alasan_jebol}")
+        print(f"   • Zona Rekomendasi   : {utama['lo']:.2f} - {utama['hi']:.2f} (Jarak ~{utama['jarak']:.2f} pt dari harga {harga_skrg:.2f})")
+        print(f"   • Kategori Zona      : {utama.get('tipe_strategi', 'Valid')}")
+        print(f"   • Dasar Konfluensi   : {utama['sumber']}")
+        print(f"   • {label_setup:<19} : {utama['arah']} @ {utama['lo']:.2f}-{utama['hi']:.2f} | SL/Invalidasi: {utama['sl']:.2f} | TP1: {utama['tp1']:.2f} | TP2: {utama['tp2']:.2f}")
+        mm_u = hitung_mm_sinyal(utama['lo'], utama['hi'], utama['sl'], utama['tp1'], utama['tp2'])
+        if mm_u:
+            print(f"   • Rasio Risk/Reward  : TP1 1:{mm_u['rrr_tp1']:.1f} | TP2 1:{mm_u['rrr_tp2']:.1f} (Jarak SL: {mm_u['jarak_sl']:.2f} pt)")
+            print(f"   • Rekomendasi Lot MM : {mm_u['lot_05']:.2f} lot (0.5% modal / -${mm_u['risk_05_usd']:.2f}) s/d {mm_u['lot_10']:.2f} lot (1.0% modal / -${mm_u['risk_10_usd']:.2f})")
+            print(f"   • Batas Toleransi MM : Maksimal lot {mm_u['lot_max']:.2f} lot (Maks 2.0% modal). DILARANG over-lot!")
+        if hanya_preview:
+            print(f"   • Catatan Eksekusi   : JANGAN terburu-buru entri di {utama['lo']:.2f}-{utama['hi']:.2f}! Zona atas masih aktif.")
+        else:
+            print(f"   • Protokol Eksekusi  : Tunggu harga menjemput {utama['lo']:.2f}-{utama['hi']:.2f} + muncul Rejection / Sweep / CISD M5!")
+        if cadangan:
+            mm_c = hitung_mm_sinyal(cadangan['lo'], cadangan['hi'], cadangan['sl'], cadangan['tp1'], cadangan['tp2'])
+            print("   " + "─" * 70)
+            print(f"   [🛡️ ZONA CADANGAN BERIKUTNYA — JIKA ZONA DI ATAS TERKENA SL LAGI]")
+            print(f"   • Area Pertahanan Ke-2 : {cadangan['arah']} @ {cadangan['lo']:.2f} - {cadangan['hi']:.2f} (Jarak ~{cadangan['jarak']:.2f} pt dari harga sekarang)")
+            print(f"   • Batas SL & Target TP : SL {cadangan['sl']:.2f} | TP1 {cadangan['tp1']:.2f} | TP2 {cadangan['tp2']:.2f}")
+            if mm_c:
+                print(f"   • Rasio R:R & Lot MM   : R:R TP1 1:{mm_c['rrr_tp1']:.1f} | TP2 1:{mm_c['rrr_tp2']:.1f} | Lot Disiplin: {mm_c['lot_05']:.2f} lot (0.5% / -${mm_c['risk_05_usd']:.2f}) s/d {mm_c['lot_10']:.2f} lot (1% / -${mm_c['risk_10_usd']:.2f})")
+            print(f"   • Dasar Konfluensi     : {cadangan['sumber']}")
 
-        sebab_sl_lagi = "penurunan institusional lanjutan" if arah_cari == "BUY" else "lonjakan dorongan bullish lanjutan"
-        target_likuiditas = "kolam likuiditas diskon HTF yang lebih dalam" if arah_cari == "BUY" else "kolam likuiditas premium HTF yang lebih tinggi"
-        print(f"   • ALASAN PEMILIHAN ZONA CADANGAN :")
-        print(f"     1) Analisa Skenario   : Jika Zona Rekomendasi Utama ({utama['lo']:.2f}-{utama['hi']:.2f}) gagal dan terkena SL lagi,")
-        print(f"        maka pasar mengonfirmasi adanya {sebab_sl_lagi} yang berupaya menjemput {target_likuiditas}.")
-        print(f"     2) Kekuatan Benteng   : Zona {cadangan['lo']:.2f}-{cadangan['hi']:.2f} diperkuat oleh {cadangan['sumber']},")
-        print(f"        menjadikannya benteng 'Golden Fortress' terakhir dengan probabilitas pantulan tinggi untuk menahan harga.")
-        print(f"     3) Protokol Eksekusi  : JANGAN langsung pasang Limit pasif di sini sekarang! Jika zona utama jebol,")
-        print(f"        tunggu harga menyentuh zona cadangan ini dan memunculkan Rejection / Sweep / CISD M5 baru eksekusi.")
-    print("   " + "━" * 70)
+            sebab_sl_lagi = "penurunan institusional lanjutan" if arah_cari == "BUY" else "lonjakan dorongan bullish lanjutan"
+            target_likuiditas = "kolam likuiditas diskon HTF yang lebih dalam" if arah_cari == "BUY" else "kolam likuiditas premium HTF yang lebih tinggi"
+            print(f"   • ALASAN PEMILIHAN ZONA CADANGAN :")
+            print(f"     1) Analisa Skenario   : Jika Zona Rekomendasi Utama ({utama['lo']:.2f}-{utama['hi']:.2f}) gagal dan terkena SL lagi,")
+            print(f"        maka pasar mengonfirmasi adanya {sebab_sl_lagi} yang berupaya menjemput {target_likuiditas}.")
+            print(f"     2) Kekuatan Benteng   : Zona {cadangan['lo']:.2f}-{cadangan['hi']:.2f} diperkuat oleh {cadangan['sumber']},")
+            print(f"        menjadikannya benteng 'Golden Fortress' terakhir dengan probabilitas pantulan tinggi untuk menahan harga.")
+            print(f"     3) Protokol Eksekusi  : JANGAN langsung pasang Limit pasif di sini sekarang! Jika zona utama jebol,")
+            print(f"        tunggu harga menyentuh zona cadangan ini dan memunculkan Rejection / Sweep / CISD M5 baru eksekusi.")
+        print("   " + "━" * 70)
 
     if not hanya_preview:
         if arah_cari == "BUY":
@@ -197,11 +1766,12 @@ def _aktifkan_zona_valid_berikutnya(otomatis, sudah_notif_masuk, arah_cari, bata
             sudah_notif_masuk,
             None,  # Set WAIT — sinyal aktif hanya ketika harga masuk zona
             f"Zona {lbl_jenis} ({utama['lo']:.2f}-{utama['hi']:.2f}) DISIAGAKAN — Menunggu harga menjemput untuk entry konfirmasi",
+            verbose=verbose,
         )
     return utama
 
 
-def _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_baru, alasan):
+def _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_baru, alasan, verbose=True):
     """Memperbarui Sinyal Aktif secara otomatis di dalam Mode Pantau ketika terjadi peringatan penting."""
     global SINYAL_AKTIF_DINAMIS
     sinyal_lama = otomatis.get("sinyal")
@@ -219,7 +1789,8 @@ def _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_baru, alasan
             # Semua sinyal baru otomatis di Mode Pantau WAJIB lolos gerbang validasi (Trend HTF, Spread, Blackout, Buffer SL)
             ok_g, alasan_g = gerbang_sinyal_baru(sinyal_baru)
             if not ok_g:
-                print(f"\n   [🛑 FILTER AKURASI PANTAU: Sinyal otomatis {sinyal_baru.get('arah')} ({sinyal_baru.get('ket', '')}) DITAHAN — {'; '.join(alasan_g)}]")
+                if verbose:
+                    print(f"\n   [🛑 FILTER AKURASI PANTAU: Sinyal otomatis {sinyal_baru.get('arah')} ({sinyal_baru.get('ket', '')}) DITAHAN — {'; '.join(alasan_g)}]")
                 return False
 
     otomatis["sinyal"] = sinyal_baru
@@ -240,6 +1811,9 @@ def _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_baru, alasan
         # Jika ini sudah merupakan sinyal Re-Entry 2nd Chance, kunci agar TIDAK BISA memicu Re-Entry ke-3/ke-4!
         if is_reentry_sig:
             sudah_notif_masuk.add("sig_sh_reentry")
+
+    if not verbose:
+        return True
 
     print("\n   " + "=" * 66)
     print("   [🔄 SINYAL AKTIF BERUBAH OTOMATIS DI MODE PANTAU!]")
@@ -276,39 +1850,44 @@ def _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_baru, alasan
     else:
         print("   • Sinyal Baru      : WAIT / DIBATALKAN (Menunggu setup/konfirmasi baru yang aman)")
     print("   " + "=" * 66)
+    return True
 
 
-def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
+def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
     """Memantau otomatis rekomendasi AI, angka manual, DAN mengawal posisi trading yang sedang running:
     1) Harga masuk zona entry + cek reaksi M5 (pantul / CHoCH / Sweep)
     2) Deteksi jika zona DITEMBUS (Breakout / SL jebol) -> beri peringatan & tawarkan analisa ulang otomatis!
     3) Deteksi jika menyentuh TP1 / TP2
     4) Pengawal Posisi Running Otomatis (Auto-Guard): Peringatan BEP, Partial TP, Bahaya Struktur Berlawanan, & Risiko SL.
     5) Sinyal Aktif Dinamis: Sinyal Aktif otomatis berubah mengikuti peringatan Stop-Hunt, Impuls, Konfirmasi Zona, atau Breakout."""
+    import builtins as _builtins
     global SINYAL_AKTIF_DINAMIS, ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, CATATAN_JEBOL_PANTAU
-    kata = arg.split()[1:] if len(arg.split()) > 1 else []
+
+    tokens = arg.split()
+    if detail is None:
+        detail = any(tok.lower() == "detail" for tok in tokens)
+    if tokens and tokens[0].lower() in ("pantau", "watch"):
+        kata_raw = tokens[1:]
+    else:
+        kata_raw = tokens
+    kata = [tok for tok in kata_raw if tok.lower() != "detail"]
     angka = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", " ".join(kata))]
-    otomatis = ekstrak_target_ai(teks_ai_terakhir)
+    # Single Source of Truth: Mode Pantau menggunakan Python Scanner, BUKAN rekomendasi teks AI.
+    otomatis = {"sinyal": None, "atas": None, "bawah": None}
     if SINYAL_AKTIF_DINAMIS is not None:
         otomatis["sinyal"] = SINYAL_AKTIF_DINAMIS
-    elif otomatis["sinyal"] is not None:
-        SINYAL_AKTIF_DINAMIS = otomatis["sinyal"]
-    if ZONA_ATAS_DINAMIS is not None:
-        otomatis["atas"] = ZONA_ATAS_DINAMIS
-    elif otomatis["atas"] is not None:
-        ZONA_ATAS_DINAMIS = otomatis["atas"]
-    if ZONA_BAWAH_DINAMIS is not None:
-        otomatis["bawah"] = ZONA_BAWAH_DINAMIS
-    elif otomatis["bawah"] is not None:
-        ZONA_BAWAH_DINAMIS = otomatis["bawah"]
 
     lo_manual = min(angka[:2]) if len(angka) >= 2 else (angka[0] - 1.5 if len(angka) == 1 else None)
     hi_manual = max(angka[:2]) if len(angka) >= 2 else (angka[0] + 1.5 if len(angka) == 1 else None)
     sl_manual = angka[2] if len(angka) >= 3 else None
 
     if not pastikan_mt5_aktif():
-        print("Gagal konek MT5 untuk mode pantau.")
+        _builtins.print("Gagal konek MT5 untuk mode pantau.")
         return None
+
+    def print(*args, **kwargs):
+        if detail:
+            _builtins.print(*args, **kwargs)
 
     print("\n" + "=" * 70)
     print("MODE PANTAU PINTAR & PENGAWAL POSISI RUNNING (SMART RADAR ALERT) AKTIF")
@@ -316,7 +1895,79 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
     pos_awal = mt5.positions_get(symbol=SYMBOL) or ()
     orders_awal = mt5.orders_get(symbol=SYMBOL) or ()
     tick_awal = mt5.symbol_info_tick(SYMBOL)
+    acc_awal = mt5.account_info()
+    sym_awal = mt5.symbol_info(SYMBOL)
     harga_awal_pantau = tick_awal.bid if tick_awal else 0.0
+
+    pantau_engine = PantauCycleEngine(symbol=SYMBOL)
+    pantau_cycle_init = None
+    if lo_manual is None and tick_awal is not None:
+        pantau_cycle_init = pantau_engine.step(tick_awal, force_rescan=True, mt5_connected=True)
+        wl_init = pantau_cycle_init.get("watchlist", [])
+        # Sinkronkan zona Supply/Demand terdekat dari Radar Qualified sebagai referensi watchlist legacy
+        sup_wl = [z for z in wl_init if z["zone_type"] == "SUPPLY"]
+        dem_wl = [z for z in wl_init if z["zone_type"] == "DEMAND"]
+        if sup_wl and ZONA_ATAS_DINAMIS is None:
+            z0 = sup_wl[0]
+            otomatis["atas"] = (z0["price_low"], z0["price_high"], z0["invalidation"] or (z0["price_high"] + 2.0))
+            ZONA_ATAS_DINAMIS = otomatis["atas"]
+        elif ZONA_ATAS_DINAMIS is not None:
+            otomatis["atas"] = ZONA_ATAS_DINAMIS
+        if dem_wl and ZONA_BAWAH_DINAMIS is None:
+            z0 = dem_wl[0]
+            otomatis["bawah"] = (z0["price_low"], z0["price_high"], z0["invalidation"] or (z0["price_low"] - 2.0))
+            ZONA_BAWAH_DINAMIS = otomatis["bawah"]
+        elif ZONA_BAWAH_DINAMIS is not None:
+            otomatis["bawah"] = ZONA_BAWAH_DINAMIS
+
+    smart_tracker = SmartAlertTracker()
+    if not detail:
+        try:
+            df_m5_init = ambil_data(mt5.TIMEFRAME_M5, 120, percobaan=1)
+            evs_init = []
+            if df_m5_init is not None and len(df_m5_init) > 10:
+                df_m5_ind_init = tambah_indikator(df_m5_init.copy())
+                evs_init, _, _ = struktur(df_m5_ind_init)
+        except Exception:
+            df_m5_init, evs_init = None, []
+        try:
+            bias_init = bias_htf_cached()
+        except Exception:
+            bias_init = None
+        snap_init = _build_monitor_snapshot(
+            tick=tick_awal,
+            bias_info=bias_init,
+            scan_result=(pantau_cycle_init or {}).get("scan_result"),
+            decision=(pantau_cycle_init or {}).get("decision"),
+            watchlist=(pantau_cycle_init or {}).get("watchlist"),
+            reconciliation=(pantau_cycle_init or {}).get("reconciliation"),
+            evs=evs_init,
+            df_m5=df_m5_init,
+            positions=pos_awal,
+            orders=orders_awal,
+            acc_info=acc_awal,
+            sym_info=sym_awal,
+            otomatis=otomatis,
+            monitor_status="MONITORING",
+        )
+        if lo_manual is not None and snap_init.get("primary_zone") is None:
+            snap_init["primary_zone"] = {
+                "zone_id": "MANUAL_ZONE",
+                "timeframe": "MANUAL",
+                "zone_type": "ZONE",
+                "price_low": lo_manual,
+                "price_high": hi_manual,
+                "distance": round(0.0 if lo_manual <= harga_awal_pantau <= hi_manual else min(abs(harga_awal_pantau - lo_manual), abs(harga_awal_pantau - hi_manual)), 2),
+                "status": "INSIDE_ZONE" if lo_manual <= harga_awal_pantau <= hi_manual else "MONITORING",
+            }
+        init_res = smart_tracker.evaluate(snap_init)
+        _builtins.print("\n" + format_monitor_summary(snap_init))
+        if init_res.get("critical_warnings"):
+            _builtins.print("-" * 56)
+            for cw in init_res["critical_warnings"]:
+                _builtins.print(f"! {cw}")
+            _builtins.print("-" * 56)
+        _builtins.print("Tekan Ctrl+C kapan saja untuk kembali ke mode Tanya Jawab.")
 
     # Tampilkan riwayat sinyal sebelumnya (HANYA jika masih valid) di awal mode pantau
     state_pantau = muat_state_sinyal()
@@ -337,7 +1988,35 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
         print(f"- Target Zona Manual : {lo_manual:.2f} - {hi_manual:.2f}")
         print(f"- Batas Jebol (Break): Di atas {batas_atas:.2f} atau di bawah {batas_bawah:.2f} (close M5)")
     else:
-        print("- Membaca otomatis level rekomendasi dari AI terakhir:")
+        wl_show = pantau_cycle_init.get("watchlist", []) if pantau_cycle_init else []
+        rec_init = pantau_cycle_init.get("reconciliation", {}) if pantau_cycle_init else {}
+        print(f"- Sumber Zona Aktif: Python Scanner Radar Qualified ({len(wl_show)} zona aktif terpantau, Single Snapshot)")
+        if rec_init:
+            print(
+                f"  * Rekonsiliasi: Scanner={rec_init.get('scanner_radar_qualified_count', 0)} | "
+                f"Monitor Received={rec_init.get('monitor_received_count', 0)} | "
+                f"Monitor Active={rec_init.get('monitor_active_count', 0)} | "
+                f"Excluded={rec_init.get('excluded_count', 0)} | Snapshot={rec_init.get('snapshot_id', '-')}"
+            )
+            for ex in rec_init.get("excluded_details", ()):
+                print(
+                    f"    - Excluded [{ex['zone_id']}] {ex['timeframe']} {ex['zone_type']} | "
+                    f"{ex['initial_status']} -> {ex['final_status']} | Alasan: {ex['reason']} | Snapshot: {ex['snapshot_id']}"
+                )
+            if rec_init.get("transfer_status") == "ZONE_TRANSFER_MISMATCH":
+                print(
+                    f"  * [ERROR: ZONE_TRANSFER_MISMATCH] Scanner memiliki {rec_init.get('scanner_radar_qualified_count', 0)} zona Radar Qualified, "
+                    f"tetapi monitor menerima {rec_init.get('monitor_active_count', 0)} zona! Alasan eksklusi: {rec_init.get('exclusion_reasons')}"
+                )
+        if pantau_cycle_init and pantau_cycle_init.get("snapshot_mismatch"):
+            print(f"  * [ERROR: {pantau_cycle_init.get('snapshot_mismatch_reason')}]")
+        if pantau_cycle_init:
+            print(f"  * Status Pending Limit: {pantau_cycle_init.get('pending_status', 'WAIT')} | Confirmed Entry: {pantau_cycle_init.get('confirmed_status', 'WAIT')}")
+        for wz in wl_show:
+            print(
+                f"  * [{wz['zone_id']}] {wz['timeframe']} {wz['zone_type']} {wz['price_low']:.2f}-{wz['price_high']:.2f} "
+                f"| Inv: {wz['invalidation']:.2f} | Tier: {wz['risk_tier']} | Grade {wz['grade']} ({wz['score']:.1f}) | Status: {wz['status']}"
+            )
         if otomatis["sinyal"]:
             s = otomatis["sinyal"]
             lbl_eksekusi, kode_eks, info_det = cek_status_eksekusi_sinyal(s, pos_awal, orders_awal)
@@ -346,30 +2025,32 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                 print(f"    -> [INFO STATUS AKUN]: Sinyal {s['arah']} ini BELUM Anda ambil di MT5 (belum ada posisi terbuka).")
             else:
                 print(f"    -> [INFO STATUS AKUN]: Terkoneksi dengan posisi akun: {info_det}")
-        if otomatis["atas"]:
-            z = otomatis["atas"]
-            print(f"  * Zona Supply Atas : {z[0]:.2f} - {z[1]:.2f} (Jebol/Breakout jika close M5 > {z[2]:.2f})")
-        if otomatis["bawah"]:
-            z = otomatis["bawah"]
-            print(f"  * Zona Demand Bawah: {z[0]:.2f} - {z[1]:.2f} (Jebol/Breakout jika close M5 < {z[2]:.2f})")
-        if not any(otomatis.values()):
-            print("  * Memantau pembentukan CHoCH / Liquidity Sweep baru di M5.")
+        if not wl_show and not otomatis["sinyal"]:
+            if pantau_cycle_init and pantau_cycle_init.get("data_status") == "DATA_INCOMPLETE":
+                print("  * [DATA_INCOMPLETE]: Snapshot/data MT5 belum lengkap; status terkunci ke WAIT.")
+            elif rec_init.get("transfer_status") != "ZONE_TRANSFER_MISMATCH":
+                print("  * Hasil scan valid memiliki 0 zona Radar Qualified aktif saat ini; memantau pembentukan struktur & CHoCH / Sweep baru di M5.")
 
     if pos_awal:
         print(f"- Pengawal Posisi Running Aktif ({len(pos_awal)} posisi terdeteksi di {SYMBOL}):")
         for p in pos_awal:
             arah_p = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
-            print(f"  * Ticket #{p.ticket} | {arah_p} {p.volume} lot @ {p.price_open:.2f} | SL: {p.sl if p.sl > 0 else 'BELUM DISET'} | TP: {p.tp if p.tp > 0 else 'BELUM DISET'} | Floating: ${p.profit:+.2f}")
+            audit_p = audit_position_profit(p, tick_awal, acc_info=acc_awal, sym_info=sym_awal)
+            print(f"  * Ticket #{p.ticket} | {arah_p} {p.volume} lot @ {p.price_open:.2f} | SL: {p.sl if p.sl > 0 else 'BELUM DISET'} | TP: {p.tp if p.tp > 0 else 'BELUM DISET'} | Floating: {audit_p['display']}")
     else:
         print("- Pengawal Posisi Running Siaga: Otomatis mengawal begitu Anda klik BUY/SELL di MT5.")
 
     if orders_awal:
-        print(f"- Pengawal Validitas Zona Pending Order Aktif ({len(orders_awal)} limit/stop order terdeteksi):")
-        for o in orders_awal:
-            nm_o, arah_o = _info_tipe_pending(o.type)
-            vol_o = getattr(o, "volume_current", getattr(o, "volume_initial", 0.0))
-            jrk_o = abs(harga_awal_pantau - o.price_open) if harga_awal_pantau > 0 else 0.0
-            print(f"  * Ticket #{o.ticket} | {nm_o} {vol_o} lot @ {o.price_open:.2f} (Jarak: {jrk_o:.2f} pt) | SL: {o.sl if o.sl > 0 else 'BELUM DISET'} | TP: {o.tp if o.tp > 0 else 'BELUM DISET'}")
+        wl_for_ord = pantau_cycle_init.get("watchlist", []) if pantau_cycle_init else []
+        ord_audits = audit_pending_orders(orders_awal, tick_awal, radar_zones=wl_for_ord, sym_info=sym_awal)
+        print(f"- Pengawal Validitas Zona Pending Order Aktif ({len(ord_audits)} limit/stop order terdeteksi, READ-ONLY):")
+        for oa in ord_audits:
+            sl_txt = f"{oa['sl']:.2f}" if oa["sl"] > 0 else f"BELUM DISET (Saran Struktur: {oa['structural_sl']})"
+            tp_txt = f"{oa['tp']:.2f}" if oa["tp"] > 0 else "BELUM DISET"
+            print(
+                f"  * Ticket #{oa['ticket']} ({oa['symbol']}) | {oa['order_type']} {oa['volume']} lot @ {oa['entry_price']:.2f} "
+                f"(Jarak: {oa['distance_pt']:.2f} pt | {oa['price_validity']} | {oa['status']}) | SL: {sl_txt} | TP: {tp_txt}"
+            )
     else:
         print("- Pengawal Validitas Pending Order Siaga: Otomatis mengawasi validitas zona begitu Anda pasang Buy/Sell Limit di MT5.")
     print("Tekan Ctrl+C kapan saja untuk kembali ke mode Tanya Jawab.")
@@ -450,16 +2131,45 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
 
                 if tick and df_m5 is not None:
                     harga = tick.bid
+                    cycle_res = None
+                    cycle_events = []
+                    cycle_risk_flags = set()
                     pos_live = mt5.positions_get(symbol=SYMBOL) or ()
                     orders_live = mt5.orders_get(symbol=SYMBOL) or ()
+                    if _mm_acc is None or (now_s - _mm_ts) >= 5.0:   # info akun cukup disegarkan tiap 5 detik
+                        _mm_acc, _mm_sym, _mm_ts = mt5.account_info(), mt5.symbol_info(SYMBOL), now_s
+                    acc_live_mm, sym_live_mm = _mm_acc, _mm_sym
+                    cur_live_mm = str(getattr(acc_live_mm, "currency", "USD") or "USD").strip().upper()
+                    eq_live_mm = float(acc_live_mm.equity if acc_live_mm and acc_live_mm.equity > 0 else (acc_live_mm.balance if acc_live_mm else 1000.0))
+                    contract_live_mm = _nilai_per_poin(harga, True, float(sym_live_mm.trade_contract_size if sym_live_mm else 100.0))
+
+                    # Single Snapshot Mode Pantau: update status seluruh Radar Qualified & deteksi transisi
+                    radar_wl_live = []
+                    if lo_manual is None:
+                        cycle_res = pantau_engine.step(tick, df_m5=df_m5, atr_m5=atr_m5, mt5_connected=True)
+                        radar_wl_live = cycle_res.get("watchlist", [])
+                        for tr_ev in cycle_res.get("transitions", []):
+                            print(ZoneMonitorState.format_transition_alert(tr_ev))
+                            cycle_events.append(
+                                f"Zona {tr_ev.get('zone_id')} ({tr_ev.get('timeframe')} {tr_ev.get('zone_type')}): "
+                                f"{tr_ev.get('prev_status')} -> {tr_ev.get('new_status')} | {tr_ev.get('reason')}"
+                            )
+                            bunyi(1250, 180)
+
                     info_floating_bar = ""
+                    pos_audit_map = {}
                     if pos_live:
-                        tot_profit = sum(p.profit for p in pos_live)
+                        port_profit_str, port_audits = format_portfolio_profit(
+                            pos_live, tick, acc_info=acc_live_mm, sym_info=sym_live_mm, compact=True
+                        )
+                        for aud in port_audits:
+                            if aud.get("ticket") is not None:
+                                pos_audit_map[aud["ticket"]] = aud
                         p0 = pos_live[0]
                         arah0 = "BUY" if p0.type == mt5.ORDER_TYPE_BUY else "SELL"
                         poin0 = (tick.bid - p0.price_open) if arah0 == "BUY" else (p0.price_open - tick.ask)
                         label_pos = f"{arah0} {poin0:+.1f}pt" if len(pos_live) == 1 else f"{len(pos_live)}Pos"
-                        info_floating_bar += f" | {label_pos}(${tot_profit:+.1f})"
+                        info_floating_bar += f" | {label_pos}({port_profit_str})"
                     if orders_live:
                         o0 = min(orders_live, key=lambda x: abs(harga - x.price_open))
                         nm0, _ = _info_tipe_pending(o0.type)
@@ -491,7 +2201,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                     lebar_aman = max(40, cols - 1)
                     _bias_bar = bias_htf_cached()
                     bias_lbl = f"{'BUL' if _bias_bar['bias'] == 'BULLISH' else ('BEA' if _bias_bar['bias'] == 'BEARISH' else 'NET')}({_bias_bar['skor']:+d})"
-                    teks_bar = f"[{datetime.now():%H:%M:%S}] Bid:{harga:.2f} | C_M5:{close_m5:.2f} | HTF:{bias_lbl} | M5:{ev_bar}{info_floating_bar}"
+                    teks_bar = f"[{datetime.now():%H:%M:%S}] Bid:{harga:.2f} | C_M5:{close_m5:.2f} | HTF:{bias_lbl} | GLOBAL_M5:{ev_bar}{info_floating_bar}"
                     baris_bersih = teks_bar[:lebar_aman].ljust(lebar_aman)
                     print(f"\r{baris_bersih}", end="", flush=True)
 
@@ -500,12 +2210,6 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                     o_last_c, c_last_c = df_m5["Open"].iloc[-1], df_m5["Close"].iloc[-1]
                     t_candle_last_c = df_m5.index[-1]
                     bodi_last_c = abs(c_last_c - o_last_c)
-                    if (now_s - _mm_ts) >= 5.0:   # info akun cukup disegarkan tiap 5 detik
-                        _mm_acc, _mm_sym, _mm_ts = mt5.account_info(), mt5.symbol_info(SYMBOL), now_s
-                    acc_live_mm, sym_live_mm = _mm_acc, _mm_sym
-                    cur_live_mm = acc_live_mm.currency if acc_live_mm else "USD"
-                    eq_live_mm = float(acc_live_mm.equity if acc_live_mm and acc_live_mm.equity > 0 else (acc_live_mm.balance if acc_live_mm else 1000.0))
-                    contract_live_mm = _nilai_per_poin(harga, True, float(sym_live_mm.trade_contract_size if sym_live_mm else 100.0))
 
                     for o in orders_live:
                         tkt_o = o.ticket
@@ -544,17 +2248,19 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                             pct_risk_o = (potensi_loss_o / max(eq_live_mm, 1.0)) * 100.0
                             if pct_risk_o > 2.5 and f"ord_overlot_{tkt_o}" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(f"ord_overlot_{tkt_o}")
-                                print(f"\n\n[🚨 PERINGATAN MM PENDING ORDER #{tkt_o}!] {nm_o} {vol_o} lot memiliki risiko loss -${potensi_loss_o:.2f} ({pct_risk_o:.1f}% modal) jika terjemput!")
+                                print(f"\n\n[🚨 PERINGATAN MM PENDING ORDER #{tkt_o}!] {nm_o} {vol_o} lot memiliki risiko loss -{potensi_loss_o:,.2f} {cur_live_mm} ({pct_risk_o:.1f}% modal) jika terjemput!")
                                 print("   -> TINDAKAN MM: Disarankan turunkan volume lot sebelum order terjemput agar tidak melanggar batas risiko maksimal 1%-2% modal.")
                                 for _ in range(3):
                                     bunyi(520, 300)
 
-                        # (1) Peringatan jika Pending Order belum dipasang SL (informatif, tenang)
+                        # (1) Peringatan jika Pending Order belum dipasang SL (berbasis invalidasi struktur zona jika tersedia)
                         if o.sl == 0 and f"ord_nosl_{tkt_o}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"ord_nosl_{tkt_o}")
-                            jarak_sl_aman = max(3.0, round(1.5 * atr_m5, 2))
-                            sl_saran = (p_limit - jarak_sl_aman) if arah_o == "BUY" else (p_limit + jarak_sl_aman)
-                            print(f"\n[Catatan Pending #{tkt_o}] {nm_o} @ {p_limit:.2f} belum dipasang Stop Loss (saran pengaman: ~{sl_saran:.2f}).")
+                            sl_saran = resolve_structural_sl_recommendation(arah_o, p_limit, radar_zones=radar_wl_live)
+                            if sl_saran is not None:
+                                print(f"\n[Catatan Pending #{tkt_o}] {nm_o} @ {p_limit:.2f} belum dipasang Stop Loss (saran SL invalidasi struktur: {sl_saran:.2f}).")
+                            else:
+                                print(f"\n[Catatan Pending #{tkt_o}] {nm_o} @ {p_limit:.2f} belum dipasang Stop Loss (STRUCTURAL_SL_UNAVAILABLE).")
 
                         # (2) Evaluasi HANYA saat harga benar-benar mendekati Zona Limit Order (<= max(3.5, 1.5x ATR M5))
                         radius_evaluasi = max(3.5, round(1.5 * atr_m5, 2))
@@ -610,10 +2316,12 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                         tiket_aktif_skrg.add(tkt)
                         arah_p = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
                         poin_p = (tick.bid - p.price_open) if arah_p == "BUY" else (p.price_open - tick.ask)
+                        audit_p = pos_audit_map.get(tkt) or audit_position_profit(p, tick, acc_info=acc_live_mm, sym_info=sym_live_mm)
+                        profit_disp = audit_p["display"]
 
                         # Deteksi jika trader baru saja membuka posisi baru saat mode pantau sedang jalan
                         if tkt not in tiket_terpantau:
-                            print(f"\n\n[POSISI BARU TERDETEKSI #{tkt}!] {arah_p} {p.volume} lot @ {p.price_open:.2f} | SL: {p.sl if p.sl > 0 else 'BELUM DISET'} | TP: {p.tp if p.tp > 0 else 'BELUM DISET'}")
+                            print(f"\n\n[POSISI BARU TERDETEKSI #{tkt}!] {arah_p} {p.volume} lot @ {p.price_open:.2f} | SL: {p.sl if p.sl > 0 else 'BELUM DISET'} | TP: {p.tp if p.tp > 0 else 'BELUM DISET'} | Floating: {profit_disp}")
                             print("   -> Pengawal Posisi Otomatis langsung aktif mengawasi posisi ini!")
                             for _ in range(2):
                                 bunyi(1300, 200)
@@ -623,28 +2331,42 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                             "volume": p.volume,
                             "open": p.price_open,
                             "sl": p.sl,
-                            "profit": p.profit,
+                            "profit": audit_p["profit"],
+                            "profit_status": audit_p["status"],
                             "poin": poin_p,
                         }
 
-                        # (a) Peringatan jika posisi belum dipasang SL
+                        # (a) Peringatan jika posisi belum dipasang SL (read-only; saran berbasis invalidasi struktur atau STRUCTURAL_SL_UNAVAILABLE)
                         if p.sl == 0 and f"nosl_{tkt}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"nosl_{tkt}")
-                            jarak_sl_aman = max(3.0, round(1.5 * atr_m5, 2))
-                            sl_saran = (p.price_open - jarak_sl_aman) if arah_p == "BUY" else (p.price_open + jarak_sl_aman)
+                            sl_saran = resolve_structural_sl_recommendation(arah_p, p.price_open, radar_zones=radar_wl_live)
                             print(f"\n\n[PERINGATAN RISIKO #{tkt}!] Posisi {arah_p} {p.volume} lot @ {p.price_open:.2f} BELUM DIPASANG STOP LOSS!")
-                            print(f"   -> SARAN: Segera pasang SL maksimal di sekitar {sl_saran:.2f} (~{jarak_sl_aman:.2f} poin) demi keamanan akun real Anda.")
+                            if sl_saran is not None:
+                                print(f"   -> SARAN (Read-Only): Pertimbangkan SL berbasis invalidasi struktur zona di sekitar {sl_saran:.2f} demi keamanan akun real Anda.")
+                            else:
+                                print("   -> SARAN (Read-Only): STRUCTURAL_SL_UNAVAILABLE (belum ada invalidasi struktur zona yang sesuai; pasang SL manual sesuai manajemen risiko).")
                             for _ in range(2):
                                 bunyi(800, 250)
 
-                        # (b) Peringatan Geser SL ke BEP (Impas) saat sudah profit >= 2.5 poin (atau 1.2x ATR M5)
+                        # (b) PROFIT PROTECTION SUGGESTION saat sudah profit >= 2.5 poin (atau 1.2x ATR M5) — manual, tanpa klaim bebas risiko
                         batas_bep = max(2.5, round(1.2 * atr_m5, 2))
                         sl_belum_bep = (arah_p == "BUY" and p.sl < p.price_open) or (arah_p == "SELL" and (p.sl == 0 or p.sl > p.price_open))
                         if poin_p >= batas_bep and sl_belum_bep and f"bep_{tkt}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"bep_{tkt}")
-                            bep_plus = (p.price_open + 0.3) if arah_p == "BUY" else (p.price_open - 0.3)
-                            print(f"\n\n[ALERT AMANKAN MODAL / BEP #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah running profit +{poin_p:.2f} poin (${p.profit:+.2f})!")
-                            print(f"   -> TINDAKAN: Segera geser Stop Loss ke BEP+ ({bep_plus:.2f}) agar transaksi ini 100% BEBAS RISIKO (Risk-Free)!")
+                            pp_sug = build_profit_protection_suggestion(p, tick, sym_info=sym_live_mm, acc_info=acc_live_mm)
+                            print(f"\n\n[{pp_sug['label']} #{tkt}] Posisi {arah_p} @ {p.price_open:.2f} memiliki floating +{poin_p:.2f} poin ({profit_disp}).")
+                            if pp_sug["allowed"]:
+                                net_txt = (
+                                    f"{pp_sug['estimated_net_profit']:+,.2f} {pp_sug.get('currency') or ''}".strip()
+                                    if pp_sug.get("estimated_net_profit") is not None
+                                    else "NET_PROFIT_UNAVAILABLE (komponen biaya/kurs tidak lengkap)"
+                                )
+                                print(f"   -> Entry: {pp_sug['entry_price']:.2f} | Bid/Ask: {pp_sug['current_bid']:.2f}/{pp_sug['current_ask']:.2f} | Suggested SL: {pp_sug['suggested_sl']:.2f}")
+                                print(f"   -> Gross Profit Potentially Locked: +{pp_sug['gross_profit_locked_pts']:.2f} pt | Estimated Net Profit: {net_txt}")
+                                print(f"   -> Buffer & Dasar: {pp_sug['buffer_pts']:.2f} pt ({pp_sug['calculation_basis']})")
+                                print(f"   -> CATATAN: {pp_sug['disclaimer']}")
+                            else:
+                                print(f"   -> {pp_sug['status']} ({pp_sug['reason']}): dasar perhitungan atau batasan stop/freeze level broker tidak memungkinkan rekomendasi SL.")
                             for _ in range(3):
                                 bunyi(1450, 220)
 
@@ -653,7 +2375,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                         if poin_p >= batas_tp_parsial and f"lock_{tkt}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"lock_{tkt}")
                             kunci_sl = (p.price_open + round(poin_p * 0.5, 2)) if arah_p == "BUY" else (p.price_open - round(poin_p * 0.5, 2))
-                            print(f"\n\n[ALERT KUNCI PROFIT BESAR #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah profit +{poin_p:.2f} poin (${p.profit:+.2f})!")
+                            print(f"\n\n[ALERT KUNCI PROFIT BESAR #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah profit +{poin_p:.2f} poin ({profit_disp})!")
                             print(f"   -> TINDAKAN: Amankan sebagian profit (Partial Close) atau geser Trailing SL ke {kunci_sl:.2f} untuk mengunci profit!")
                             for _ in range(4):
                                 bunyi(1600, 200)
@@ -669,7 +2391,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                         if melawan_impuls and key_impuls not in sudah_notif_masuk:
                             sudah_notif_masuk.add(key_impuls)
                             saran_imp = "Segera amankan profit / pasang BEP!" if poin_p > 0 else "Waspada tekanan lawan arah, perketat pengawasan SL / siap Cut terukur jika struktur jebol!"
-                            print(f"\n\n[PERINGATAN TEKANAN LAWAN ARAH #{tkt}!] Posisi Anda {arah_p} (Floating: {poin_p:+.2f} pt / ${p.profit:+.2f}),")
+                            print(f"\n\n[PERINGATAN TEKANAN LAWAN ARAH #{tkt}!] Posisi Anda {arah_p} (Floating: {poin_p:+.2f} pt / {profit_disp}),")
                             print(f"   tetapi candle M5 ({wkt(t_candle_last)}) membentuk impuls kuat melawan posisi Anda (Body {bodi_last:.2f} pt)!")
                             print(f"   -> TINDAKAN: {saran_imp}")
                             for _ in range(3):
@@ -688,7 +2410,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                             batas_minus_darurat = -max(3.5, round(1.8 * atr_m5, 2))
                             if poin_p <= batas_minus_darurat and f"dd_{tkt}" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(f"dd_{tkt}")
-                                print(f"\n\n[BAHAYA FLOATING MINUS TANPA SL #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah minus {poin_p:.2f} poin (${p.profit:+.2f}) tanpa SL!")
+                                print(f"\n\n[BAHAYA FLOATING MINUS TANPA SL #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah minus {poin_p:.2f} poin ({profit_disp}) tanpa SL!")
                                 print("   -> TINDAKAN DARURAT: Segera pasang batas Stop Loss atau lakukan Cut Loss jika zona pertahanan sudah jebol!")
                                 for _ in range(5):
                                     bunyi(600, 350)
@@ -701,7 +2423,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                             if pct_risk_real > 2.5 and f"mm_overlot_{tkt}" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(f"mm_overlot_{tkt}")
                                 print(f"\n\n[🚨 PERINGATAN MONEY MANAGEMENT (OVER-LEVERAGE) #{tkt}!]")
-                                print(f"   Posisi {arah_p} {p.volume} lot @ {p.price_open:.2f} berisiko kerugian -${potensi_loss_usd:.2f} ({pct_risk_real:.1f}% dari modal ${eq_live_mm:,.2f})!")
+                                print(f"   Posisi {arah_p} {p.volume} lot @ {p.price_open:.2f} berisiko kerugian -{potensi_loss_usd:,.2f} {cur_live_mm} ({pct_risk_real:.1f}% dari modal {eq_live_mm:,.2f} {cur_live_mm})!")
                                 print("   -> STANDAR RISIKO SEHAT: Maksimal 0.5% - 1.0% per trade (Toleransi keras: 2.0%).")
                                 print("   -> TINDAKAN MM: Segera lakukan Partial Close (kurangi volume) agar modal terlindungi dari ancaman Margin Call!")
                                 for _ in range(4):
@@ -1433,6 +3155,42 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                             for _ in range(2):
                                 bunyi(1400, 300)
 
+                    if not detail:
+                        for nf_flag in sudah_notif_masuk:
+                            if nf_flag.startswith("nearsl_"):
+                                cycle_risk_flags.add("NEAR_SL")
+                            elif nf_flag.startswith("dd_"):
+                                cycle_risk_flags.add("MINUS_NO_SL")
+                            elif nf_flag.startswith("mm_overlot_") or nf_flag.startswith("ord_overlot_"):
+                                cycle_risk_flags.add("OVER_LEVERAGE")
+                            elif nf_flag == "mm_tot_risk":
+                                cycle_risk_flags.add("PORTFOLIO_HIGH_RISK")
+                            elif nf_flag.startswith("imp_"):
+                                cycle_risk_flags.add("OPPOSITE_M5_IMPULSE")
+                        snap_loop = _build_monitor_snapshot(
+                            tick=tick,
+                            bias_info=_bias_bar,
+                            scan_result=(cycle_res or {}).get("scan_result"),
+                            decision=(cycle_res or {}).get("decision"),
+                            watchlist=radar_wl_live,
+                            reconciliation=(cycle_res or {}).get("reconciliation"),
+                            evs=evs,
+                            sweeps=sweeps,
+                            cisd_m5=cisd_m5,
+                            df_m5=df_m5,
+                            positions=pos_live,
+                            orders=orders_live,
+                            acc_info=acc_live_mm,
+                            sym_info=sym_live_mm,
+                            otomatis=otomatis,
+                            monitor_status="MONITORING",
+                            extra_events=cycle_events,
+                        )
+                        snap_loop["risk_flags"] = sorted(cycle_risk_flags)
+                        smart_res = smart_tracker.evaluate(snap_loop, now_ts=now_s)
+                        if smart_res.get("should_print"):
+                            _builtins.print("\n" + SmartAlertTracker.format_alert_block(smart_res, snap_loop))
+
                 _err_beruntun = 0
             except KeyboardInterrupt:
                 raise
@@ -1440,10 +3198,10 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir=""):
                 _err_beruntun += 1
                 _catat_error('mode_pantau', e_loop)
                 if _err_beruntun in (1, 10) or _err_beruntun % 100 == 0:
-                    print(f'\n[⚠️ Error di loop pantau (#{_err_beruntun}): {e_loop!r} — dicatat ke {FILE_ERROR_LOG}; pemantauan dilanjutkan]')
+                    _builtins.print(f'\n[⚠️ Error di loop pantau (#{_err_beruntun}): {e_loop!r} — dicatat ke {FILE_ERROR_LOG}; pemantauan dilanjutkan]')
                 time.sleep(1.0)
                 continue
             time.sleep(0.1)  # Live update 10x per detik (halus, stabil, dan bebas lag)
     except KeyboardInterrupt:
-        print("\nMode pantau dihentikan (koneksi live MT5 tetap aktif).")
+        _builtins.print("\nMode pantau dihentikan (koneksi live MT5 tetap aktif).")
     return None

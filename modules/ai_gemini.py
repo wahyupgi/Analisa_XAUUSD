@@ -5,6 +5,7 @@ Integrasi Google Gemini API: pengumpulan konteks lengkap data MT5,
 ekstraksi rekomendasi sinyal & zona [RADAR_TARGET], multi-model failover,
 serta live snapshot kontekstual untuk Tanya Jawab AI.
 """
+import inspect
 import json
 import os
 import re
@@ -47,7 +48,9 @@ from modules.state_manager import (
     ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, CATATAN_JEBOL_PANTAU
 )
 import modules.state_manager as SM
-from modules.zone_scanner import scan_xauusd_zones, validate_entry_setup, evaluate_trade_decision
+from modules.zone_scanner import (
+    scan_xauusd_zones, validate_entry_setup, evaluate_trade_decision, create_market_snapshot
+)
 
 
 def kumpulkan_konteks_mt5(is_refresh=False):
@@ -84,6 +87,16 @@ def kumpulkan_konteks_mt5(is_refresh=False):
     harga_sekarang = f"Bid {tick.bid:.2f} / Ask {tick.ask:.2f} (spread {spread_val:.2f}) | Volatilitas ATR14 M5: {atr_m5_val:.2f} poin" if tick else "tidak tersedia"
     harga_ref = tick.bid if tick else frames["M5"]["Close"].iloc[-1]
 
+    # SATU snapshot untuk seluruh siklus konteks ini: frames & tick yang sama dengan yang sudah diambil di atas
+    # (tidak ada fetch tick/candle baru). Dipakai oleh golden confluence DAN evaluasi scanner di bawah.
+    try:
+        if tick is not None:
+            snap_ctx = create_market_snapshot(frames=frames, tick=tick)
+        else:
+            snap_ctx = create_market_snapshot(frames=frames, current_price=float(harga_ref), live=False)
+    except Exception as e_snap:
+        _catat_error("kumpulkan_konteks_snapshot", e_snap)
+        snap_ctx = None
     zona_text = "".join(ringkas_zona(n, frames[n], harga_ref) for n in ("W1", "D1", "H4"))
     zona_text += level_psikologis_ekstrem(frames["W1"], frames["D1"], harga_ref)
     # Bias HTF — dicantumkan di konteks agar AI tidak lupa arah trend utama
@@ -96,7 +109,7 @@ def kumpulkan_konteks_mt5(is_refresh=False):
         f"{'Filter Trend AKTIF: hanya sinyal SEARAH bias diterbitkan.' if FILTER_TREND_AKTIF else 'Filter Trend NONAKTIF: semua arah diizinkan (hati-hati).'}\n"
     )
     zona_text += analisa_adr_exhaustion(frames["D1"], harga_ref)
-    zona_text += cari_golden_confluence(frames, harga_ref)
+    zona_text += cari_golden_confluence(frames, harga_ref, snapshot=snap_ctx)
     zona_text += usd_text
     zona_text += smt_text
     zona_text += cek_kalender_berita_usd()
@@ -121,10 +134,15 @@ def kumpulkan_konteks_mt5(is_refresh=False):
     smc_text = "".join(analisa_metode(n, frames[n], offset, harga_ref) for n in ("H4", "H1", "M30", "M5"))
     smc_text += analisa_sesi(frames["M30"], frames["M5"], offset)
 
-    # Evaluasi keputusan teknikal dari Python Scanner secara langsung
+    # Evaluasi keputusan teknikal dari Python Scanner secara langsung (single snapshot)
     try:
-        dec_scan = evaluate_trade_decision(frames=frames, current_price=harga_ref)
-        scan_res = scan_xauusd_zones(frames=frames, current_price=harga_ref)
+        snap_scan = snap_ctx if snap_ctx is not None else create_market_snapshot(
+            frames=frames, current_price=float(harga_ref), live=False)
+        scan_res = scan_xauusd_zones(frames=frames, snapshot=snap_scan)
+        dec_scan = evaluate_trade_decision(
+            frames=frames, live=False,
+            snapshot=snap_scan, scan_result=scan_res,
+        )
     except Exception:
         dec_scan = {"status": "WAIT", "reasons": ["Scanner dalam mode fallback"]}
         scan_res = {}
@@ -511,8 +529,14 @@ def _terapkan_otoritas_scanner(target):
       4. Tidak ada proses lanjutan atau pending order yang boleh sembarangan menimpa keputusan scanner.
     """
     try:
-        dec = evaluate_trade_decision()   # tidak pernah raise; error internal -> status WAIT
-        scan = scan_xauusd_zones()
+        _eval_sig = inspect.signature(evaluate_trade_decision)
+        if "scan_result" in _eval_sig.parameters and "snapshot" in _eval_sig.parameters:
+            _snap_ot = create_market_snapshot()
+            scan = scan_xauusd_zones(snapshot=_snap_ot)
+            dec = evaluate_trade_decision(snapshot=_snap_ot, scan_result=scan)
+        else:
+            dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+            scan = scan_xauusd_zones()
     except Exception as e_scan:
         _catat_error("ekstrak_target_ai_zone_scanner", e_scan)
         target["sinyal"], target["atas"], target["bawah"] = None, None, None
@@ -829,9 +853,10 @@ def snapshot_live_qa():
     st_qa = "WAIT"
     dec_qa = {"status": "WAIT", "reasons": []}
     try:
-        from modules.zone_scanner import scan_xauusd_zones, evaluate_trade_decision
-        dec_qa = evaluate_trade_decision()
-        scan_qa = scan_xauusd_zones()
+        from modules.zone_scanner import scan_xauusd_zones, evaluate_trade_decision, create_market_snapshot
+        _snap_qa = create_market_snapshot()
+        scan_qa = scan_xauusd_zones(snapshot=_snap_qa)
+        dec_qa = evaluate_trade_decision(snapshot=_snap_qa, scan_result=scan_qa)
         st_qa = dec_qa.get("status", "WAIT")
         reasons_qa = "; ".join(dec_qa.get("reasons", [])) or "tidak ada alasan"
         scan_qa_txt = f"- Status Python Zone Scanner: [{st_qa}] | Bias: {scan_qa.get('bias', '-')} | Catatan: {reasons_qa}\n"

@@ -243,8 +243,9 @@ def main():
 
         if cmd in ("scan detail", "scanner detail", "zona detail", "zone detail"):
             try:
-                hasil_scan = scan_xauusd_zones()
-                dec = evaluate_trade_decision()
+                snap = create_market_snapshot()
+                hasil_scan = scan_xauusd_zones(snapshot=snap)
+                dec = evaluate_trade_decision(snapshot=snap, scan_result=hasil_scan)
                 print("\n" + format_scan_presentation(hasil_scan, dec, detailed=True))
             except Exception as e_sc:
                 print(f"Gagal menjalankan Zone Scanner Detail: {e_sc}")
@@ -252,8 +253,9 @@ def main():
 
         if cmd in ("zona", "zone", "scanner", "scan", "smc"):
             try:
-                hasil_scan = scan_xauusd_zones()
-                dec = evaluate_trade_decision()
+                snap = create_market_snapshot()
+                hasil_scan = scan_xauusd_zones(snapshot=snap)
+                dec = evaluate_trade_decision(snapshot=snap, scan_result=hasil_scan)
                 print("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
             except Exception as e_sc:
                 print(f"Gagal menjalankan Zone Scanner: {e_sc}")
@@ -281,7 +283,8 @@ def main():
 
         if cmd in ("diag", "diagnostik", "diagnostic", "scan diag"):
             try:
-                hasil_scan = scan_xauusd_zones()
+                snap = create_market_snapshot()
+                hasil_scan = scan_xauusd_zones(snapshot=snap)
                 print("\n" + format_diagnostic_report(hasil_scan))
             except Exception as e_diag:
                 print(f"Gagal menjalankan diagnostik scanner: {e_diag}")
@@ -332,8 +335,9 @@ def main():
             if client is None:
                 print("\n   [INFO]: Gemini AI tidak aktif. Memperbarui data market dan Python Scanner...")
                 try:
-                    hasil_scan = scan_xauusd_zones()
-                    dec = evaluate_trade_decision()
+                    snap = create_market_snapshot()
+                    hasil_scan = scan_xauusd_zones(snapshot=snap)
+                    dec = evaluate_trade_decision(snapshot=snap, scan_result=hasil_scan)
                     print("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
                 except Exception as e_rf:
                     print(f"Gagal memperbarui scanner: {e_rf}")

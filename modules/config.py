@@ -43,6 +43,7 @@ TIMEFRAMES = {
     "H4": (mt5.TIMEFRAME_H4, 3000),   # ~1.5-2 tahun, zona jauh ke kiri
     "H1": (mt5.TIMEFRAME_H1, 400),
     "M30": (mt5.TIMEFRAME_M30, 300),
+    "M15": (mt5.TIMEFRAME_M15, 300),
     "M5": (mt5.TIMEFRAME_M5, 300),
 }
 SWING_N = 3  # sebuah candle = swing jika High/Low-nya ekstrem dibanding N candle kiri & kanan
@@ -50,6 +51,18 @@ SWING_N = 3  # sebuah candle = swing jika High/Low-nya ekstrem dibanding N candl
 # Selisih jam waktu server broker terhadap UTC (contoh: 0, 2, 3).
 # None = deteksi otomatis dari tick MT5 (hanya akurat saat market buka).
 SERVER_UTC_OFFSET_JAM = None
+
+# --- Konfigurasi Multi-Tier SMC Zone Engine ---
+MULTI_TIER_MAX_ZONES = 3              # Maksimal zona ditampilkan per kategori di Radar (default: 3)
+HIGH_RISK_MAX_ATR_RATIO = 6.0         # Batas maksimal rasio jarak/ATR untuk kategori High Risk (Aggressive)
+HIGH_RISK_MAX_DISTANCE_PT = 18.0      # Batas maksimal jarak poin untuk kategori High Risk
+HIGH_RISK_MIN_SCORE = 55.0            # Skor minimal kandidat High Risk (Grade B)
+MEDIUM_RISK_MAX_ATR_RATIO = 16.0      # Batas maksimal rasio jarak/ATR untuk kategori Medium Risk (Balanced)
+MEDIUM_RISK_MAX_DISTANCE_PT = 50.0    # Batas maksimal jarak poin untuk kategori Medium Risk
+MEDIUM_RISK_MIN_SCORE = 65.0          # Skor minimal kandidat Medium Risk
+LOW_RISK_MAX_ATR_RATIO = 25.0         # Batas maksimal rasio jarak/ATR untuk kategori Low Risk intraday wajar
+LOW_RISK_MAX_DISTANCE_PT = 75.0       # Batas maksimal jarak poin untuk kategori Low Risk intraday wajar
+LOW_RISK_MIN_SCORE = 75.0             # Skor minimal kandidat Low Risk (Grade A/A+)
 
 # --- Gerbang sinyal & kontrol risiko: ditegakkan oleh KODE (bukan hanya prompt AI) ---
 RR_MIN = 1.5                       # R:R minimal ke TP1

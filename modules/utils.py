@@ -18,6 +18,50 @@ import pandas as pd
 from typing import Optional, Any
 from modules.config import FILE_ERROR_LOG, SYMBOL, APP_VERSION, API_KEY
 
+WIB_TZ = timezone(timedelta(hours=7))
+
+
+def get_current_wib() -> datetime:
+    """Mengembalikan waktu saat ini dalam timezone WIB (Asia/Jakarta, UTC+7)."""
+    return datetime.now(WIB_TZ)
+
+
+def to_wib_datetime(dt_val: Any) -> Optional[datetime]:
+    """
+    Konversi berbagai format waktu (timestamp epoch, string, pd.Timestamp, datetime)
+    ke objek datetime dengan timezone WIB (UTC+7) yang valid.
+    Mengembalikan None jika input tidak valid.
+    """
+    if dt_val is None:
+        return None
+    try:
+        if isinstance(dt_val, (int, float)):
+            if not pd.isna(dt_val) and dt_val > 0:
+                return datetime.fromtimestamp(dt_val, tz=timezone.utc).astimezone(WIB_TZ)
+            return None
+        if isinstance(dt_val, str):
+            s = str(dt_val).replace(" WIB", "").strip()
+            if not s or s.lower() in ("none", "nan", "nat", "-"):
+                return None
+            ts = pd.Timestamp(s)
+            if pd.isna(ts):
+                return None
+            if ts.tzinfo is not None:
+                return ts.to_pydatetime().astimezone(WIB_TZ)
+            return ts.to_pydatetime().replace(tzinfo=WIB_TZ)
+        if hasattr(dt_val, "tzinfo") and getattr(dt_val, "tzinfo") is not None:
+            return dt_val.astimezone(WIB_TZ)
+        if isinstance(dt_val, datetime):
+            return dt_val.replace(tzinfo=WIB_TZ)
+        if hasattr(dt_val, "to_pydatetime"):
+            pdt = dt_val.to_pydatetime()
+            if getattr(pdt, "tzinfo", None) is not None:
+                return pdt.astimezone(WIB_TZ)
+            return pdt.replace(tzinfo=WIB_TZ)
+    except Exception:
+        return None
+    return None
+
 _ANTRIAN_BUNYI = queue.Queue()
 _THREAD_BUNYI = None
 

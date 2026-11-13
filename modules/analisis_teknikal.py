@@ -847,17 +847,38 @@ def analisa_metode(nama, df, offset, harga):
     out.append("[ATURAN ZONA] Hanya OB fresh yang bertumpuk/overlap dengan FVG aktif boleh menjadi kandidat zona. Tidak ada fallback ke S/D, breaker, Fibonacci, POC, atau swing.")
     return "\n".join(out) + "\n"
 
-def cari_golden_confluence(frames, harga):
+def cari_golden_confluence(frames, harga, snapshot=None, tick=None):
     """Zona A/A+ selektif menggunakan Python-Only Zone Scanner (OB fresh + FVG untouched).
     
     S/D, Breaker, swing, POC, Fibonacci dan metode lain tidak menjadi generator zona.
     OB dan FVG dari impuls yang sama diperlakukan sebagai satu setup, bukan dua konfirmasi independen.
+
+    Sumber data (satu siklus, tanpa fetch tersembunyi):
+      - snapshot : objek snapshot dari create_market_snapshot() milik pemanggil (disarankan). Dipakai apa adanya
+                   oleh scanner DAN evaluator; tidak ada tick/candle baru yang diambil.
+      - tick     : (jalur kompatibilitas) tick MT5 yang sudah diambil pemanggil bersama `frames`; dipakai untuk
+                   membangun snapshot tanpa memanggil mt5.symbol_info_tick lagi.
+      - keduanya None (pemanggil lama): snapshot dibangun dari `frames` pemanggil + SATU tick MT5 baru; sumber
+                   tercatat pada snapshot['data_sources'] ('frames': caller_supplied, 'tick': mt5_fetched).
+    `harga` HANYA dipakai sebagai harga referensi eksplisit jika tidak ada tick/snapshot (ditandai 'caller_price');
+    bila tick tersedia, harga referensi scanner = Mid dari tick yang sama (bukan `harga` lama).
     """
     try:
-        from modules.zone_scanner import scan_xauusd_zones, evaluate_trade_decision, format_decision_text
-        scan_res = scan_xauusd_zones(frames=frames, current_price=harga)
+        from modules.zone_scanner import scan_xauusd_zones, evaluate_trade_decision, format_decision_text, create_market_snapshot
+        snap_gc = snapshot
+        if snap_gc is None:
+            if tick is not None:
+                snap_gc = create_market_snapshot(frames=frames, tick=tick)
+            else:
+                snap_gc = create_market_snapshot(frames=frames, current_price=None, live=True)
+                if (not snap_gc.get("data_ok") and harga
+                        and "tick tidak tersedia" in str(snap_gc.get("error_reason", ""))):
+                    # Tick benar-benar tidak ada (bukan tick rusak): pakai harga pemanggil, ditandai 'caller_price'.
+                    # Tick rusak/parsial TETAP DATA_INCOMPLETE -> fail-safe WAIT.
+                    snap_gc = create_market_snapshot(frames=frames, current_price=float(harga), live=False)
+        scan_res = scan_xauusd_zones(frames=frames, snapshot=snap_gc)
         teks = "\n" + scan_res.get("summary_text", "") + "\n"
-        dec = evaluate_trade_decision(frames=frames, current_price=harga, live=True)
+        dec = evaluate_trade_decision(frames=frames, snapshot=snap_gc, scan_result=scan_res, live=False)
         teks += format_decision_text(dec) + "\n"
         teks += ("KEPUTUSAN PYTHON MENGIKAT: AI hanya boleh menafsirkan; jika status bukan VALID maka SINYAL_AKTIF wajib WAIT "
                  "dan AI dilarang menambah zona di luar daftar scanner.\n")

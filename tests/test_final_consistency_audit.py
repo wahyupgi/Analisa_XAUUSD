@@ -140,12 +140,12 @@ class TestFinalConsistencyAudit(unittest.TestCase):
         # Periksa Section 2 memuat snapshot waktu & bid/ask konsisten
         self.assertIn("Current Price    : 2020.00 (Snapshot: 2026-11-12 14:46:00 | Bid: 2019.80 | Ask: 2020.20)", output_text)
 
-        # Periksa konsistensi distance pada Primary Zone (Supply @ 2030: 2030 - 2020 = 10.00 pt)
-        self.assertIn("Jarak: 10.00 pt (ABOVE_PRICE)", output_text)
-        # Periksa konsistensi distance pada Kandidat Demand (Demand @ 2005: 2020 - 2005 = 15.00 pt)
-        self.assertIn("Jarak: 15.00 pt (BELOW_PRICE)", output_text)
-        # Periksa konsistensi distance pada Distance to Zone
-        self.assertIn("10.00 pt", output_text)
+        # Periksa konsistensi distance pada Primary Zone (Supply @ 2030 menggunakan Ask 2020.20: 2030.00 - 2020.20 = 9.80 pt)
+        self.assertIn("9.80 pt", output_text)
+        self.assertIn("ABOVE_PRICE", output_text)
+        # Periksa konsistensi distance pada Kandidat Demand (Demand @ 2005 menggunakan Bid 2019.80: 2019.80 - 2005.00 = 14.80 pt)
+        self.assertIn("14.80 pt", output_text)
+        self.assertIn("BELOW_PRICE", output_text)
 
     # -------------------------------------------------------------------------
     # 5. Early Pending RR: 1:4.1 Menghasilkan Status PASSED

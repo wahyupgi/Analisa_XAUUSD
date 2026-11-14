@@ -11,7 +11,12 @@ _DIR_SNR = os.path.dirname(os.path.abspath(__file__))
 _DIR_MODULES = os.path.dirname(_DIR_SNR)
 _DIR_PROJECT = os.path.dirname(_DIR_MODULES)
 
-SNR_SYMBOL_DEFAULT = "XAUUSD"
+try:
+    from modules.config import SYMBOL as _APP_SYMBOL
+except Exception:
+    _APP_SYMBOL = "XAUUSD"
+
+SNR_SYMBOL_DEFAULT = _APP_SYMBOL
 SNR_TIMEFRAMES = ("H4", "H1", "M30", "M5")
 SNR_STRUCTURAL_TIMEFRAMES = ("H4", "H1", "M30")
 SNR_ENTRY_TIMEFRAME = "M5"

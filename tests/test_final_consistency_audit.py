@@ -135,7 +135,7 @@ class TestFinalConsistencyAudit(unittest.TestCase):
             "current_price": fixed_price,
         }
 
-        output_text = format_scan_presentation(scan=scan_mock, dec=dec_mock)
+        output_text = format_scan_presentation(scan=scan_mock, dec=dec_mock, detailed=True)
 
         # Periksa Section 2 memuat snapshot waktu & bid/ask konsisten
         self.assertIn("Current Price    : 2020.00 (Snapshot: 2026-11-12 14:46:00 | Bid: 2019.80 | Ask: 2020.20)", output_text)
@@ -220,7 +220,7 @@ class TestFinalConsistencyAudit(unittest.TestCase):
             },
         }
 
-        rendered = format_scan_presentation(scan=scan_mock, dec=dec_wait, early_setups={"best_setup": plan})
+        rendered = format_scan_presentation(scan=scan_mock, dec=dec_wait, early_setups={"best_setup": plan}, detailed=True)
 
         # 1. Final Decision adalah WAIT
         self.assertIn("1. FINAL DECISION", rendered)
@@ -422,32 +422,33 @@ SINYAL_AKTIF: BUY | ENTRY: 2010.00-2012.00 | SL: 2000.00 | TP1: 2030.00 | TP2: 2
         }
         res_concise = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=False)
 
-        # 5 Bagian Utama
-        self.assertIn("A. KONDISI PASAR", res_concise)
-        self.assertIn("B. RADAR ZONE", res_concise)
-        self.assertIn("C. ENTRY PLAN", res_concise)
-        self.assertIn("D. FINAL DECISION", res_concise)
-        self.assertIn("E. RISK WARNING", res_concise)
+        # 5 Bagian Utama Ringkas
+        self.assertIn("1. MARKET BIAS", res_concise)
+        self.assertIn("2. ZONA UTAMA", res_concise)
+        self.assertIn("3. ENTRY PLAN", res_concise)
+        self.assertIn("4. ENTRY CONFIRMATION", res_concise)
+        self.assertIn("5. FINAL DECISION", res_concise)
 
         # Kondisi pasar ringkas
         self.assertIn("Multi-TF Bias    : H4: BEARISH | H1: BEARISH | M30: UNCONFIRMED | M5: WAIT", res_concise)
         self.assertIn("Sumber Harga     : MT5 Live Tick", res_concise)
 
-        # Kandidat zona TIDAK ditampilkan pada default ringkas
+        # Kandidat zona & audit tidak ditampilkan pada default ringkas
         self.assertNotIn("[Kandidat Zona Pemantauan — BUKAN Sinyal Entry / Pending Order Aktif]", res_concise)
         self.assertNotIn("Kandidat Demand  :", res_concise)
         self.assertNotIn("Kandidat Supply  :", res_concise)
+        self.assertNotIn("[ZONE EVALUATION SUMMARY]", res_concise)
+        self.assertNotIn("[ZONE COUNT RECONCILIATION", res_concise)
 
-        # Primary dan Countertrend zone tetap tampil
-        self.assertIn("PRIMARY DIRECTIONAL ZONE", res_concise)
+        # Zona utama tetap tampil
+        self.assertIn("Primary Directional Zone", res_concise)
         self.assertIn("Primary Radar Zone", res_concise)
         self.assertIn("H1 SUPPLY 2030.00 - 2035.00", res_concise)
-        self.assertIn("COUNTERTREND / REACTION ZONE", res_concise)
-        self.assertIn("H1 DEMAND 2000.00 - 2005.00", res_concise)
 
-        # Entry plan jelas memisahkan Early Pending dan Confirmed
-        self.assertIn("A. EARLY PENDING PLAN", res_concise)
-        self.assertIn("B. CONFIRMED ENTRY", res_concise)
+        # Entry plan jelas memisahkan Pending Plan dan Confirmed Entry
+        self.assertIn("Pending Plan     :", res_concise)
+        self.assertIn("Confirmed Entry  :", res_concise)
+        self.assertIn("BELUM DIPASANG DI MT5", res_concise)
 
         # Peringatan risiko ringkas
         self.assertIn("Peringatan Risiko: Pergerakan XAUUSD memiliki volatilitas tinggi.", res_concise)
@@ -528,15 +529,25 @@ SINYAL_AKTIF: BUY | ENTRY: 2010.00-2012.00 | SL: 2000.00 | TP1: 2030.00 | TP2: 2
 
         # 4. COMMAND MENU
         self.assertIn("4. COMMAND MENU", out)
-        self.assertIn("• scan       :", out)
-        self.assertIn("• scan detail:", out)
-        self.assertIn("• zona       :", out)
-        self.assertIn("• pantau     :", out)
-        self.assertIn("• jurnal     :", out)
-        self.assertIn("• audit      :", out)
-        self.assertIn("• refresh    :", out)
-        self.assertIn("• help       :", out)
-        self.assertIn("• exit       :", out)
+        self.assertIn("ANALYSIS:", out)
+        self.assertIn("- scan", out)
+        self.assertIn("- scan detail", out)
+        self.assertIn("- scan snr", out)
+        self.assertIn("- scan snr detail", out)
+        self.assertIn("MONITORING:", out)
+        self.assertIn("- pantau", out)
+        self.assertIn("- pantau detail", out)
+        self.assertIn("- pantau smc", out)
+        self.assertIn("- pantau smc detail", out)
+        self.assertIn("- pantau snr", out)
+        self.assertIn("- pantau snr detail", out)
+        self.assertIn("OTHER:", out)
+        self.assertIn("- zona", out)
+        self.assertIn("- jurnal", out)
+        self.assertIn("- audit", out)
+        self.assertIn("- refresh", out)
+        self.assertIn("- help", out)
+        self.assertIn("- exit", out)
 
         # Bebas dari analisa teknikal panjang, info saldo akun, order ticket, dsb
         self.assertNotIn("Balance", out)

@@ -162,7 +162,7 @@ class TestAuditImprovement(unittest.TestCase):
             "data_ok": True,
         }
         dec = {"status": "WAIT", "stages": {}, "reasons": [], "radar_priority": prio}
-        rendered = format_scan_presentation(scan=mock_scan, dec=dec)
+        rendered = format_scan_presentation(scan=mock_scan, dec=dec, detailed=True)
         self.assertIn("A. PRIMARY DIRECTIONAL ZONE", rendered)
         self.assertIn("B. NEAREST RADAR ZONE", rendered)
         self.assertIn("C. BEST VALIDATED ENTRY ZONE                      : NONE", rendered)
@@ -289,7 +289,7 @@ class TestAuditImprovement(unittest.TestCase):
         self.assertIsNone(dec.get("plan"))
         self.assertEqual(dec["stages"].get("zone_touch", {}).get("status"), "FAIL")
 
-        rendered = format_scan_presentation(scan=zs.scan_xauusd_zones(), dec=dec)
+        rendered = format_scan_presentation(scan=zs.scan_xauusd_zones(), dec=dec, detailed=True)
         self.assertIn("C. BEST VALIDATED ENTRY ZONE                      : NONE", rendered)
         self.assertIn("NO ENTRY / WAIT", rendered)
 
@@ -324,7 +324,7 @@ class TestAuditImprovement(unittest.TestCase):
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
             "data_ok": True,
         }
-        rendered = format_scan_presentation(scan=mock_scan, dec=dec_mock)
+        rendered = format_scan_presentation(scan=mock_scan, dec=dec_mock, detailed=True)
         self.assertIn("Zone Touch     : CONFIRMED", rendered)
         self.assertIn("Liquidity Sweep: WAIT", rendered)
         self.assertIn("C. BEST VALIDATED ENTRY ZONE                      : NONE", rendered)
@@ -356,7 +356,7 @@ class TestAuditImprovement(unittest.TestCase):
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
             "data_ok": True,
         }
-        rendered = format_scan_presentation(scan=mock_scan, dec=dec_mock)
+        rendered = format_scan_presentation(scan=mock_scan, dec=dec_mock, detailed=True)
         self.assertIn("Liquidity Sweep: CONFIRMED", rendered)
         self.assertIn("CHoCH/BOS/CISD : WAIT", rendered)
         self.assertIn("C. BEST VALIDATED ENTRY ZONE                      : NONE", rendered)
@@ -401,7 +401,7 @@ class TestAuditImprovement(unittest.TestCase):
             "data_ok": True,
         }
 
-        rendered = format_scan_presentation(scan=mock_scan, dec=dec_mock)
+        rendered = format_scan_presentation(scan=mock_scan, dec=dec_mock, detailed=True)
         self.assertIn("SELL VALID", rendered)
         self.assertIn("C. BEST VALIDATED ENTRY ZONE                      : H1 SUPPLY 2670.00 - 2675.00", rendered)
         self.assertIn("Status: [VALID]", rendered)

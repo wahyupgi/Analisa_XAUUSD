@@ -85,9 +85,14 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
 
     sig = str((decision or {}).get("signal", "WAIT")).upper()
     setup_type = str((decision or {}).get("setup_type", "NONE")).upper()
+    mkt_status = str((decision or {}).get("market_status", "OPEN")).upper()
 
     # Tentukan status ringkas radar
-    if sig in ("BUY", "SELL"):
+    if mkt_status == "DATA UNAVAILABLE":
+        radar_status = "DATA_UNAVAILABLE"
+    elif mkt_status == "CLOSED":
+        radar_status = "MARKET_CLOSED"
+    elif sig in ("BUY", "SELL"):
         radar_status = f"CONFIRMED_{sig}_SETUP"
     elif rej_state in ("BULLISH_REJECTION", "BEARISH_REJECTION"):
         radar_status = f"ZONE_{rej_state}"
@@ -104,8 +109,10 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
     else:
         radar_status = "STANDBY_MONITORING"
 
+    is_live_open = mkt_status == "OPEN"
     return {
         "radar_status": radar_status,
+        "market_status": mkt_status,
         "nearest_support": {
             "label": s1.get("rank_label", "S1") if s1 else "N/A",
             "low": s1.get("low") if s1 else None,
@@ -132,12 +139,12 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
         "events": {
             "zone_approaching": s1_state == "APPROACHING" or r1_state == "APPROACHING",
             "zone_touch": s1_state == "TOUCH" or r1_state == "TOUCH",
-            "zone_rejection": rej_state in ("BULLISH_REJECTION", "BEARISH_REJECTION"),
-            "breakout_alert": bo_state == "VALID_BREAKOUT",
-            "retest_alert": rt_state in ("RETEST_IN_PROGRESS", "RETEST_CONFIRMED"),
+            "zone_rejection": is_live_open and (rej_state in ("BULLISH_REJECTION", "BEARISH_REJECTION")),
+            "breakout_alert": is_live_open and (bo_state == "VALID_BREAKOUT"),
+            "retest_alert": is_live_open and (rt_state in ("RETEST_IN_PROGRESS", "RETEST_CONFIRMED")),
             "zone_broken": len(broken_zones) > 0,
             "zone_invalidated": len(invalid_zones) > 0 or sig == "INVALID",
-            "confirmed_setup": sig in ("BUY", "SELL"),
+            "confirmed_setup": is_live_open and (sig in ("BUY", "SELL")),
             "setup_type": setup_type,
         },
     }
@@ -169,8 +176,10 @@ class SnrAlertTracker:
 
         s1 = radar.get("nearest_support") or {}
         r1 = radar.get("nearest_resistance") or {}
+        mkt_status = str(dec.get("market_status", radar.get("market_status", "OPEN"))).upper()
 
         curr_state = {
+            "market_status": mkt_status,
             "signal": str(dec.get("signal", "WAIT")).upper(),
             "setup_type": str(dec.get("setup_type", "NONE")).upper(),
             "s1_band": (s1.get("low"), s1.get("high")),
@@ -187,6 +196,26 @@ class SnrAlertTracker:
 
         alerts = []
         critical_warnings = []
+
+        # Saat market tutup atau data tidak tersedia, jangan klaim alert live breakout/rejection/setup baru
+        if mkt_status == "CLOSED":
+            if self.last_state.get("market_status") != "CLOSED":
+                alerts.append("[SNR] MARKET CLOSED — ANALISIS HISTORICAL AKTIF (LIVE ENTRY: WAIT)")
+            self.last_state = curr_state
+            return {
+                "alerts": alerts,
+                "critical_warnings": critical_warnings,
+                "state": curr_state,
+            }
+        if mkt_status == "DATA UNAVAILABLE":
+            if self.last_state.get("market_status") != "DATA UNAVAILABLE":
+                alerts.append("[SNR] DATA UNAVAILABLE — HISTORICAL DATA TIDAK TERSEDIA")
+            self.last_state = curr_state
+            return {
+                "alerts": alerts,
+                "critical_warnings": critical_warnings,
+                "state": curr_state,
+            }
 
         # 1. Alert Perubahan Keputusan Setup (BUY / SELL / INVALID)
         if curr_state["signal"] != self.last_state.get("signal"):

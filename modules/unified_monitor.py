@@ -130,9 +130,13 @@ def extract_smc_monitor_summary(scan_result, decision):
     dec = decision or {}
 
     ctx = dec.get("context") or scan.get("context") or {}
-    h4_bias = ctx.get("htf_bias") or scan.get("htf_bias") or "NETRAL"
-    h1_struct = ctx.get("h1_structure") or scan.get("h1_structure") or "NETRAL"
-    m30_status = ctx.get("m30_status") or scan.get("m30_status") or "NETRAL"
+    htf_ctx = scan.get("htf_context") or {}
+    raw_h4 = htf_ctx.get("H4")
+    raw_h1 = htf_ctx.get("H1")
+    raw_m30 = htf_ctx.get("M30")
+    h4_bias = ctx.get("htf_bias") or scan.get("htf_bias") or (raw_h4.get("bias") if isinstance(raw_h4, dict) else raw_h4) or "NETRAL"
+    h1_struct = ctx.get("h1_structure") or scan.get("h1_structure") or (raw_h1.get("bias") if isinstance(raw_h1, dict) else raw_h1) or "NETRAL"
+    m30_status = ctx.get("m30_status") or scan.get("m30_status") or (raw_m30.get("bias") if isinstance(raw_m30, dict) else raw_m30) or "NETRAL"
 
     raw_status = str(dec.get("status", "WAIT")).upper()
     raw_dir = str(dec.get("direction") or "").upper()

@@ -169,7 +169,7 @@ class TestPriorityCompositeAndFarZone(unittest.TestCase):
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
             "radar_priority": prio,
         }
-        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60, "radar_priority": prio})
+        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60, "radar_priority": prio}, detailed=True)
         self.assertIn("Ditolak Evaluasi Lanjutan (Far Zone)     : 5 (Detail Displayed: 5/5)", out)
         for i in range(1, 6):
             self.assertIn(f"{4050.0 + i * 20:.2f}-{4055.0 + i * 20:.2f}", out)
@@ -202,7 +202,7 @@ class TestPriorityCompositeAndFarZone(unittest.TestCase):
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
             "radar_priority": prio,
         }
-        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60, "radar_priority": prio})
+        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60, "radar_priority": prio}, detailed=True)
         self.assertIn("Ditolak Evaluasi Lanjutan (Far Zone)     : 5 (Detail Displayed: 3/5 | Hidden Details: 2)", out)
 
 

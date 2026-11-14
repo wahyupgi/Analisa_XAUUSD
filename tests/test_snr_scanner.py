@@ -19,6 +19,7 @@ from modules.snr import (
     calculate_snr_risk_reward,
     cluster_zones,
     detect_resistance_candidates,
+    detect_snr_market_status,
     detect_support_candidates,
     detect_swings,
     detect_zone_breakout,
@@ -28,6 +29,7 @@ from modules.snr import (
     evaluate_snr_decision,
     evaluate_snr_market_bias,
     evaluate_snr_radar,
+    fetch_snr_market_data,
     format_snr_detail,
     format_snr_summary,
     get_snr_config,
@@ -972,9 +974,251 @@ class TestSnrAdvancedScanner(unittest.TestCase):
         for sec_idx in range(1, 23):
             self.assertIn(f"[{sec_idx}.", out_scan_snr_det["output"])
 
-        # Eksekusi `scan` (SMC)
+        # Eksekusi `scan` (SMC) & `scan detail` (SMC Detail)
         out_scan_smc = xauusd1.execute_cli_command("scan", snapshot=snap)
         self.assertIn("XAUUSD PYTHON SMC SCANNER", out_scan_smc["output"])
+        self.assertIn("1. MARKET BIAS", out_scan_smc["output"])
+        self.assertIn("5. FINAL DECISION", out_scan_smc["output"])
+
+        out_scan_smc_det = xauusd1.execute_cli_command("scan detail", snapshot=snap)
+        self.assertIn("XAUUSD PYTHON SMC SCANNER", out_scan_smc_det["output"])
+        self.assertIn("ATR Diagnostics", out_scan_smc_det["output"])
+
+        # Verifikasi Command Menu di startup presentation & command `help`
+        startup_txt = xauusd1.format_startup_presentation(symbol="XAUUSD", mt5_connected=False)
+        help_res = xauusd1.execute_cli_command("help")
+        for menu_txt in (startup_txt, help_res["output"]):
+            self.assertIn("ANALYSIS:", menu_txt)
+            self.assertIn("- scan", menu_txt)
+            self.assertIn("- scan detail", menu_txt)
+            self.assertIn("- scan snr", menu_txt)
+            self.assertIn("- scan snr detail", menu_txt)
+            self.assertIn("MONITORING:", menu_txt)
+            self.assertIn("- pantau", menu_txt)
+            self.assertIn("- pantau detail", menu_txt)
+            self.assertIn("- pantau smc", menu_txt)
+            self.assertIn("- pantau smc detail", menu_txt)
+            self.assertIn("- pantau snr", menu_txt)
+            self.assertIn("- pantau snr detail", menu_txt)
+            self.assertIn("OTHER:", menu_txt)
+            self.assertIn("- zona", menu_txt)
+            self.assertIn("- jurnal", menu_txt)
+            self.assertIn("- audit", menu_txt)
+            self.assertIn("- refresh", menu_txt)
+            self.assertIn("- help", menu_txt)
+            self.assertIn("- exit", menu_txt)
+
+        # Verifikasi command lama (`zona`, `refresh`, `exit`) tetap berfungsi
+        out_zona = xauusd1.execute_cli_command("zona", snapshot=snap)
+        self.assertEqual(out_zona["output"], out_scan_smc["output"])
+        out_refresh = xauusd1.execute_cli_command("refresh", snapshot=snap)
+        self.assertEqual(out_refresh["output"], out_scan_smc["output"])
+        out_exit = xauusd1.execute_cli_command("exit")
+        self.assertIn("Selesai", out_exit["output"])
+
+    # =========================================================================
+    # TEST 11 — MARKET CLOSED HANDLING (OPEN vs CLOSED vs DATA UNAVAILABLE)
+    # =========================================================================
+    def test_11_market_open_closed_and_data_unavailable_handling(self):
+        """
+        TEST 11 — MARKET CLOSED HANDLING:
+        Uji 3 kondisi wajib:
+        1. MARKET OPEN:
+           - MARKET STATUS : OPEN
+           - SNR ANALYSIS  : AVAILABLE
+           - LIVE ENTRY aktif (BUY / SELL / WAIT).
+        2. MARKET CLOSED dengan historical data tersedia:
+           - MARKET STATUS : CLOSED
+           - DATA SOURCE   : MT5 HISTORICAL
+           - LAST PRICE    : Harga penutupan terakhir
+           - LAST CANDLE   : Timestamp candle terakhir
+           - Analisis H4, H1, M30, M5 tetap dijalankan (M5 : WAIT)
+           - Swing detection, support & resistance detection, zone scoring, dan ranking tetap jalan
+           - Breakout, retest, dan rejection historis tetap ditampilkan dengan penanda HISTORICAL (CLOSED CANDLE)
+           - SNR ANALYSIS  : AVAILABLE
+           - LIVE ENTRY    : WAIT — MARKET CLOSED
+           - FINAL STATUS  : MARKET CLOSED
+           - Jangan klaim sinyal entry live yang bisa dieksekusi saat market tutup (signal=WAIT, entry=None).
+        3. HISTORICAL DATA UNAVAILABLE:
+           - MARKET STATUS : DATA UNAVAILABLE
+           - DATA SOURCE   : DATA UNAVAILABLE
+           - SNR ANALYSIS  : DATA UNAVAILABLE
+           - LIVE ENTRY    : WAIT — DATA UNAVAILABLE
+        """
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        import modules.snr.data_provider as snr_dp
+
+        frames = build_realistic_multi_tf_frames()
+
+        # ---------------------------------------------------------------------
+        # KONDISI 1: MARKET OPEN
+        # ---------------------------------------------------------------------
+        res_open, dec_open, txt_open = scan_snr(
+            symbol="XAUUSD",
+            frames=frames,
+            live=False,
+            detailed=False,
+            market_status="OPEN",
+        )
+        self.assertEqual(res_open["market_status"], "OPEN")
+        self.assertEqual(res_open["snr_analysis"], "AVAILABLE")
+        self.assertIn("MARKET STATUS : OPEN", txt_open)
+        self.assertIn("SNR ANALYSIS  : AVAILABLE", txt_open)
+        self.assertIn(f"LIVE ENTRY    : {dec_open['live_entry']}", txt_open)
+
+        # ---------------------------------------------------------------------
+        # KONDISI 2: MARKET CLOSED DENGAN HISTORICAL DATA TERSEDIA
+        # ---------------------------------------------------------------------
+        # 2a. Uji deteksi otomatis akhir pekan (Sabtu UTC) dengan historical data tersedia
+        prepared_frames = {tf: prepare_snr_frame(df, tf)[0] for tf, df in frames.items()}
+        sat_utc = datetime(2026, 3, 7, 12, 0, 0, tzinfo=timezone.utc)  # Sabtu siang UTC
+        status_weekend = detect_snr_market_status(
+            prepared_frames=prepared_frames,
+            live=True,
+            tick=None,
+            now_utc=sat_utc,
+        )
+        self.assertEqual(status_weekend["market_status"], "CLOSED")
+        self.assertEqual(status_weekend["market_status_label"], "MARKET CLOSED")
+        self.assertEqual(status_weekend["data_source"], "MT5 HISTORICAL")
+        self.assertEqual(status_weekend["snr_analysis"], "AVAILABLE")
+
+        # 2b. Jalankan scan_snr & scan_snr_detail saat market CLOSED
+        res_closed, dec_closed, txt_closed = scan_snr(
+            symbol="XAUUSD",
+            frames=frames,
+            live=False,
+            detailed=False,
+            market_status="CLOSED",
+        )
+        _, _, txt_closed_detail = scan_snr_detail(
+            symbol="XAUUSD",
+            frames=frames,
+            live=False,
+            market_status="CLOSED",
+        )
+
+        # Pastikan status & metadata sesuai spesifikasi
+        self.assertEqual(res_closed["market_status"], "CLOSED")
+        self.assertEqual(res_closed["data_source"], "MT5 HISTORICAL")
+        self.assertEqual(res_closed["snr_analysis"], "AVAILABLE")
+        self.assertGreater(res_closed["last_price"], 0.0)
+        self.assertNotIn(res_closed["last_candle"], ("N/A", "DATA UNAVAILABLE", ""))
+
+        # Pastikan analisis H4, H1, M30, M5 tetap berjalan (swing, S/R, scoring, ranking)
+        for tf in ("H4", "H1", "M30", "M5"):
+            self.assertGreater(len(res_closed["swings_by_tf"][tf]["all_swings"]), 0)
+            self.assertGreater(len(res_closed["scored_zones_by_tf"][tf]), 0)
+        self.assertGreater(
+            len(res_closed["ranked_zones"]["active_supports"]) + len(res_closed["ranked_zones"]["active_resistances"]),
+            0,
+        )
+        self.assertIn(res_closed["market_bias"]["h4"], ("BULLISH", "BEARISH", "SIDEWAYS", "NEUTRAL"))
+        self.assertIn(res_closed["market_bias"]["h1"], ("BULLISH", "BEARISH", "SIDEWAYS", "NEUTRAL"))
+        self.assertIn(res_closed["market_bias"]["m30"], ("BULLISH", "BEARISH", "SIDEWAYS", "NEUTRAL"))
+        self.assertEqual(res_closed["market_bias"]["m5"], "WAIT")
+
+        # Pemisahan analisis historis & sinyal live:
+        # Tidak boleh memberikan sinyal live (signal=WAIT, entry=None, final_status=MARKET CLOSED, live_entry=WAIT — MARKET CLOSED)
+        self.assertEqual(dec_closed["final_status"], "MARKET CLOSED")
+        self.assertEqual(dec_closed["live_entry"], "WAIT — MARKET CLOSED")
+        self.assertEqual(dec_closed["signal"], "WAIT")
+        self.assertEqual(dec_closed["direction"], "NONE")
+        self.assertIsNone(dec_closed["entry"])
+        self.assertIsNone(dec_closed["sl"])
+        self.assertIsNone(dec_closed["tp1"])
+
+        # Verifikasi format output sesuai spesifikasi Section 4
+        self.assertIn("MARKET STATUS : CLOSED", txt_closed)
+        self.assertIn("DATA SOURCE   : MT5 HISTORICAL", txt_closed)
+        self.assertIn(f"LAST PRICE    : {res_closed['last_price']:.2f}", txt_closed)
+        self.assertIn(f"LAST CANDLE   : {res_closed['last_candle']}", txt_closed)
+        self.assertIn(f"H4            : {res_closed['market_bias']['h4']}", txt_closed)
+        self.assertIn(f"H1            : {res_closed['market_bias']['h1']}", txt_closed)
+        self.assertIn(f"M30           : {res_closed['market_bias']['m30']}", txt_closed)
+        self.assertIn("M5            : WAIT", txt_closed)
+        self.assertIn("SUPPORT       :", txt_closed)
+        self.assertIn("RESISTANCE    :", txt_closed)
+        self.assertIn("SNR ANALYSIS  : AVAILABLE", txt_closed)
+        self.assertIn("LIVE ENTRY    : WAIT — MARKET CLOSED", txt_closed)
+        self.assertIn("FINAL STATUS : MARKET CLOSED", txt_closed)
+
+        self.assertIn("MARKET STATUS : CLOSED", txt_closed_detail)
+        self.assertIn("DATA SOURCE   : MT5 HISTORICAL", txt_closed_detail)
+        self.assertIn("SNR ANALYSIS  : AVAILABLE", txt_closed_detail)
+        self.assertIn("LIVE ENTRY    : WAIT — MARKET CLOSED", txt_closed_detail)
+        self.assertIn("FINAL STATUS : MARKET CLOSED", txt_closed_detail)
+
+        # 2c. Uji bahwa setup yang pada candle historis memenuhi syarat BUY tetap dikunci menjadi WAIT — MARKET CLOSED saat market tutup
+        from modules.snr.decision_engine import build_snr_final_decision
+        ev_mock_buy = {
+            "final_status": "BUY",
+            "direction": "BUY",
+            "setup_type": "REJECTION",
+            "buy_status": "CONFIRMED",
+            "sell_status": "WAIT",
+            "zone_label": "S1",
+            "trigger_status": "BULLISH_REJECTION (PINBAR)",
+            "entry_price": 3869.80,
+            "sl": 3864.20,
+            "tp1": 3882.00,
+            "tp2": 3890.00,
+            "rr_status": "1:2.18",
+            "rr_calculation": {"valid": True, "rr_display": "1:2.18", "rr_tp1": 2.18, "rr_tp2": 3.61},
+            "reason": "Bullish rejection di S1",
+        }
+        dec_locked = build_snr_final_decision(
+            entry_validation=ev_mock_buy,
+            market_bias={"h4": "BULLISH", "h1": "BULLISH", "m30": "BULLISH", "m5": "WAIT", "overall_bias": "BULLISH"},
+            price_action={"rejection_summary": "CONFIRMED (HISTORICAL (CLOSED CANDLE))", "breakout_summary": "NOT CONFIRMED", "retest_summary": "NOT CONFIRMED", "momentum_summary": "MODERATE"},
+            market_status="CLOSED",
+            snr_analysis="AVAILABLE",
+        )
+        self.assertEqual(dec_locked["final_status"], "MARKET CLOSED")
+        self.assertEqual(dec_locked["live_entry"], "WAIT — MARKET CLOSED")
+        self.assertEqual(dec_locked["signal"], "WAIT")
+        self.assertEqual(dec_locked["historical_signal"], "BUY")
+        self.assertIsNone(dec_locked["entry"])
+
+        # ---------------------------------------------------------------------
+        # KONDISI 3: HISTORICAL DATA UNAVAILABLE
+        # ---------------------------------------------------------------------
+        res_unavail, dec_unavail, txt_unavail = scan_snr(
+            symbol="XAUUSD",
+            frames={},
+            live=False,
+            detailed=False,
+        )
+        self.assertEqual(res_unavail["market_status"], "DATA UNAVAILABLE")
+        self.assertEqual(res_unavail["data_source"], "DATA UNAVAILABLE")
+        self.assertEqual(res_unavail["snr_analysis"], "DATA UNAVAILABLE")
+        self.assertEqual(dec_unavail["final_status"], "DATA UNAVAILABLE")
+        self.assertEqual(dec_unavail["live_entry"], "WAIT — DATA UNAVAILABLE")
+        self.assertEqual(dec_unavail["signal"], "WAIT")
+        self.assertIn("MARKET STATUS : DATA UNAVAILABLE", txt_unavail)
+        self.assertIn("DATA SOURCE   : DATA UNAVAILABLE", txt_unavail)
+        self.assertIn("LAST PRICE    : DATA UNAVAILABLE", txt_unavail)
+        self.assertIn("LAST CANDLE   : DATA UNAVAILABLE", txt_unavail)
+        self.assertIn("SNR ANALYSIS  : DATA UNAVAILABLE", txt_unavail)
+        self.assertIn("LIVE ENTRY    : WAIT — DATA UNAVAILABLE", txt_unavail)
+
+        # ---------------------------------------------------------------------
+        # KONDISI 4: Verifikasi _fetch_mt5_historical_candles memanggil ambil_data(tf_const, bars)
+        # ---------------------------------------------------------------------
+        called_args = []
+
+        def fake_ambil_data(tf_const, jumlah, percobaan=3):
+            called_args.append((tf_const, jumlah))
+            return frames["H1"].copy()
+
+        with patch.object(snr_dp, "ambil_data", side_effect=fake_ambil_data):
+            df_fetched = snr_dp._fetch_mt5_historical_candles("XAUUSDc", "H1", 220)
+            self.assertIsNotNone(df_fetched)
+            self.assertGreater(len(df_fetched), 0)
+            self.assertEqual(len(called_args), 1)
+            self.assertIsInstance(called_args[0][0], int)
+            self.assertEqual(called_args[0][1], 220)
 
 
 if __name__ == "__main__":

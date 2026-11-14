@@ -23,35 +23,103 @@ def format_snr_summary(scan_result, decision=None):
     price_str = f"{price_val:.2f}" if price_val > 0 else "N/A"
     time_label = sr.get("time_label") or "N/A"
 
-    h4_b = mb.get("h4", "UNCONFIRMED")
-    h1_b = mb.get("h1", "UNCONFIRMED")
-    m30_b = mb.get("m30", "UNCONFIRMED")
-    m5_b = mb.get("m5", "WAIT")
-    snr_status = mb.get("snr_status", "UNCONFIRMED")
+    mkt_status = str(sr.get("market_status") or dec.get("market_status") or "OPEN").strip().upper()
+    if mkt_status in ("MARKET OPEN", "MARKET_OPEN"):
+        mkt_status = "OPEN"
+    elif mkt_status in ("MARKET CLOSED", "MARKET_CLOSED"):
+        mkt_status = "CLOSED"
+    elif mkt_status in ("UNAVAILABLE", "NO_DATA", "DATA UNAVAILABLE"):
+        mkt_status = "DATA UNAVAILABLE"
+
+    data_source = sr.get("data_source") or (
+        "MT5 HISTORICAL"
+        if mkt_status == "CLOSED"
+        else ("DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "MT5 LIVE")
+    )
+    last_price_val = safe_float(sr.get("last_price", price_val), 0.0)
+    last_price_str = (
+        f"{last_price_val:.2f}"
+        if (last_price_val > 0 and mkt_status != "DATA UNAVAILABLE")
+        else "DATA UNAVAILABLE"
+    )
+    last_candle_str = sr.get("last_candle") or (
+        str(sr.get("server_time")) if (sr.get("server_time") and mkt_status != "DATA UNAVAILABLE") else "DATA UNAVAILABLE"
+    )
+    snr_analysis = sr.get("snr_analysis") or dec.get("snr_analysis") or (
+        "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "AVAILABLE"
+    )
+
+    h4_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("h4", "UNCONFIRMED")
+    h1_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("h1", "UNCONFIRMED")
+    m30_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("m30", "UNCONFIRMED")
+    m5_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else ("WAIT" if mkt_status == "CLOSED" else mb.get("m5", "WAIT"))
+    snr_status = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("snr_status", "UNCONFIRMED")
 
     active_sups = ranked.get("active_supports") or []
     active_ress = ranked.get("active_resistances") or []
+
+    if mkt_status == "DATA UNAVAILABLE":
+        sup_summary = "DATA UNAVAILABLE"
+        res_summary = "DATA UNAVAILABLE"
+    else:
+        if active_sups:
+            s0 = active_sups[0]
+            sup_summary = (
+                f"{s0.get('rank_label', 'S1')} {safe_float(s0.get('low')):.2f} - {safe_float(s0.get('high')):.2f} "
+                f"(Grade {s0.get('grade', 'D')} | Score {int(round(safe_float(s0.get('score'))))} | {s0.get('strength_short', 'MODERATE')})"
+            )
+        else:
+            sup_summary = "NONE"
+
+        if active_ress:
+            r0 = active_ress[0]
+            res_summary = (
+                f"{r0.get('rank_label', 'R1')} {safe_float(r0.get('low')):.2f} - {safe_float(r0.get('high')):.2f} "
+                f"(Grade {r0.get('grade', 'D')} | Score {int(round(safe_float(r0.get('score'))))} | {r0.get('strength_short', 'MODERATE')})"
+            )
+        else:
+            res_summary = "NONE"
+
+    sig_final = dec.get("signal", "WAIT")
+    live_entry = dec.get("live_entry") or sr.get("live_entry") or (
+        "WAIT — MARKET CLOSED"
+        if mkt_status == "CLOSED"
+        else ("WAIT — DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else sig_final)
+    )
 
     lines = [
         "====================================================",
         "          XAUUSD SNR ADVANCED SCANNER",
         "====================================================",
         "",
-        f"PRICE       : {price_str}",
-        f"TIME        : {time_label}",
+        f"MARKET STATUS : {mkt_status}",
+        f"DATA SOURCE   : {data_source}",
+        f"LAST PRICE    : {last_price_str}",
+        f"LAST CANDLE   : {last_candle_str}",
+    ]
+    if mkt_status == "OPEN":
+        lines.append(f"PRICE       : {price_str}")
+        lines.append(f"TIME        : {time_label}")
+
+    lines.extend([
         "",
         "MULTI-TF MARKET BIAS",
-        f"H4          : {h4_b}",
-        f"H1          : {h1_b}",
-        f"M30         : {m30_b}",
-        f"M5          : {m5_b}",
+        f"H4            : {h4_b}",
+        f"H1            : {h1_b}",
+        f"M30           : {m30_b}",
+        f"M5            : {m5_b}",
         "",
         f"SNR STATUS  : {snr_status}",
+        f"SUPPORT       : {sup_summary}",
+        f"RESISTANCE    : {res_summary}",
+        "",
+        f"SNR ANALYSIS  : {snr_analysis}",
+        f"LIVE ENTRY    : {live_entry}",
         "",
         "----------------------------------------------------",
         "SUPPORT ZONES",
         "----------------------------------------------------",
-    ]
+    ])
 
     if active_sups:
         for idx_s, sz in enumerate(active_sups[:2]):
@@ -105,6 +173,13 @@ def format_snr_summary(scan_result, decision=None):
     dir_final = dec.get("direction", "NONE")
     reason_final = dec.get("reason", "Waiting for valid SNR confirmation.")
 
+    final_status_lbl = dec.get(
+        "final_status",
+        "MARKET CLOSED"
+        if mkt_status == "CLOSED"
+        else ("DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else sig_final),
+    )
+
     lines.extend([
         "",
         "----------------------------------------------------",
@@ -128,11 +203,13 @@ def format_snr_summary(scan_result, decision=None):
         "----------------------------------------------------",
         "FINAL DECISION",
         "----------------------------------------------------",
+        f"FINAL STATUS : {final_status_lbl}",
         f"SIGNAL     : {sig_final}",
+        f"LIVE ENTRY : {live_entry}",
         f"DIRECTION  : {dir_final}",
     ])
 
-    if sig_final in ("BUY", "SELL") and dec.get("entry") is not None:
+    if mkt_status == "OPEN" and sig_final in ("BUY", "SELL") and dec.get("entry") is not None:
         lines.append(f"ENTRY      : {safe_float(dec.get('entry')):.2f}")
         lines.append(f"SL         : {safe_float(dec.get('sl')):.2f}")
         lines.append(f"TP1        : {safe_float(dec.get('tp1')):.2f}")
@@ -188,10 +265,11 @@ def format_snr_detail(scan_result, decision=None):
     lines.extend([
         "",
         "[1. MARKET OVERVIEW]",
-        f"  • Symbol       : {sr.get('symbol', 'XAUUSD')}",
-        f"  • Price / Bid  : {safe_float(sr.get('price')):.2f} (Ask: {safe_float(sr.get('ask')):.2f}, Spread: {safe_float(sr.get('spread')):.2f})",
-        f"  • Server Time  : {sr.get('server_time', 'N/A')} ({sr.get('time_label', 'N/A')})",
-        f"  • Broker Spec  : Digits={spec.get('digits', 2)}, TickSize={spec.get('tick_size', 0.01)}, TickValue={spec.get('tick_value', 1.0)}, Source={spec.get('source', 'N/A')}",
+        f"  • Symbol        : {sr.get('symbol', 'XAUUSD')}",
+        f"  • Market Status : {sr.get('market_status', 'OPEN')} (Data Source: {sr.get('data_source', 'SNAPSHOT')})",
+        f"  • Last Price    : {safe_float(sr.get('last_price', sr.get('price'))):.2f} (Ask: {safe_float(sr.get('ask')):.2f}, Spread: {safe_float(sr.get('spread')):.2f})",
+        f"  • Last Candle   : {sr.get('last_candle', sr.get('server_time', 'N/A'))} ({sr.get('time_label', 'N/A')})",
+        f"  • Broker Spec   : Digits={spec.get('digits', 2)}, TickSize={spec.get('tick_size', 0.01)}, TickValue={spec.get('tick_value', 1.0)}, Source={spec.get('source', 'N/A')}",
     ])
 
     # 2. ATR Diagnostics
@@ -441,9 +519,13 @@ def format_snr_detail(scan_result, decision=None):
         lines.append("  • RR : NOT CHECKED")
 
     # 21. Final Decision
+    mkt_status = str(sr.get("market_status", dec.get("market_status", "OPEN"))).upper()
+    live_entry = str(dec.get("live_entry", sr.get("live_entry", "WAIT — MARKET CLOSED" if mkt_status == "CLOSED" else ("WAIT — DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else dec.get("signal", "WAIT")))))
     lines.append("")
     lines.append("[21. FINAL DECISION]")
+    lines.append(f"  • FINAL STATUS : {dec.get('final_status', 'MARKET CLOSED' if mkt_status == 'CLOSED' else ('DATA UNAVAILABLE' if mkt_status == 'DATA UNAVAILABLE' else dec.get('signal', 'WAIT')))}")
     lines.append(f"  • SIGNAL    : {dec.get('signal', 'WAIT')}")
+    lines.append(f"  • LIVE ENTRY   : {live_entry}")
     lines.append(f"  • DIRECTION : {dec.get('direction', 'NONE')}")
     lines.append(f"  • REASON    : {dec.get('reason', 'N/A')}")
 

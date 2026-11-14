@@ -124,6 +124,7 @@ def run_snr_scan(
     tick=None,
     live=True,
     has_unclosed_last_bar=False,
+    market_status=None,
     config=None,
 ):
     """
@@ -138,6 +139,7 @@ def run_snr_scan(
         tick=tick,
         live=live,
         has_unclosed_last_bar=has_unclosed_last_bar,
+        market_status=market_status,
         config=cfg,
     )
 
@@ -145,6 +147,8 @@ def run_snr_scan(
     current_price = safe_float(market_data.get("price"), 0.0)
     atr_diag = market_data["atr_diagnostics"]
     symbol_spec = market_data["symbol_spec"]
+    mkt_status = market_data.get("market_status", "OPEN")
+    snr_analysis = market_data.get("snr_analysis", "AVAILABLE")
 
     swings_by_tf = {}
     support_candidates_by_tf = {}
@@ -233,6 +237,14 @@ def run_snr_scan(
         current_price=current_price,
     )
 
+    if mkt_status == "DATA UNAVAILABLE":
+        market_bias["h4"] = "DATA UNAVAILABLE"
+        market_bias["h1"] = "DATA UNAVAILABLE"
+        market_bias["m30"] = "DATA UNAVAILABLE"
+        market_bias["m5"] = "DATA UNAVAILABLE"
+        market_bias["overall_bias"] = "DATA UNAVAILABLE"
+        market_bias["snr_status"] = "DATA UNAVAILABLE"
+
     # Entry Validation pada M5 (atau fallback timeframe terendah yang tersedia jika M5 kosong pada test)
     entry_df = prepared_frames.get("M5")
     if entry_df is None or getattr(entry_df, "empty", True):
@@ -251,15 +263,20 @@ def run_snr_scan(
         has_unclosed_last_bar=False,
     )
 
-    # Perbarui label M5 pada market_bias jika entry_validation mengonfirmasi arah BUY/SELL
-    if entry_validation.get("final_status") == "BUY":
-        market_bias["m5"] = "BULLISH"
+    # Perbarui label M5 pada market_bias hanya ketika market OPEN dan entry_validation mengonfirmasi arah BUY/SELL
+    if mkt_status == "OPEN":
+        if entry_validation.get("final_status") == "BUY":
+            market_bias["m5"] = "BULLISH"
+            if "M5" in market_bias.get("per_timeframe", {}):
+                market_bias["per_timeframe"]["M5"]["bias"] = "BULLISH"
+        elif entry_validation.get("final_status") == "SELL":
+            market_bias["m5"] = "BEARISH"
+            if "M5" in market_bias.get("per_timeframe", {}):
+                market_bias["per_timeframe"]["M5"]["bias"] = "BEARISH"
+    elif mkt_status == "CLOSED":
+        market_bias["m5"] = "WAIT"
         if "M5" in market_bias.get("per_timeframe", {}):
-            market_bias["per_timeframe"]["M5"]["bias"] = "BULLISH"
-    elif entry_validation.get("final_status") == "SELL":
-        market_bias["m5"] = "BEARISH"
-        if "M5" in market_bias.get("per_timeframe", {}):
-            market_bias["per_timeframe"]["M5"]["bias"] = "BEARISH"
+            market_bias["per_timeframe"]["M5"]["bias"] = "WAIT"
 
     focus_zone = entry_validation.get("target_zone")
     price_action = _build_price_action_summary(
@@ -283,10 +300,36 @@ def run_snr_scan(
         price_action["retest_code"] = "RETEST_CONFIRMED"
         price_action["retest_summary"] = "CONFIRMED"
 
+    # Pemisahan analisis historis vs klaim live ketika market CLOSED / DATA UNAVAILABLE
+    if mkt_status == "CLOSED":
+        if price_action.get("breakout_summary") == "CONFIRMED":
+            price_action["breakout_summary"] = "HISTORICAL (CLOSED CANDLE)"
+        if price_action.get("retest_summary") == "CONFIRMED":
+            price_action["retest_summary"] = "HISTORICAL (CLOSED CANDLE)"
+        if price_action.get("rejection_summary") == "CONFIRMED":
+            price_action["rejection_summary"] = "HISTORICAL (CLOSED CANDLE)"
+
+        entry_validation["historical_final_status"] = entry_validation.get("final_status", "WAIT")
+        entry_validation["final_status"] = "WAIT"
+        entry_validation["buy_status"] = "WAIT — MARKET CLOSED"
+        entry_validation["sell_status"] = "WAIT — MARKET CLOSED"
+        entry_validation["trigger_status"] = "WAIT — MARKET CLOSED"
+    elif mkt_status == "DATA UNAVAILABLE":
+        price_action["breakout_summary"] = "DATA UNAVAILABLE"
+        price_action["retest_summary"] = "DATA UNAVAILABLE"
+        price_action["rejection_summary"] = "DATA UNAVAILABLE"
+        price_action["momentum_summary"] = "DATA UNAVAILABLE"
+        entry_validation["final_status"] = "WAIT"
+        entry_validation["buy_status"] = "DATA UNAVAILABLE"
+        entry_validation["sell_status"] = "DATA UNAVAILABLE"
+        entry_validation["trigger_status"] = "DATA UNAVAILABLE"
+
     decision = build_snr_final_decision(
         entry_validation=entry_validation,
         market_bias=market_bias,
         price_action=price_action,
+        market_status=mkt_status,
+        snr_analysis=snr_analysis,
     )
 
     radar = evaluate_snr_radar(
@@ -301,6 +344,13 @@ def run_snr_scan(
         "method": "SNR",
         "symbol": market_data["symbol"],
         "price": market_data["price"],
+        "last_price": market_data.get("last_price", market_data["price"]),
+        "last_candle": market_data.get("last_candle", "DATA UNAVAILABLE"),
+        "market_status": mkt_status,
+        "market_status_label": market_data.get("market_status_label", mkt_status),
+        "data_source": market_data.get("data_source", "SNAPSHOT"),
+        "snr_analysis": snr_analysis,
+        "live_entry": decision.get("live_entry", "WAIT"),
         "bid": market_data["bid"],
         "ask": market_data["ask"],
         "mid": market_data["mid"],
@@ -335,6 +385,8 @@ def evaluate_snr_decision(scan_result):
         scan_result.get("entry_validation"),
         scan_result.get("market_bias"),
         scan_result.get("price_action"),
+        market_status=scan_result.get("market_status", "OPEN"),
+        snr_analysis=scan_result.get("snr_analysis", "AVAILABLE"),
     )
 
 
@@ -345,6 +397,7 @@ def scan_snr(
     tick=None,
     live=True,
     detailed=False,
+    market_status=None,
     config=None,
 ):
     """
@@ -357,6 +410,7 @@ def scan_snr(
             frames=frames,
             tick=tick,
             live=live,
+            market_status=market_status,
             config=config,
         )
         dec = evaluate_snr_decision(res)
@@ -373,6 +427,7 @@ def scan_snr_detail(
     frames=None,
     tick=None,
     live=True,
+    market_status=None,
     config=None,
 ):
     """Shortcut untuk menjalankan `scan snr detail`."""
@@ -383,6 +438,7 @@ def scan_snr_detail(
         tick=tick,
         live=live,
         detailed=True,
+        market_status=market_status,
         config=config,
     )
 

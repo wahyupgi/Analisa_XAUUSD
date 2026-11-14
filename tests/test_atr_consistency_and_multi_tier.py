@@ -95,7 +95,7 @@ class TestAtrConsistencyAndMultiTier(unittest.TestCase):
 
         dec = evaluate_trade_decision(frames=frames, current_price=3891.60, spread=0.24, live=False)
         self.assertAlmostEqual(dec["atr_diagnostics"]["atr_value"], 5.16, places=2)
-        rendered = format_scan_presentation(scan=scan, dec=dec)
+        rendered = format_scan_presentation(scan=scan, dec=dec, detailed=True)
         self.assertIn("ATR Diagnostics", rendered)
         self.assertIn("Source: H1 | Period: 14", rendered)
         self.assertIn("5.16 pt", rendered)

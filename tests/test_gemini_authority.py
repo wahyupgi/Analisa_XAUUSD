@@ -212,11 +212,11 @@ SINYAL_AKTIF: SELL | ENTRY: 2050.00-2052.00 | SL: 2058.00 | TP1: 2040.00 | TP2: 
         output_ui = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
         output_concise = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=False)
         self.assertNotIn("Kandidat Demand  : H1 DEMAND 2000.00 - 2004.00", output_concise)
-        self.assertIn("A. KONDISI PASAR", output_concise)
-        self.assertIn("B. RADAR ZONE", output_concise)
-        self.assertIn("C. ENTRY PLAN", output_concise)
-        self.assertIn("D. FINAL DECISION", output_concise)
-        self.assertIn("E. RISK WARNING", output_concise)
+        self.assertIn("1. MARKET BIAS", output_concise)
+        self.assertIn("2. ZONA UTAMA", output_concise)
+        self.assertIn("3. ENTRY PLAN", output_concise)
+        self.assertIn("4. ENTRY CONFIRMATION", output_concise)
+        self.assertIn("5. FINAL DECISION", output_concise)
 
         # 1. FINAL DECISION: WAIT
         self.assertIn("1. FINAL DECISION", output_ui)
@@ -266,7 +266,7 @@ SINYAL_AKTIF: SELL | ENTRY: 2050.00-2052.00 | SL: 2058.00 | TP1: 2040.00 | TP2: 
         self.assertIsNone(early["best_setup"])
         self.assertIn("Konflik struktur H4 (BULLISH) vs H1 (BEARISH)", early["empty_reason"])
 
-        output_ui = format_scan_presentation(scan=mock_scan, dec=mock_dec, early_setups=early)
+        output_ui = format_scan_presentation(scan=mock_scan, dec=mock_dec, early_setups=early, detailed=True)
         self.assertIn("1. FINAL DECISION", output_ui)
         self.assertIn("WAIT (NO VALID SETUP)", output_ui)
         self.assertIn("Konflik struktur H4 BULLISH vs H1 BEARISH", output_ui)
@@ -296,11 +296,11 @@ SINYAL_AKTIF: SELL | ENTRY: 2050.00-2052.00 | SL: 2058.00 | TP1: 2040.00 | TP2: 
         output_ui = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
         output_concise = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=False)
         self.assertNotIn("Kandidat Demand  : H1 DEMAND 2000.00 - 2004.00", output_concise)
-        self.assertIn("A. KONDISI PASAR", output_concise)
-        self.assertIn("B. RADAR ZONE", output_concise)
-        self.assertIn("C. ENTRY PLAN", output_concise)
-        self.assertIn("D. FINAL DECISION", output_concise)
-        self.assertIn("E. RISK WARNING", output_concise)
+        self.assertIn("1. MARKET BIAS", output_concise)
+        self.assertIn("2. ZONA UTAMA", output_concise)
+        self.assertIn("3. ENTRY PLAN", output_concise)
+        self.assertIn("4. ENTRY CONFIRMATION", output_concise)
+        self.assertIn("5. FINAL DECISION", output_concise)
 
         # Radar zone ada
         self.assertIn("3. RADAR ZONE (ZONA PEMANTAUAN & ZONE ANALYSIS)", output_ui)

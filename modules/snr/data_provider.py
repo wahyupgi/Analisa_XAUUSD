@@ -4,8 +4,9 @@ data_provider.py — Penyedia Data Pasar & Diagnostik ATR Independen untuk SNR A
 Mendukung pembacaan dari MT5 secara read-only maupun penggunaan bersama (shared snapshot)
 dengan Unified Monitor tanpa memodifikasi data milik SMC Scanner.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 import math
+import time
 import traceback
 import numpy as np
 import pandas as pd
@@ -15,7 +16,7 @@ try:
 except Exception:  # pragma: no cover
     mt5 = None
 
-from modules.config import SYMBOL as DEFAULT_APP_SYMBOL
+from modules.config import SYMBOL as DEFAULT_APP_SYMBOL, TIMEFRAMES as APP_TIMEFRAMES
 from modules.mt5_conn import ambil_data, pastikan_mt5_aktif
 from modules.snr.config import (
     FILE_LOG_SNR_AUDIT,
@@ -287,6 +288,248 @@ def compute_atr_diagnostics(frames_dict):
     return diag
 
 
+def _resolve_mt5_tf_constant(tf_name):
+    """Memetakan nama timeframe ('H4', 'H1', 'M30', 'M5') ke konstanta integer MT5."""
+    if isinstance(APP_TIMEFRAMES, dict) and tf_name in APP_TIMEFRAMES:
+        tf_entry = APP_TIMEFRAMES[tf_name]
+        if isinstance(tf_entry, (tuple, list)) and len(tf_entry) >= 1:
+            return tf_entry[0]
+        return tf_entry
+    if mt5 is not None:
+        return getattr(mt5, f"TIMEFRAME_{tf_name}", None)
+    return tf_name
+
+
+def _fetch_mt5_historical_candles(symbol, tf_name, bars):
+    """
+    Mengambil candle historis yang SUDAH TERTUTUP (posisi >= 1) dari MT5 untuk timeframe terkait.
+    Tidak bergantung pada adanya tick baru sehingga tetap berhasil saat market CLOSED.
+    """
+    tf_const = _resolve_mt5_tf_constant(tf_name)
+    df_res = None
+
+    # 1. Gunakan ambil_data standar (posisi 1 = candle closed terakhir)
+    try:
+        df_res = ambil_data(tf_const, int(bars))
+    except TypeError:
+        # Kompatibilitas jika fungsi ambil_data di-mock dengan 3 argumen (symbol, tf, bars)
+        try:
+            df_res = ambil_data(symbol, tf_name, int(bars))
+        except Exception as exc_inner:
+            log_snr_error(f"fetch_snr_market_data({tf_name})", exc_inner)
+            df_res = None
+    except Exception as exc:
+        log_snr_error(f"fetch_snr_market_data({tf_name})", exc)
+        df_res = None
+
+    # 2. Fallback langsung ke mt5.copy_rates_from_pos jika simbol berbeda atau percobaan pertama kosong
+    if (df_res is None or (isinstance(df_res, pd.DataFrame) and df_res.empty)) and mt5 is not None and isinstance(tf_const, int):
+        for sym_try in (symbol, DEFAULT_APP_SYMBOL, "XAUUSDc", "XAUUSD", "XAUUSDm"):
+            if not sym_try:
+                continue
+            try:
+                rates = mt5.copy_rates_from_pos(sym_try, tf_const, 1, int(bars))
+                if rates is not None and len(rates) > 0:
+                    df_tmp = pd.DataFrame(rates)
+                    df_tmp["time"] = pd.to_datetime(df_tmp["time"], unit="s")
+                    df_tmp = df_tmp.set_index("time")
+                    df_res = df_tmp.rename(
+                        columns={
+                            "open": "Open",
+                            "high": "High",
+                            "low": "Low",
+                            "close": "Close",
+                            "tick_volume": "Volume",
+                        }
+                    )
+                    break
+            except Exception:
+                continue
+
+    return df_res
+
+
+def detect_snr_market_status(
+    prepared_frames,
+    symbol=None,
+    tick=None,
+    live=True,
+    snapshot=None,
+    market_status_override=None,
+    now_utc=None,
+    config=None,
+):
+    """
+    Mendeteksi kondisi pasar secara deterministik:
+    - MARKET OPEN   (market_status='OPEN', data_source='MT5 LIVE' / 'SNAPSHOT', snr_analysis='AVAILABLE')
+    - MARKET CLOSED (market_status='CLOSED', data_source='MT5 HISTORICAL', snr_analysis='AVAILABLE')
+    - DATA UNAVAILABLE (market_status='DATA UNAVAILABLE', data_source='DATA UNAVAILABLE', snr_analysis='DATA UNAVAILABLE')
+
+    Tidak menyimpulkan kegagalan data hanya karena tidak adanya tick baru selama
+    candle historis tertutup tetap tersedia.
+    """
+    frames_map = prepared_frames or {}
+    last_close = 0.0
+    last_candle_str = "DATA UNAVAILABLE"
+    last_candle_dt = None
+
+    for tf in ("M5", "M30", "H1", "H4"):
+        df_tf = frames_map.get(tf)
+        if isinstance(df_tf, tuple) and len(df_tf) >= 1:
+            df_tf = df_tf[0]
+        if df_tf is not None and isinstance(df_tf, pd.DataFrame) and not df_tf.empty:
+            c_val = safe_float(df_tf["Close"].iloc[-1], 0.0)
+            if c_val > 0:
+                last_close = c_val
+                if "Time" in df_tf.columns:
+                    raw_t = df_tf["Time"].iloc[-1]
+                    last_candle_str = str(raw_t)
+                    try:
+                        last_candle_dt = pd.Timestamp(raw_t).to_pydatetime().replace(tzinfo=None)
+                    except Exception:
+                        last_candle_dt = None
+                break
+
+    has_historical_data = bool(last_close > 0)
+
+    # Cek override eksplisit (dari parameter, snapshot, atau config)
+    ov = market_status_override
+    if ov is None and isinstance(snapshot, dict):
+        if snapshot.get("market_status") is not None:
+            ov = snapshot.get("market_status")
+        elif snapshot.get("market_closed") is not None:
+            ov = "CLOSED" if snapshot.get("market_closed") else "OPEN"
+    if ov is None and isinstance(config, dict) and config.get("market_status") is not None:
+        ov = config.get("market_status")
+
+    ov_str = str(ov).strip().upper() if ov is not None else ""
+
+    if not has_historical_data or ov_str in ("DATA UNAVAILABLE", "UNAVAILABLE", "NO_DATA"):
+        return {
+            "market_status": "DATA UNAVAILABLE",
+            "market_status_label": "DATA UNAVAILABLE",
+            "data_source": "DATA UNAVAILABLE",
+            "snr_analysis": "DATA UNAVAILABLE",
+            "is_market_open": False,
+            "is_market_closed": False,
+            "data_available": False,
+            "last_price": 0.0,
+            "last_candle": "DATA UNAVAILABLE",
+            "reason": "Data candle historis MT5 tidak tersedia.",
+        }
+
+    if ov_str in ("CLOSED", "MARKET CLOSED", "MARKET_CLOSED"):
+        return {
+            "market_status": "CLOSED",
+            "market_status_label": "MARKET CLOSED",
+            "data_source": "MT5 HISTORICAL",
+            "snr_analysis": "AVAILABLE",
+            "is_market_open": False,
+            "is_market_closed": True,
+            "data_available": True,
+            "last_price": last_close,
+            "last_candle": last_candle_str,
+            "reason": "Market XAUUSD sedang tutup (MARKET CLOSED); menggunakan data historis tertutup terakhir.",
+        }
+
+    is_live_mode = bool(live) or (isinstance(snapshot, dict) and bool(snapshot.get("live", False)))
+    t_bid = safe_float(getattr(tick, "bid", None) if (tick is not None and not isinstance(tick, dict)) else (tick or {}).get("bid"), 0.0)
+    has_live_tick = bool(t_bid > 0)
+
+    if ov_str in ("OPEN", "MARKET OPEN", "MARKET_OPEN"):
+        src = "MT5 LIVE" if (is_live_mode or has_live_tick) else "SNAPSHOT"
+        return {
+            "market_status": "OPEN",
+            "market_status_label": "MARKET OPEN",
+            "data_source": src,
+            "snr_analysis": "AVAILABLE",
+            "is_market_open": True,
+            "is_market_closed": False,
+            "data_available": True,
+            "last_price": t_bid if has_live_tick else last_close,
+            "last_candle": last_candle_str,
+            "reason": "Market XAUUSD sedang buka (MARKET OPEN).",
+        }
+
+    # Mode offline / snapshot test tanpa override eksplisit -> perlakukan sebagai OPEN (SNAPSHOT)
+    if not is_live_mode:
+        return {
+            "market_status": "OPEN",
+            "market_status_label": "MARKET OPEN",
+            "data_source": "SNAPSHOT",
+            "snr_analysis": "AVAILABLE",
+            "is_market_open": True,
+            "is_market_closed": False,
+            "data_available": True,
+            "last_price": t_bid if has_live_tick else last_close,
+            "last_candle": last_candle_str,
+            "reason": "Menggunakan data snapshot pasar.",
+        }
+
+    # Evaluasi otomatis kondisi MARKET CLOSED vs MARKET OPEN pada mode live
+    closed_reasons = []
+
+    # 1. Cek symbol_info.trade_mode dari MT5
+    if mt5 is not None and symbol:
+        try:
+            s_info = mt5.symbol_info(symbol)
+            if s_info is not None:
+                tm = getattr(s_info, "trade_mode", None)
+                disabled_modes = (
+                    getattr(mt5, "SYMBOL_TRADE_MODE_DISABLED", 0),
+                    getattr(mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", 3),
+                )
+                if tm is not None and tm in disabled_modes:
+                    closed_reasons.append("MT5 symbol trade_mode disabled/close-only")
+        except Exception:
+            pass
+
+    # 2. Cek jadwal sesi global XAUUSD (Weekend Closure & Daily Rollover Break dalam UTC)
+    ref_utc = now_utc if isinstance(now_utc, datetime) else datetime.now(timezone.utc)
+    wk = ref_utc.weekday()  # 0=Mon .. 4=Fri, 5=Sat, 6=Sun
+    hr = ref_utc.hour
+    if wk == 5 or (wk == 4 and hr >= 22) or (wk == 6 and hr < 22):
+        closed_reasons.append("Akhir pekan (XAUUSD Weekend Market Closed)")
+    elif wk in (0, 1, 2, 3) and hr == 21:
+        closed_reasons.append("Jeda rollover harian XAUUSD (Daily Market Break)")
+
+    # 3. Cek ketiadaan tick live atau usia candle terakhir (> 2 jam dari waktu UTC saat ini)
+    if not has_live_tick:
+        closed_reasons.append("Tidak ada live tick aktif; menggunakan harga penutupan candle terakhir")
+    elif last_candle_dt is not None:
+        utc_naive = ref_utc.replace(tzinfo=None)
+        age_sec = (utc_naive - last_candle_dt).total_seconds()
+        if age_sec > 7200:
+            closed_reasons.append("Candle terakhir lebih lama dari 2 jam (sesi perdagangan tutup)")
+
+    if closed_reasons:
+        return {
+            "market_status": "CLOSED",
+            "market_status_label": "MARKET CLOSED",
+            "data_source": "MT5 HISTORICAL",
+            "snr_analysis": "AVAILABLE",
+            "is_market_open": False,
+            "is_market_closed": True,
+            "data_available": True,
+            "last_price": last_close,
+            "last_candle": last_candle_str,
+            "reason": "; ".join(closed_reasons),
+        }
+
+    return {
+        "market_status": "OPEN",
+        "market_status_label": "MARKET OPEN",
+        "data_source": "MT5 LIVE",
+        "snr_analysis": "AVAILABLE",
+        "is_market_open": True,
+        "is_market_closed": False,
+        "data_available": True,
+        "last_price": t_bid if has_live_tick else last_close,
+        "last_candle": last_candle_str,
+        "reason": "Market XAUUSD sedang buka (MARKET OPEN).",
+    }
+
+
 def fetch_snr_market_data(
     symbol=None,
     snapshot=None,
@@ -294,6 +537,7 @@ def fetch_snr_market_data(
     tick=None,
     live=True,
     has_unclosed_last_bar=False,
+    market_status=None,
     config=None,
 ):
     """
@@ -301,7 +545,7 @@ def fetch_snr_market_data(
     Urutan prioritas sumber data:
     1. `frames` eksplisit jika diberikan.
     2. `snapshot["frames"]` jika diberikan (misal dari Unified Monitor agar 1x fetch per siklus).
-    3. `ambil_data(symbol, tf, bars)` dari MT5 jika `live=True`.
+    3. `_fetch_mt5_historical_candles(symbol, tf, bars)` dari MT5 jika `live=True`.
     """
     cfg = config or get_snr_config()
     sym = symbol or (snapshot.get("symbol") if isinstance(snapshot, dict) else None) or cfg.get("symbol", DEFAULT_APP_SYMBOL)
@@ -326,11 +570,7 @@ def fetch_snr_market_data(
     for tf in SNR_TIMEFRAMES:
         df_src = raw_frames.get(tf)
         if (df_src is None or (isinstance(df_src, pd.DataFrame) and df_src.empty)) and live and mt5_ready:
-            try:
-                df_src = ambil_data(sym, tf, int(tf_bars.get(tf, 220)))
-            except Exception as exc:
-                log_snr_error(f"fetch_snr_market_data({tf})", exc)
-                df_src = None
+            df_src = _fetch_mt5_historical_candles(sym, tf, int(tf_bars.get(tf, 220)))
 
         df_clean, forming_bar = prepare_snr_frame(df_src, has_unclosed_last_bar=has_unclosed_last_bar)
         prepared_frames[tf] = df_clean
@@ -346,6 +586,8 @@ def fetch_snr_market_data(
     if isinstance(snapshot, dict):
         bid = safe_float(snapshot.get("bid"), 0.0)
         ask = safe_float(snapshot.get("ask"), 0.0)
+        if bid <= 0:
+            bid = safe_float(snapshot.get("snapshot_price") or snapshot.get("current_price") or snapshot.get("mid"), 0.0)
         server_time = snapshot.get("server_time")
         if snapshot.get("live", False) or snapshot.get("mt5_connected", False):
             time_label = "MT5 LIVE"
@@ -359,28 +601,54 @@ def fetch_snr_market_data(
             ask = t_ask
         time_label = "MT5 LIVE"
     elif bid <= 0 and live and mt5_ready and mt5 is not None:
-        try:
-            live_tick = mt5.symbol_info_tick(sym)
-            if live_tick is not None:
-                bid = safe_float(getattr(live_tick, "bid", 0.0), 0.0)
-                ask = safe_float(getattr(live_tick, "ask", 0.0), 0.0)
-                tick = live_tick
-                time_label = "MT5 LIVE"
-        except Exception:
-            pass
-
-    # Fallback harga dari close candle closed terakhir (M5 -> M30 -> H1 -> H4)
-    if bid <= 0:
-        for tf in ("M5", "M30", "H1", "H4"):
-            df_tf = prepared_frames.get(tf)
-            if df_tf is not None and not df_tf.empty:
-                bid = safe_float(df_tf["Close"].iloc[-1], 0.0)
-                if bid > 0:
-                    if server_time is None and "Time" in df_tf.columns:
-                        server_time = str(df_tf["Time"].iloc[-1])
+        for sym_tick in (sym, DEFAULT_APP_SYMBOL, "XAUUSDc", "XAUUSD"):
+            if not sym_tick:
+                continue
+            try:
+                live_tick = mt5.symbol_info_tick(sym_tick)
+                if live_tick is not None and safe_float(getattr(live_tick, "bid", 0.0), 0.0) > 0:
+                    bid = safe_float(getattr(live_tick, "bid", 0.0), 0.0)
+                    ask = safe_float(getattr(live_tick, "ask", 0.0), 0.0)
+                    tick = live_tick
+                    time_label = "MT5 LIVE"
                     break
+            except Exception:
+                continue
 
-    spec = get_symbol_spec(symbol=sym, tick=tick, config=cfg)
+    # Deteksi status pasar (MARKET OPEN / MARKET CLOSED / DATA UNAVAILABLE)
+    mkt_info = detect_snr_market_status(
+        prepared_frames=prepared_frames,
+        symbol=sym,
+        tick=tick if tick is not None else ({"bid": bid, "ask": ask} if bid > 0 else None),
+        live=live,
+        snapshot=snapshot,
+        market_status_override=market_status,
+        config=cfg,
+    )
+    mkt_status = mkt_info["market_status"]
+    data_source = mkt_info["data_source"]
+    snr_analysis = mkt_info["snr_analysis"]
+    last_candle = mkt_info["last_candle"]
+
+    # Saat MARKET CLOSED, gunakan harga penutupan candle terakhir (jangan klaim harga live)
+    if mkt_status == "CLOSED":
+        bid = safe_float(mkt_info["last_price"], 0.0)
+        ask = 0.0
+        time_label = "MT5 HISTORICAL (MARKET CLOSED)"
+        if server_time is None and last_candle != "DATA UNAVAILABLE":
+            server_time = last_candle
+    elif mkt_status == "DATA UNAVAILABLE":
+        bid = 0.0
+        ask = 0.0
+        time_label = "DATA UNAVAILABLE"
+    else:
+        # Fallback harga dari close candle closed terakhir (M5 -> M30 -> H1 -> H4) jika bid belum terisi
+        if bid <= 0:
+            bid = safe_float(mkt_info["last_price"], 0.0)
+            if server_time is None and last_candle != "DATA UNAVAILABLE":
+                server_time = last_candle
+
+    spec = get_symbol_spec(symbol=sym, tick=tick if mkt_status == "OPEN" else None, config=cfg)
     if ask <= 0 and bid > 0:
         ask = round(bid + spec["spread_points"], spec["digits"])
     spread = round(max(0.0, ask - bid), max(2, spec["digits"])) if (bid > 0 and ask > 0) else spec["spread_points"]
@@ -392,6 +660,13 @@ def fetch_snr_market_data(
     return {
         "symbol": sym,
         "price": price,
+        "last_price": price,
+        "last_candle": last_candle,
+        "market_status": mkt_status,
+        "market_status_label": mkt_info["market_status_label"],
+        "data_source": data_source,
+        "snr_analysis": snr_analysis,
+        "market_status_reason": mkt_info["reason"],
         "bid": round(bid, spec["digits"]) if bid > 0 else 0.0,
         "ask": round(ask, spec["digits"]) if ask > 0 else 0.0,
         "mid": round((bid + ask) / 2.0, spec["digits"]) if (bid > 0 and ask > 0) else price,

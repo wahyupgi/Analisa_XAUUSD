@@ -109,7 +109,7 @@ class TestMultiTierFollowupAudit(unittest.TestCase):
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH", "has_conflict": False},
         }
         mock_dec = {"status": "WAIT", "stages": {}, "reasons": [], "radar_priority": prio}
-        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
         self.assertIn("[INVALIDATED / HISTORICAL ZONES", pres)
         self.assertIn("ZONE_H4_INVALID", str(prio.get("invalidated_zones", [])))
         self.assertIn("NONE (Tidak ada zona Low Risk yang memenuhi kriteria)", pres)
@@ -176,7 +176,7 @@ class TestMultiTierFollowupAudit(unittest.TestCase):
             "htf_context": {"H4": "BULLISH", "H1": "BULLISH", "M30": "BULLISH", "has_conflict": False},
         }
         mock_dec = {"status": "WAIT", "stages": {}, "reasons": [], "radar_priority": prio}
-        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
 
         self.assertIn("• A. HIGH RISK ZONES (Aggressive — Peluang Dekat / LTF-MTF):", pres)
         self.assertIn("2645.00-2648.00", pres)
@@ -277,7 +277,7 @@ class TestMultiTierFollowupAudit(unittest.TestCase):
             "htf_context": {"H4": "BULLISH", "H1": "BULLISH", "M30": "BULLISH", "has_conflict": False},
         }
         mock_dec = {"status": "WAIT", "stages": m5_stages_wait, "reasons": [], "radar_priority": prio}
-        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
         self.assertIn("Best Pending Candidate     : H1 DEMAND (2640.00-2645.00) [Grade A | Skor 85.0] — Status: READY", pres)
         self.assertIn("Best Confirmed Candidate   : WAIT", pres)
 
@@ -348,7 +348,7 @@ class TestMultiTierFollowupAudit(unittest.TestCase):
             "htf_context": {"H4": "BEARISH", "H1": "BULLISH", "M30": "BEARISH", "has_conflict": True},
         }
         mock_dec = {"status": "WAIT", "stages": {}, "reasons": ["Konflik H4 vs H1"], "radar_priority": prio_conflict}
-        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
 
         self.assertIn("[WAIT REASON BREAKDOWN]:", pres)
         self.assertIn("PRIMARY BLOCKER        :", pres)
@@ -392,7 +392,7 @@ class TestMultiTierFollowupAudit(unittest.TestCase):
             "zone_evaluation_summary": eval_sum,
         }
         mock_dec = {"status": "WAIT", "stages": {}}
-        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
 
         self.assertIn("[ZONE EVALUATION SUMMARY]:", pres)
         self.assertIn("Total Kandidat Zona      : 10", pres)

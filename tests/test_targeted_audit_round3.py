@@ -155,7 +155,7 @@ class TestTargetedAuditRound3(unittest.TestCase):
             "active_zones": [z_sup, z_dem],
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
         }
-        out_live = format_scan_presentation(scan=scan_live, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60})
+        out_live = format_scan_presentation(scan=scan_live, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60}, detailed=True)
         self.assertIn("Ref: 3891.72 (ASK) -> Proximal: 3914.61", out_live)
         self.assertIn("Ref: 3891.48 (BID) -> Proximal: 3875.11", out_live)
         self.assertNotIn("3891.60 (ASK)", out_live)
@@ -171,7 +171,7 @@ class TestTargetedAuditRound3(unittest.TestCase):
             "active_zones": [z_sup, z_dem],
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
         }
-        out_mid = format_scan_presentation(scan=scan_mid, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60})
+        out_mid = format_scan_presentation(scan=scan_mid, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60}, detailed=True)
         self.assertIn("Ref: 3891.60 (MID)", out_mid)
         self.assertNotIn("3891.60 (ASK)", out_mid)
         self.assertNotIn("3891.60 (BID)", out_mid)
@@ -300,7 +300,7 @@ class TestTargetedAuditRound3(unittest.TestCase):
             "active_zones": [z_75, z_76, z_dem],
             "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
         }
-        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60})
+        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60}, detailed=True)
 
         # Jarak konsisten menggunakan Ask=3891.72 untuk Supply (61.61 pt) dan Bid=3891.48 untuk Demand (16.37 pt)
         self.assertIn("61.61 pt", out)

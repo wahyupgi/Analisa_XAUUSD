@@ -97,7 +97,7 @@ class TestTargetedAuditReconciliation(unittest.TestCase):
         # Presentation rendering
         scan = {"radar_zones": zones, "active_zones": zones, "radar_priority": prio, "current_price": 2650.0}
         dec = {"status": "WAIT", "stages": {}, "reasons": [], "radar_priority": prio}
-        txt = format_scan_presentation(scan=scan, dec=dec, early_setups={"best_setup": None})
+        txt = format_scan_presentation(scan=scan, dec=dec, early_setups={"best_setup": None}, detailed=True)
         self.assertIn("1 zona aktif lainnya berada di luar batas tampilan 5 teratas", txt)
         self.assertIn("Tidak Ditampilkan Batas Tampilan Ranking : 1", txt)
 

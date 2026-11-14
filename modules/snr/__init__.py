@@ -14,6 +14,7 @@ from modules.snr.config import (
 from modules.snr.data_provider import (
     compute_atr14_series,
     compute_atr_diagnostics,
+    detect_snr_market_status,
     fetch_snr_market_data,
     get_symbol_spec,
     log_snr_audit,
@@ -69,6 +70,7 @@ __all__ = [
     "get_snr_config",
     "compute_atr14_series",
     "compute_atr_diagnostics",
+    "detect_snr_market_status",
     "fetch_snr_market_data",
     "get_symbol_spec",
     "log_snr_audit",

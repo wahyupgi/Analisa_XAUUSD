@@ -540,7 +540,7 @@ class TestZoneScannerValidation(unittest.TestCase):
             },
             "reasons": ["Entry valid: trigger M5 BOS bull"],
         }
-        rendered = format_scan_presentation(scan_mock, dec_mock)
+        rendered = format_scan_presentation(scan_mock, dec_mock, detailed=True)
         self.assertIn("XAUUSD PYTHON SMC SCANNER", rendered)
         self.assertIn("MARKET OVERVIEW", rendered)
         self.assertIn("ZONE ANALYSIS", rendered)

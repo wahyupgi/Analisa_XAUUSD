@@ -50,9 +50,19 @@ def format_snr_monitor_section(cycle_result, detailed=False):
     active_sups = ranked.get("active_supports") or []
     active_ress = ranked.get("active_resistances") or []
 
+    mkt_status = str(sr.get("market_status", dec.get("market_status", "OPEN"))).upper()
+    data_source = str(sr.get("data_source", "MT5 HISTORICAL" if mkt_status == "CLOSED" else ("DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "MT5 LIVE")))
+    snr_analysis = str(sr.get("snr_analysis", dec.get("snr_analysis", "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "AVAILABLE")))
+    live_entry = str(dec.get("live_entry", sr.get("live_entry", "WAIT — MARKET CLOSED" if mkt_status == "CLOSED" else ("WAIT — DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else dec.get("signal", "WAIT")))))
+    last_price = safe_float(sr.get("last_price", sr.get("price", 0.0)), 0.0)
+    last_price_str = f"{last_price:.2f}" if (last_price > 0 and mkt_status != "DATA UNAVAILABLE") else "DATA UNAVAILABLE"
+    last_candle = str(sr.get("last_candle", "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "N/A"))
+
     lines = [
         "### B. SNR MONITOR",
         f"STATUS          : OK ({sr.get('snr_status', mb.get('snr_status', 'ACTIVE'))})",
+        f"MARKET STATUS   : {mkt_status} | DATA SOURCE: {data_source} | LAST PRICE: {last_price_str} | LAST CANDLE: {last_candle}",
+        f"SNR ANALYSIS    : {snr_analysis} | LIVE ENTRY: {live_entry}",
         f"MARKET BIAS     : H4={mb.get('h4', 'N/A')} | H1={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')} | M5={mb.get('m5', 'WAIT')} -> {mb.get('overall_bias', 'UNCONFIRMED')}",
     ]
 
@@ -142,6 +152,7 @@ class SnrCycleEngine:
         tick=None,
         live=True,
         detailed=False,
+        market_status=None,
     ):
         """Menjalankan satu siklus evaluasi SNR Monitor dengan isolasi error penuh."""
         self.cycle_count += 1
@@ -153,6 +164,7 @@ class SnrCycleEngine:
                 tick=tick,
                 live=live,
                 config=self.cfg,
+                market_status=market_status,
             )
             dec = evaluate_snr_decision(scan_res)
             radar = scan_res.get("radar") or {}

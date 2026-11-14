@@ -5678,8 +5678,6 @@ def format_scan_presentation(
     out.append("=" * 70)
     out.append("")
 
-    # A. KONDISI PASAR (MARKET OVERVIEW & BIAS)
-    out.append("A. KONDISI PASAR — 2. MARKET BIAS (MARKET OVERVIEW)")
     h4_diag = ctx.get("h4_diagnostic") or ""
     if h4_bias == "NETRAL" and h4_diag:
         h4_str = f"{h4_bias} ({h4_diag})"
@@ -5703,6 +5701,214 @@ def format_scan_presentation(
     price_src = scan.get("price_source") or (f"MT5 Live Tick (Bid: {bid_val:.2f} | Ask: {ask_val:.2f} | Mid: {mid_val:.2f} | Spread: {spread_val:.2f} pt)" if bid_val else f"Candle Close Snapshot ({price:.2f})")
 
     conflict_tag = " [CONFLICT H4 vs H1]" if ctx.get("has_conflict") else ""
+    atr_diag_pres = dec.get("atr_diagnostics") or scan.get("atr_diagnostics")
+    raw_radar = scan.get("radar_zones") or scan.get("active_zones", [])
+    all_radar = [z.to_dict() if hasattr(z, "to_dict") else dict(z) for z in raw_radar]
+    r_prio = dec.get("radar_priority") or scan.get("radar_priority")
+    _pres_atr = atr_diag_pres.get("atr_value") if (isinstance(atr_diag_pres, dict) and atr_diag_pres.get("atr_value")) else 2.0
+    if not r_prio:
+        r_prio = prioritize_radar_zones(
+            all_radar, price, htf_bias=h4_bias, h1_structure=h1_struct,
+            atr=_pres_atr, m5_stages=stages, bid=scan.get("bid"), ask=scan.get("ask"),
+            snapshot_time=scan.get("snapshot_time"), snapshot_id=scan.get("snapshot_id")
+        )
+
+    # =========================================================================
+    # MODE RINGKAS DEFAULT (`scan`, detailed=False) — HANYA 5 BAGIAN UTAMA
+    # =========================================================================
+    if not detailed:
+        # 1. MARKET BIAS
+        out.append("1. MARKET BIAS")
+        out.append(f"- Current Price    : {price:.2f} (Snapshot: {snapshot_time}{bid_ask_str})" if price > 0 else "- Current Price    : N/A")
+        out.append(f"- Sumber Harga     : {price_src}")
+        out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {'CONFIRMED' if status == 'VALID' else 'WAIT'}")
+        out.append(f"- H4 Bias          : {h4_str}")
+        out.append(f"- H1 Structure     : {h1_struct}{conflict_tag}")
+        out.append(f"- M30 Momentum     : {m30_status}")
+        out.append(f"- M5 Trigger       : {'CONFIRMED (' + str(direction) + ')' if status == 'VALID' else 'WAIT'}")
+        out.append("")
+
+        # 2. ZONA UTAMA
+        out.append("2. ZONA UTAMA")
+        pz_c = (r_prio.get("primary_directional_zone") or r_prio.get("primary_zone")) if r_prio else None
+        nz_c = r_prio.get("nearest_radar_zone") if r_prio else None
+        vz_c = r_prio.get("best_validated_entry_zone") if r_prio else None
+
+        if status == "VALID" and vz_c:
+            main_z = vz_c
+            role_label = "Validated Entry Zone (Primary)"
+        elif pz_c:
+            main_z = pz_c
+            role_label = "Primary Directional Zone (Primary Radar Zone)"
+        elif nz_c:
+            main_z = nz_c
+            role_label = "Nearest Radar Zone (Countertrend)" if nz_c.get("is_counter") else "Nearest Radar Zone"
+        elif all_radar:
+            main_z = all_radar[0]
+            role_label = "Radar Zone"
+        else:
+            main_z = None
+            role_label = "NONE"
+
+        if not main_z:
+            out.append("- Zona Prioritas   : NO RADAR ZONE DETECTED.")
+            out.append("- Tipe Zona        : -")
+            out.append("- Rentang Harga    : -")
+            out.append("- Grade & Skor     : -")
+            out.append("- Jarak Saat Ini   : -")
+            out.append("- Status Zona      : TIDAK ADA ZONA AKTIF")
+        else:
+            z_tf = main_z.get("timeframe", "H1")
+            z_type = main_z.get("zone_type", "SUPPLY")
+            z_lo = float(main_z.get("price_low", 0.0))
+            z_hi = float(main_z.get("price_high", 0.0))
+            z_grd = main_z.get("grade", "B")
+            z_sc_str = (
+                f"{float(main_z.get('score', 0.0)):.1f}"
+                if main_z.get("scoring_status") != "DATA_INCOMPLETE"
+                else "DATA INCOMPLETE"
+            )
+            z_fresh = main_z.get("freshness", "FRESH")
+            z_dist = float(main_z.get("distance", 0.0))
+            z_dir = main_z.get("direction_status") or (
+                "ABOVE_PRICE" if z_lo > price else ("BELOW_PRICE" if z_hi < price else "INSIDE_ZONE")
+            )
+            if status == "VALID" and vz_c:
+                z_st_str = "CONFIRMED ENTRY [VALID] (Zona valid untuk entry)"
+            else:
+                app_val = main_z.get("approach")
+                app_tag = f" [{app_val}]" if app_val in ("ZONE_TOUCHED", "INSIDE_ZONE", "APPROACHING", "FAR") else ""
+                ct_tag = " [COUNTERTREND]" if main_z.get("is_counter") else ""
+                z_st_str = f"RADAR{app_tag}{ct_tag} (Zona sedang dipantau)"
+
+            out.append(f"- Zona Prioritas   : {role_label} ({z_tf} {z_type} {z_lo:.2f} - {z_hi:.2f})")
+            out.append(f"- Tipe Zona        : {z_type} ({z_tf})")
+            out.append(f"- Rentang Harga    : {z_lo:.2f} - {z_hi:.2f}")
+            out.append(f"- Grade & Skor     : Grade {z_grd} | Skor: {z_sc_str} ({z_fresh})")
+            out.append(f"- Jarak Saat Ini   : {z_dist:.2f} pt ({z_dir})")
+            out.append(f"- Status Zona      : {z_st_str}")
+        out.append("")
+
+        # 3. ENTRY PLAN
+        out.append("3. ENTRY PLAN")
+        best_p_c = (early_setups or {}).get("best_setup")
+        pending_ready_c = bool(
+            best_p_c
+            and best_p_c.get("valid")
+            and h4_bias in ("BULLISH", "BEARISH")
+            and m30_status not in ("CONFLICT", "INVALID", "WEAK")
+        )
+        confirmed_ready_c = bool(status == "VALID" and plan)
+
+        if confirmed_ready_c:
+            tp2_v = plan.get("tp2")
+            tp_str = f"TP1 {plan.get('tp1', 0.0):.2f}" + (f" | TP2 {tp2_v:.2f}" if tp2_v else "")
+            pend_lbl = (
+                f"READY — PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}]"
+                if pending_ready_c
+                else "TIDAK AKTIF (BELUM DIPASANG DI MT5)"
+            )
+            out.append(f"- Status Rencana   : READY (CONFIRMED ENTRY {direction})")
+            out.append(f"- Confirmed Entry  : CONFIRMED ENTRY — {direction} VALID (Sinyal resmi sudah melewati seluruh validasi)")
+            out.append(f"- Pending Plan     : {pend_lbl}")
+            out.append(f"- Entry Price    : {plan.get('entry_acuan', 0.0):.2f} (Area: {plan.get('entry_min', 0.0):.2f} - {plan.get('entry_max', 0.0):.2f})")
+            out.append(f"- Stop Loss      : {plan.get('sl', 0.0):.2f}")
+            out.append(f"- Take Profit    : {tp_str}")
+            out.append(f"- Risk/Reward    : 1:{plan.get('rr', 0.0):.1f}")
+        elif pending_ready_c:
+            tp2_p = best_p_c.get("tp2")
+            tp_p_str = f"TP1 {best_p_c['tp1']:.2f}" + (f" | TP2 {tp2_p:.2f}" if tp2_p else "")
+            out.append("- Status Rencana   : READY (Pending Plan) | WAIT (Confirmed Entry)")
+            out.append(f"- Pending Plan     : READY — PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}]")
+            out.append("- Confirmed Entry  : WAIT (Bukan sinyal entry terkonfirmasi; menunggu validasi M5 lengkap)")
+            out.append(f"- Entry Price    : {best_p_c['entry_price']:.2f} (Rencana {best_p_c['order_type']} — BELUM DIPASANG DI MT5; pasang limit manual hanya jika siap menanggung risiko)")
+            out.append(f"- Stop Loss      : {best_p_c['sl']:.2f}")
+            out.append(f"- Take Profit    : {tp_p_str}")
+            out.append(f"- Risk/Reward    : 1:{best_p_c['rr']:.1f}")
+        else:
+            if status == "INVALID" or (best_p_c and best_p_c.get("status") == "INVALID" and not all_radar):
+                plan_st = "INVALID"
+            else:
+                plan_st = "WAIT"
+            conf_st = "INVALID" if status == "INVALID" else "WAIT"
+            out.append(f"- Status Rencana   : {plan_st}")
+            out.append(f"- Pending Plan     : {plan_st} — NO PENDING SETUP (BELUM DIPASANG DI MT5)")
+            out.append(f"- Confirmed Entry  : {conf_st} (Belum ada sinyal resmi terkonfirmasi)")
+            out.append("- Entry Price    : -")
+            out.append("- Stop Loss      : -")
+            out.append("- Take Profit    : -")
+            out.append("- Risk/Reward    : -")
+        out.append("")
+
+        # 4. ENTRY CONFIRMATION
+        out.append("4. ENTRY CONFIRMATION")
+        sw_line = f"{sw} ({sw_desc})" if (sw == "CONFIRMED" and sw_desc) else str(sw)
+        tr_line = f"{tr} ({tr_desc})" if (tr == "CONFIRMED" and tr_desc) else str(tr)
+        dp_line = f"{dp} ({dp_desc})" if (dp == "CONFIRMED" and dp_desc) else str(dp)
+        rr_line = (
+            f"CONFIRMED (1:{plan['rr']:.1f})"
+            if (status == "VALID" and plan and plan.get("rr"))
+            else str(rr_st)
+        )
+        out.append(f"- Zone Touch     : {zt}")
+        out.append(f"- Liquidity Sweep: {sw_line}")
+        out.append(f"- CHoCH/BOS/CISD : {tr_line}")
+        out.append(f"- Displacement   : {dp_line}")
+        out.append(f"- Risk/Reward    : {rr_line}")
+        out.append("")
+
+        # 5. FINAL DECISION
+        out.append("5. FINAL DECISION")
+        if status == "VALID" and plan and direction in ("BUY", "SELL"):
+            dec_lbl = f"{direction} VALID (CONFIRMED ENTRY)"
+            main_reason = f"Seluruh validasi entry M5 terpenuhi pada zona {main_z.get('zone_type', '') if main_z else ''}. Sinyal resmi {direction} terkonfirmasi."
+            risk_warn = "Pergerakan XAUUSD memiliki volatilitas tinggi. Wajib pasang Stop Loss di level invalidation dan batasi risiko 0,5%–1,0%."
+        else:
+            dec_lbl = f"{status if status in ('WAIT', 'INVALID') else 'WAIT'} (NO ENTRY / WAIT — Dilarang Buka Posisi Baru)"
+            zt_name_lbl = "Supply" if (main_z and main_z.get("zone_type") == "SUPPLY") else ("Demand" if (main_z and main_z.get("zone_type") == "DEMAND") else "prioritas")
+            if not scan.get("data_ok", True) and not all_radar:
+                main_reason = "Data pasar belum lengkap atau koneksi MT5 tidak tersedia. Belum ada setup valid."
+            elif ctx.get("has_conflict") or any("konflik" in str(r).lower() for r in dec.get("reasons", [])):
+                main_reason = f"Konflik struktur H4 {h4_bias} vs H1 {h1_struct}. Belum ada setup valid."
+            elif h4_bias == "NETRAL":
+                diag_note = f" ({h4_diag})" if h4_diag else ""
+                main_reason = f"Bias H4 masih NETRAL{diag_note}. Belum ada setup valid."
+            elif not main_z:
+                main_reason = "Belum ada zona Supply/Demand aktif yang memenuhi syarat. Belum ada setup valid."
+            elif main_z.get("is_counter") and not pz_c:
+                main_reason = f"Belum ada zona searah bias {h4_bias} yang aktif (zona terdekat bersifat countertrend). Belum ada setup valid."
+            elif zt in ("FAIL", "WAIT"):
+                if pending_ready_c:
+                    main_reason = f"Harga belum menyentuh zona {zt_name_lbl}. Pending Plan READY (belum dipasang di MT5), sedangkan Confirmed Entry WAIT menunggu konfirmasi M5."
+                else:
+                    main_reason = f"Harga belum menyentuh zona {zt_name_lbl}. Menunggu konfirmasi M5."
+            elif sw != "CONFIRMED":
+                main_reason = f"Harga sudah menyentuh zona {zt_name_lbl}, menunggu Liquidity Sweep M5."
+            elif tr != "CONFIRMED":
+                main_reason = "Liquidity Sweep M5 terdeteksi, menunggu konfirmasi CHoCH/BOS/CISD M5."
+            elif dp != "CONFIRMED":
+                main_reason = "Trigger struktur M5 terdeteksi, menunggu candle Displacement yang valid."
+            elif rr_st != "CONFIRMED":
+                main_reason = "Rasio Risk/Reward belum memenuhi syarat minimum. Belum ada setup valid."
+            else:
+                main_reason = "Menunggu konfirmasi M5. Belum ada setup valid."
+
+            if pending_ready_c:
+                risk_warn = "Pergerakan XAUUSD memiliki volatilitas tinggi. Pending Plan memenuhi syarat tetapi BELUM dipasang di MT5 (risiko agresif sebelum konfirmasi M5); wajib pasang Stop Loss."
+            else:
+                risk_warn = "Pergerakan XAUUSD memiliki volatilitas tinggi. Dilarang membuka posisi baru saat status WAIT dan wajib gunakan Stop Loss."
+
+        out.append(f"- Status           : {dec_lbl}")
+        out.append(f"- Alasan Utama     : {main_reason}")
+        out.append(f"- Peringatan Risiko: {risk_warn}")
+        out.append("=" * 70)
+        return "\n".join(out)
+
+    # =========================================================================
+    # MODE DETAIL AUDIT (`scan detail`, detailed=True) — LENGKAP SEPERTI SEBELUMNYA
+    # =========================================================================
+    # A. KONDISI PASAR (MARKET OVERVIEW & BIAS)
+    out.append("A. KONDISI PASAR — 2. MARKET BIAS (MARKET OVERVIEW)")
     out.append(f"- Current Price    : {price:.2f} (Snapshot: {snapshot_time}{bid_ask_str})" if price > 0 else "- Current Price    : N/A")
     out.append(f"- Sumber Harga     : {price_src}")
     out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {'CONFIRMED' if status == 'VALID' else 'WAIT'}")
@@ -5710,7 +5916,6 @@ def format_scan_presentation(
     out.append(f"- H1 Structure     : {h1_struct}")
     out.append(f"- M30 Momentum     : {m30_status}")
     out.append(f"- M5 Trigger       : {m5_trig_str}")
-    atr_diag_pres = dec.get("atr_diagnostics") or scan.get("atr_diagnostics")
     if atr_diag_pres:
         atr_v_str = f"{atr_diag_pres['atr_value']:.2f} pt" if isinstance(atr_diag_pres.get("atr_value"), (int, float)) else "DATA_INCOMPLETE"
         out.append(
@@ -5723,16 +5928,6 @@ def format_scan_presentation(
 
     # B. RADAR ZONE (ZONA PEMANTAUAN & ZONE ANALYSIS)
     out.append("B. RADAR ZONE — 3. RADAR ZONE (ZONA PEMANTAUAN & ZONE ANALYSIS)")
-    raw_radar = scan.get("radar_zones") or scan.get("active_zones", [])
-    all_radar = [z.to_dict() if hasattr(z, "to_dict") else dict(z) for z in raw_radar]
-    r_prio = dec.get("radar_priority") or scan.get("radar_priority")
-    _pres_atr = atr_diag_pres.get("atr_value") if (isinstance(atr_diag_pres, dict) and atr_diag_pres.get("atr_value")) else 2.0
-    if not r_prio:
-        r_prio = prioritize_radar_zones(
-            all_radar, price, htf_bias=h4_bias, h1_structure=h1_struct,
-            atr=_pres_atr, m5_stages=stages, bid=scan.get("bid"), ask=scan.get("ask"),
-            snapshot_time=scan.get("snapshot_time"), snapshot_id=scan.get("snapshot_id")
-        )
     b_hr = r_prio.get("best_high_risk") if r_prio else None
     b_mr = r_prio.get("best_medium_risk") if r_prio else None
     b_lr = r_prio.get("best_low_risk") if r_prio else None

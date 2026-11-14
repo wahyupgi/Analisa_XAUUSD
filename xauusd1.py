@@ -31,12 +31,108 @@ import modules.ai_gemini as _m_ai
 import modules.pantau as _m_pantau
 import modules.zone_scanner as _m_zone
 import modules.state_manager as SM
+import modules.snr as _m_snr
+import modules.unified_monitor as _m_unified
 
 # Expose every function, variable, and helper (including _catat_error, _tutup_mt5, etc.)
 for _mod in (_m_config, _m_utils, _m_mt5, _m_tek, _m_pasar, _m_jurnal, _m_state, _m_ai, _m_pantau, _m_zone):
     for _k, _v in _mod.__dict__.items():
         if not _k.startswith('__'):
             globals()[_k] = _v
+
+# Expose SNR & Unified Monitor functions without overwriting existing SMC exports
+for _mod_ext in (_m_snr, _m_unified):
+    for _k, _v in _mod_ext.__dict__.items():
+        if not _k.startswith('__') and _k not in globals():
+            globals()[_k] = _v
+
+
+def parse_cli_command(cmd_str):
+    """
+    Parser command deterministik untuk membedakan command SMC, SNR, dan Unified Monitor
+    tanpa salah membaca command yang mirip.
+    """
+    raw = str(cmd_str or "").strip().lower()
+    tokens = raw.split()
+    if not tokens:
+        return {"action": "EMPTY", "method": "NONE", "detailed": False}
+
+    if raw in ("scan snr detail", "scanner snr detail", "snr detail"):
+        return {"action": "SCAN", "method": "SNR", "detailed": True}
+    if raw in ("scan snr", "scanner snr", "snr"):
+        return {"action": "SCAN", "method": "SNR", "detailed": False}
+
+    if raw in ("scan detail", "scanner detail", "zona detail", "zone detail", "scan smc detail", "smc detail"):
+        return {"action": "SCAN", "method": "SMC", "detailed": True}
+    if raw in ("zona", "zone", "scanner", "scan", "smc", "scan smc"):
+        return {"action": "SCAN", "method": "SMC", "detailed": False}
+
+    if tokens[0] in ("pantau", "watch"):
+        mon_parsed = _m_unified.parse_monitor_command(raw)
+        return {
+            "action": "PANTAU",
+            "method": mon_parsed["mode"].upper(),
+            "detailed": bool(mon_parsed["detailed"]),
+        }
+
+    return {"action": "OTHER", "method": "NONE", "detailed": False}
+
+
+def execute_cli_command(cmd_str, snapshot=None, max_cycles=1, smc_runner=None, snr_runner=None):
+    """
+    Menjalankan command scan/pantau (SMC, SNR, maupun Unified) dan mengembalikan hasil terstruktur
+    beserta teks outputnya (mendukung penuh pengujian command & integrasi).
+    """
+    parsed = parse_cli_command(cmd_str)
+    act = parsed["action"]
+    method = parsed["method"]
+    detailed = parsed["detailed"]
+
+    if act == "SCAN" and method == "SNR":
+        res, dec, txt = _m_snr.scan_snr(
+            snapshot=snapshot,
+            live=(snapshot is None),
+            detailed=detailed,
+        )
+        return {
+            "parsed": parsed,
+            "scan_result": res,
+            "decision": dec,
+            "output": txt,
+        }
+
+    if act == "SCAN" and method == "SMC":
+        snap = snapshot if snapshot is not None else create_market_snapshot()
+        hasil_scan = scan_xauusd_zones(snapshot=snap)
+        dec = evaluate_trade_decision(snapshot=snap, scan_result=hasil_scan)
+        txt = format_scan_presentation(hasil_scan, dec, detailed=detailed)
+        return {
+            "parsed": parsed,
+            "scan_result": hasil_scan,
+            "decision": dec,
+            "output": txt,
+        }
+
+    if act == "PANTAU":
+        mon = _m_unified.UnifiedMonitor(
+            symbol=SYMBOL,
+            smc_runner=smc_runner,
+            snr_runner=snr_runner,
+        )
+        mode_map = {
+            "UNIFIED": "unified",
+            "SMC": "smc",
+            "SNR": "snr",
+        }
+        m_str = mode_map.get(method, "unified")
+        cycle_res = mon.run_cycle(snapshot=snapshot, mode=m_str, detailed=detailed)
+        return {
+            "parsed": parsed,
+            "cycle_result": cycle_res,
+            "output": cycle_res["formatted_report"],
+        }
+
+    return {"parsed": parsed, "output": ""}
 
 
 def main():
@@ -204,15 +300,20 @@ def main():
         catatan_jebol_otomatis = None
         if cmd.startswith("pantau") or cmd.startswith("watch"):
             teks_ai_terakhir = next((m["parts"][0]["text"] for m in reversed(riwayat_chat) if m["role"] == "model"), "")
-            hasil_pantau = mode_pantau_mt5(tanya, teks_ai_terakhir)
-            if hasil_pantau:
-                catatan_jebol_otomatis = hasil_pantau
-                jawab_refresh = input("\nZona telah ditembus! Ingin AI menjelaskan alasan kenapa jebol & mencari zona baru sekarang? (y/n) [y]: ").strip().lower()
-                if jawab_refresh in ("", "y", "ya", "yes"):
-                    cmd = "refresh"
+            mon_parsed = _m_unified.parse_monitor_command(tanya)
+            if mon_parsed.get("mode") == "legacy_manual":
+                hasil_pantau = mode_pantau_mt5(tanya, teks_ai_terakhir)
+                if hasil_pantau:
+                    catatan_jebol_otomatis = hasil_pantau
+                    jawab_refresh = input("\nZona telah ditembus! Ingin AI menjelaskan alasan kenapa jebol & mencari zona baru sekarang? (y/n) [y]: ").strip().lower()
+                    if jawab_refresh in ("", "y", "ya", "yes"):
+                        cmd = "refresh"
+                    else:
+                        continue
                 else:
                     continue
             else:
+                _m_unified.run_unified_pantau(tanya, teks_ai_terakhir)
                 continue
 
         if cmd.startswith(("ambil ", "tandai ", "skip ", "batal ambil ", "tidak ambil ")):
@@ -241,7 +342,23 @@ def main():
             tampilkan_rekap()
             continue
 
-        if cmd in ("scan detail", "scanner detail", "zona detail", "zone detail"):
+        if cmd in ("scan snr detail", "scanner snr detail", "snr detail"):
+            try:
+                _, _, txt_snr_det = _m_snr.scan_snr_detail()
+                print("\n" + txt_snr_det)
+            except Exception as e_snr_d:
+                print(f"Gagal menjalankan SNR Scanner Detail: {e_snr_d}")
+            continue
+
+        if cmd in ("scan snr", "scanner snr", "snr"):
+            try:
+                _, _, txt_snr = _m_snr.scan_snr(detailed=False)
+                print("\n" + txt_snr)
+            except Exception as e_snr:
+                print(f"Gagal menjalankan SNR Scanner: {e_snr}")
+            continue
+
+        if cmd in ("scan detail", "scanner detail", "zona detail", "zone detail", "scan smc detail", "smc detail"):
             try:
                 snap = create_market_snapshot()
                 hasil_scan = scan_xauusd_zones(snapshot=snap)
@@ -251,7 +368,7 @@ def main():
                 print(f"Gagal menjalankan Zone Scanner Detail: {e_sc}")
             continue
 
-        if cmd in ("zona", "zone", "scanner", "scan", "smc"):
+        if cmd in ("zona", "zone", "scanner", "scan", "smc", "scan smc"):
             try:
                 snap = create_market_snapshot()
                 hasil_scan = scan_xauusd_zones(snapshot=snap)
@@ -292,27 +409,33 @@ def main():
 
         if cmd in ("help", "bantuan", "menu", "?", "panduan"):
             print("\n" + "=" * 70)
-            print("📖 DAFTAR PERINTAH XAUUSD SMC SCANNER")
+            print("📖 DAFTAR PERINTAH XAUUSD SMC & SNR SCANNER")
             print("=" * 70)
             print("1. PERINTAH SCAN & ANALISIS:")
-            print("   • scan         : Ringkasan 5 bagian (Kondisi Pasar, Radar Zone, Entry Plan,")
-            print("                    Keputusan Resmi Python Scanner, Risk Warning)")
-            print("   • scan detail  : Analisis lengkap seluruh kandidat zona HTF & detail teknis")
-            print("   • zona         : Cek status zona supply & demand aktif")
-            print("   • diag         : Diagnostik lengkap filter dan zona yang terdeteksi/ditolak")
-            print("\n2. PERINTAH PEMANTAUAN & EKSEKUSI:")
-            print("   • pantau       : Mode pemantauan real-time MT5 hingga zona tersentuh")
-            print("   • sinyal       : Cek status sinyal aktif yang tersimpan di sistem")
-            print("   • audit        : Audit fakta akun MT5, floating order, pending order & ADR")
+            print("   • scan             : Ringkasan SMC Scanner (Kondisi Pasar, Radar Zone, Entry Plan)")
+            print("   • scan detail      : Analisis lengkap seluruh kandidat zona HTF & detail teknis SMC")
+            print("   • scan snr         : Ringkasan SNR Advanced Scanner (Support & Resistance Independen)")
+            print("   • scan snr detail  : Analisis lengkap 22 bagian audit SNR Advanced Scanner")
+            print("   • zona             : Cek status zona supply & demand SMC aktif")
+            print("   • diag             : Diagnostik lengkap filter dan zona SMC yang terdeteksi/ditolak")
+            print("\n2. PERINTAH PEMANTAUAN (UNIFIED, SMC, & SNR MONITOR):")
+            print("   • pantau           : Unified Monitor ringkas (SMC + SNR + Account MT5)")
+            print("   • pantau detail    : Unified Monitor dengan detail lengkap SMC & SNR")
+            print("   • pantau smc       : Monitoring khusus SMC Scanner (ringkas)")
+            print("   • pantau smc detail: Monitoring khusus SMC Scanner (detail)")
+            print("   • pantau snr       : Monitoring khusus SNR Scanner (ringkas)")
+            print("   • pantau snr detail: Monitoring khusus SNR Scanner (detail)")
+            print("   • sinyal           : Cek status sinyal aktif yang tersimpan di sistem")
+            print("   • audit            : Audit fakta akun MT5, floating order, pending order & ADR")
             print("\n3. PERINTAH JURNAL & MANAJEMEN:")
-            print("   • jurnal       : Rekap riwayat sinyal, winrate, dan evaluasi performa")
-            print("   • ambil <no>   : Tandai sinyal pada jurnal sebagai diambil")
-            print("   • skip <no>    : Batalkan tanda diambil pada sinyal jurnal")
-            print("   • simpan       : Simpan hasil analisis & jurnal ke file Markdown")
-            print("   • refresh      : Perbarui analisis dengan data market MT5 terkini")
+            print("   • jurnal           : Rekap riwayat sinyal, winrate, dan evaluasi performa")
+            print("   • ambil <no>       : Tandai sinyal pada jurnal sebagai diambil")
+            print("   • skip <no>        : Batalkan tanda diambil pada sinyal jurnal")
+            print("   • simpan           : Simpan hasil analisis & jurnal ke file Markdown")
+            print("   • refresh          : Perbarui analisis dengan data market MT5 terkini")
             print("\n4. SISTEM:")
-            print("   • help         : Menampilkan panduan dan daftar perintah ini")
-            print("   • exit         : Keluar dari aplikasi (q / quit / keluar)")
+            print("   • help             : Menampilkan panduan dan daftar perintah ini")
+            print("   • exit             : Keluar dari aplikasi (q / quit / keluar)")
             print("=" * 70)
             continue
 

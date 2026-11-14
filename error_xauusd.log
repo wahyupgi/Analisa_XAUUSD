@@ -7390,3 +7390,463 @@ NoneType: None
 [2026-11-13 16:52:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
 NoneType: None
 
+[2026-11-14 08:50:49] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:50] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-14 08:50:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:53] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-14 08:50:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:54] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 4806, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5113, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price, snapshot=live_snap)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-14 08:50:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:55] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:55] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:55] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 08:50:55] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:55] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:55] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:56] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 4806, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5113, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price, snapshot=live_snap)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-14 09:21:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:21:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:05] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:05] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-14 09:26:06] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:08] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-14 09:26:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:09] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:09] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 4806, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5113, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price, snapshot=live_snap)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-14 09:26:09] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:26:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:27:52] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:27:52] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-14 09:27:55] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:06] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-14 09:28:06] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:07] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 4806, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5113, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price, snapshot=live_snap)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-14 09:28:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:09] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:09] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:09] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-14 09:28:09] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+

@@ -342,8 +342,8 @@ class TestActiveZoneScoringWaitAudit(unittest.TestCase):
         self.assertIsNone(prio["best_low_risk"])
         self.assertEqual(len(prio["low_risk_zones"]), 0)
 
-        # Test output presentation
-        rendered = format_scan_presentation(scan={"radar_zones": [z_ltf], "current_price": curr_p, "radar_priority": prio}, dec={"status": "WAIT", "stages": {}})
+        # Test output presentation (detail audit)
+        rendered = format_scan_presentation(scan={"radar_zones": [z_ltf], "current_price": curr_p, "radar_priority": prio}, dec={"status": "WAIT", "stages": {}}, detailed=True)
         self.assertIn("NONE (Tidak ada zona Low Risk yang memenuhi kriteria)", rendered)
 
     def test_15_atr_data_unavailable(self):

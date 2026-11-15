@@ -1,0 +1,95 @@
+[2026-11-14 14:14:10] [SNR_ERROR] fetch_snr_market_data(H4): SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+TypeError: 'str' object cannot be interpreted as an integer
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\data_provider.py", line 330, in fetch_snr_market_data
+    df_src = ambil_data(sym, tf, int(tf_bars.get(tf, 220)))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\mt5_conn.py", line 44, in ambil_data
+    rates = mt5.copy_rates_from_pos(SYMBOL, tf, 1, jumlah)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+
+[2026-11-14 14:14:10] [SNR_ERROR] fetch_snr_market_data(H1): SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+TypeError: 'str' object cannot be interpreted as an integer
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\data_provider.py", line 330, in fetch_snr_market_data
+    df_src = ambil_data(sym, tf, int(tf_bars.get(tf, 220)))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\mt5_conn.py", line 44, in ambil_data
+    rates = mt5.copy_rates_from_pos(SYMBOL, tf, 1, jumlah)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+
+[2026-11-14 14:14:10] [SNR_ERROR] fetch_snr_market_data(M30): SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+TypeError: 'str' object cannot be interpreted as an integer
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\data_provider.py", line 330, in fetch_snr_market_data
+    df_src = ambil_data(sym, tf, int(tf_bars.get(tf, 220)))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\mt5_conn.py", line 44, in ambil_data
+    rates = mt5.copy_rates_from_pos(SYMBOL, tf, 1, jumlah)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+
+[2026-11-14 14:14:10] [SNR_ERROR] fetch_snr_market_data(M5): SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+TypeError: 'str' object cannot be interpreted as an integer
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\data_provider.py", line 330, in fetch_snr_market_data
+    df_src = ambil_data(sym, tf, int(tf_bars.get(tf, 220)))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\mt5_conn.py", line 44, in ambil_data
+    rates = mt5.copy_rates_from_pos(SYMBOL, tf, 1, jumlah)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SystemError: <built-in function copy_rates_from_pos> returned a result with an exception set
+
+[2026-11-14 14:38:34] [SNR_ERROR] scan_snr: NameError: name 'mkt_status' is not defined
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\scanner.py", line 417, in scan_snr
+    txt = format_snr_presentation(res, decision=dec, detailed=detailed)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\formatter.py", line 548, in format_snr_presentation
+    return format_snr_detail(scan_result, decision=decision)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\formatter.py", line 524, in format_snr_detail
+    lines.append(f"  • FINAL STATUS : {dec.get('final_status', 'MARKET CLOSED' if mkt_status == 'CLOSED' else ('DATA UNAVAILABLE' if mkt_status == 'DATA UNAVAILABLE' else dec.get('signal', 'WAIT')))}")
+                                                                                  ^^^^^^^^^^
+NameError: name 'mkt_status' is not defined
+
+[2026-11-14 14:38:34] [SNR_ERROR] scan_snr: NameError: name 'mkt_status' is not defined
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\scanner.py", line 417, in scan_snr
+    txt = format_snr_presentation(res, decision=dec, detailed=detailed)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\formatter.py", line 548, in format_snr_presentation
+    return format_snr_detail(scan_result, decision=decision)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\formatter.py", line 524, in format_snr_detail
+    lines.append(f"  • FINAL STATUS : {dec.get('final_status', 'MARKET CLOSED' if mkt_status == 'CLOSED' else ('DATA UNAVAILABLE' if mkt_status == 'DATA UNAVAILABLE' else dec.get('signal', 'WAIT')))}")
+                                                                                  ^^^^^^^^^^
+NameError: name 'mkt_status' is not defined
+
+[2026-11-14 14:38:34] [SNR_ERROR] scan_snr: NameError: name 'mkt_status' is not defined
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\scanner.py", line 417, in scan_snr
+    txt = format_snr_presentation(res, decision=dec, detailed=detailed)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\formatter.py", line 548, in format_snr_presentation
+    return format_snr_detail(scan_result, decision=decision)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\snr\formatter.py", line 524, in format_snr_detail
+    lines.append(f"  • FINAL STATUS : {dec.get('final_status', 'MARKET CLOSED' if mkt_status == 'CLOSED' else ('DATA UNAVAILABLE' if mkt_status == 'DATA UNAVAILABLE' else dec.get('signal', 'WAIT')))}")
+                                                                                  ^^^^^^^^^^
+NameError: name 'mkt_status' is not defined
+

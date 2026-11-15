@@ -139,7 +139,7 @@ SINYAL_AKTIF: WAIT | ENTRY: 0.00-0.00 | SL: 0.00 | TP1: 0.00 | TP2: 0.00
 
         mock_scan = {"symbol": "XAUUSD", "current_price": 2050.0, "radar_zones": [], "active_zones": [], "htf_context": ctx, "data_ok": True}
         mock_dec = {"status": "WAIT", "stages": {}, "reasons": []}
-        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
         self.assertIn("- H4 Bias          : NETRAL", pres)
         self.assertIn("Konsolidasi horizontal", pres)
         self.assertIn("5. REASON", pres)

@@ -154,7 +154,7 @@ class TestMultiTierM5ConsistencyAudit(unittest.TestCase):
                 "atr_candle_mode": "CLOSED_CANDLE",
             },
         }
-        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60, "radar_priority": prio})
+        out = format_scan_presentation(scan=scan_mock, dec={"status": "WAIT", "stages": {}, "current_price": 3891.60, "radar_priority": prio}, detailed=True)
         self.assertIn("Audit Raw Scoring: Masuk=8 | Dinilai=8 | Top 5 Tampil=5 | Di Luar Batas Tampilan=3", out)
         self.assertIn("Source: H1 | Period: 14 (CLOSED_CANDLE)", out)
 

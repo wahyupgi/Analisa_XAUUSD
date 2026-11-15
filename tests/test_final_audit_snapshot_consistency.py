@@ -202,7 +202,7 @@ class TestFinalAuditSnapshotConsistency(unittest.TestCase):
             },
             "current_price": 3891.60,
         }
-        out = format_scan_presentation(scan=scan, dec=dec)
+        out = format_scan_presentation(scan=scan, dec=dec, detailed=True)
         self.assertIn("Primary Directional Zone", out)
         self.assertIn("Nearest Radar Zone", out)
         self.assertIn("Confirmed Entry Monitoring Zone", out)
@@ -245,7 +245,7 @@ class TestFinalAuditSnapshotConsistency(unittest.TestCase):
             },
             "current_price": 3891.60,
         }
-        out = format_scan_presentation(scan=scan, dec=dec)
+        out = format_scan_presentation(scan=scan, dec=dec, detailed=True)
         self.assertIn("GLOBAL_M5_SWEEP_STATUS     : FAIL", out)
         self.assertIn("ZONE_SPECIFIC_SWEEP_STATUS : NOT_CHECKED", out)
         self.assertIn("Zone Touch belum terpenuhi", out)

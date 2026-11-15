@@ -72,7 +72,7 @@ class TestRadarPriorityAndRisk(unittest.TestCase):
             "data_ok": True,
         }
         mock_dec = {"status": "WAIT", "stages": {}, "reasons": [], "radar_priority": prio}
-        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=mock_dec, detailed=True)
         
         self.assertIn("Primary Radar Zone", pres)
         self.assertIn("2670.00 - 2675.00", pres)
@@ -325,7 +325,7 @@ class TestRadarPriorityAndRisk(unittest.TestCase):
             "data_ok": True,
         }
         dec = {"status": "WAIT", "stages": {}, "reasons": [], "radar_priority": prio}
-        pres = format_scan_presentation(scan=mock_scan, dec=dec)
+        pres = format_scan_presentation(scan=mock_scan, dec=dec, detailed=True)
 
         self.assertIn("- H4 Bias          : NETRAL (Ranging sempit konsolidasi)", pres)
         self.assertIn("Ranging sempit konsolidasi", pres)

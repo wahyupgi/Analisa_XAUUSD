@@ -145,7 +145,8 @@ class TestMultiTierEngine(unittest.TestCase):
         }
         rendered = format_scan_presentation(
             scan={"radar_zones": [all_logged[0]], "current_price": 2650.0, "zone_evaluation_summary": eval_sum},
-            dec={"status": "WAIT", "stages": {}}
+            dec={"status": "WAIT", "stages": {}},
+            detailed=True,
         )
         self.assertIn("Total Kandidat Zona      : 5", rendered)
         self.assertIn("Jumlah Supply            : 2", rendered)
@@ -342,7 +343,7 @@ class TestMultiTierEngine(unittest.TestCase):
         z = _create_mock_zone("ZONE_NO_ATR", tf="M15", z_type="DEMAND", lo=2640.0, hi=2645.0, dist=5.0)
         z.distance_atr_ratio = None
         res = prioritize_radar_zones([z], 2650.0, htf_bias="BULLISH", atr=None)
-        rendered = format_scan_presentation(scan={"radar_zones": [z], "current_price": 2650.0, "radar_priority": res}, dec={"status": "WAIT", "stages": {}})
+        rendered = format_scan_presentation(scan={"radar_zones": [z], "current_price": 2650.0, "radar_priority": res}, dec={"status": "WAIT", "stages": {}}, detailed=True)
         self.assertIn("DATA INCOMPLETE", rendered)
 
     def test_11_entry_summary_no_contradiction(self):
@@ -363,7 +364,7 @@ class TestMultiTierEngine(unittest.TestCase):
                 "final_decision_reason": "WAIT: Menunggu konfirmasi trigger M5",
             }
         }
-        rend_wait = format_scan_presentation(scan={"radar_zones": [], "current_price": 2650.0}, dec=dec_wait)
+        rend_wait = format_scan_presentation(scan={"radar_zones": [], "current_price": 2650.0}, dec=dec_wait, detailed=True)
         self.assertIn("Kondisi Terpenuhi        : Zone Touch [CONFIRMED]", rend_wait)
         self.assertIn("Liquidity Sweep [WAIT]", rend_wait)
         self.assertNotIn("Semua syarat terpenuhi", rend_wait)
@@ -381,7 +382,7 @@ class TestMultiTierEngine(unittest.TestCase):
                 "final_decision_reason": "BUY VALID",
             }
         }
-        rend_valid = format_scan_presentation(scan={"radar_zones": [], "current_price": 2650.0}, dec=dec_valid)
+        rend_valid = format_scan_presentation(scan={"radar_zones": [], "current_price": 2650.0}, dec=dec_valid, detailed=True)
         self.assertIn("Kondisi Belum Terpenuhi  : None (Semua syarat terpenuhi)", rend_valid)
 
     def test_12_ranking_systems_separation(self):

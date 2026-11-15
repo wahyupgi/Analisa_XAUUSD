@@ -254,7 +254,7 @@ class TestPriorityCompositeAudit(unittest.TestCase):
             "radar_priority": prio,
             "zone_count_reconciliation": prio["zone_count_reconciliation"],
         }
-        report = format_scan_presentation(scan, dec, detailed=False)
+        report = format_scan_presentation(scan, dec, detailed=True)
         self.assertNotIn("Seluruh zona dipantau sebagai RADAR", report)
         self.assertIn("4 zona Radar Qualified aktif dipantau", report)
         self.assertIn("5 zona Far Zone Excluded (dikeluarkan dari pemantauan intraday)", report)

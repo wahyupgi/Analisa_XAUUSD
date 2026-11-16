@@ -78,43 +78,28 @@ def detect_zone_retest(
     bo_status = str(breakout_result.get("status", "NO_BREAKOUT"))
     bo_idx = breakout_result.get("breakout_bar_index")
 
-    # Cari histori breakout valid dalam jendela max_lookback jika breakout_result mencari lebih pendek
-    conf_idx = int(zone.get("confirmed_index", zone.get("formation_index", 0)))
-    search_start = max(conf_idx + 1, n_bars - max_lookback)
-    if bo_idx is None or bo_status == "NO_BREAKOUT":
-        found_idx = None
-        for idx_b in range(search_start, max(search_start, n_bars - 1)):
-            c_b = float(closes[idx_b])
-            o_b = float(opens[idx_b])
-            atr_b = max(0.10, safe_float(atrs[idx_b], ref_atr))
-            if z_type == "RESISTANCE":
-                if c_b > (z_high + 0.15 * atr_b) and (c_b - o_b) >= (0.35 * atr_b):
-                    found_idx = idx_b
-                    break
-            else:
-                if c_b < (z_low - 0.15 * atr_b) and (o_b - c_b) >= (0.35 * atr_b):
-                    found_idx = idx_b
-                    break
-        if found_idx is not None:
-            bo_idx = found_idx
-        else:
-            return {
-                "zone_id": zone.get("zone_id", "UNKNOWN"),
-                "timeframe": tf,
-                "zone_type": z_type,
-                "status": "NO_RETEST",
-                "label": "NO RETEST",
-                "summary_status": "NOT CONFIRMED",
-                "direction": "NONE",
-                "role_reversal": "NONE",
-                "flipped_zone_type": None,
-                "breakout_bar_index": None,
-                "retest_bar_index": None,
-                "retest_bar_time": None,
-                "reaction_confirmed": False,
-                "retest_held": False,
-                "reason": f"Belum ada breakout valid pada {z_type} sehingga retest tidak relevan.",
-            }
+    if bo_status != "VALID_BREAKOUT" or bo_idx is None:
+        return {
+            "zone_id": zone.get("zone_id", "UNKNOWN"),
+            "timeframe": tf,
+            "zone_type": z_type,
+            "status": "NO_RETEST",
+            "label": "NO RETEST",
+            "summary_status": "NOT CONFIRMED",
+            "direction": "NONE",
+            "role_reversal": "NONE",
+            "flipped_zone_type": None,
+            "breakout_bar_index": None,
+            "retest_bar_index": None,
+            "retest_bar_time": None,
+            "retest_origin": "FROM_ABOVE" if z_type == "RESISTANCE" else "FROM_BELOW",
+            "reaction_confirmed": False,
+            "retest_held": False,
+            "reason": (
+                f"Retest {z_type} menunggu breakout valid dari candle closed; "
+                "wick atau breakout pending tidak cukup untuk mengubah peran zona."
+            ),
+        }
 
     bo_idx = int(bo_idx)
     expected_dir = "BULLISH" if z_type == "RESISTANCE" else "BEARISH"
@@ -136,9 +121,29 @@ def detect_zone_retest(
             "breakout_bar_index": bo_idx,
             "retest_bar_index": None,
             "retest_bar_time": None,
+            "retest_origin": "FROM_ABOVE" if z_type == "RESISTANCE" else "FROM_BELOW",
             "reaction_confirmed": False,
             "retest_held": False,
             "reason": f"Breakout baru terjadi pada bar #{bo_idx}; menunggu harga pullback untuk retest.",
+        }
+    if (n_bars - 1 - bo_idx) > max_lookback:
+        return {
+            "zone_id": zone.get("zone_id", "UNKNOWN"),
+            "timeframe": tf,
+            "zone_type": z_type,
+            "status": "NO_RETEST",
+            "label": "NO RETEST",
+            "summary_status": "NOT CONFIRMED",
+            "direction": expected_dir,
+            "role_reversal": "PENDING_" + role_rev,
+            "flipped_zone_type": flipped_type,
+            "breakout_bar_index": bo_idx,
+            "retest_bar_index": None,
+            "retest_bar_time": None,
+            "retest_origin": "FROM_ABOVE" if z_type == "RESISTANCE" else "FROM_BELOW",
+            "reaction_confirmed": False,
+            "retest_held": False,
+            "reason": "Breakout valid terlalu lama untuk mengonfirmasi retest dari histori candle yang tersedia.",
         }
 
     # Evaluasi pergerakan setelah candle breakout (bo_idx + 1 .. n_bars - 1)
@@ -155,8 +160,12 @@ def detect_zone_retest(
         b_range = max(1e-6, b_high - b_low)
 
         if z_type == "RESISTANCE":
-            # Harga kembali menembus turun ke bawah zona -> Retest Gagal
-            if b_close < (z_low - fail_close_atr * b_atr):
+            # Harga kembali menembus turun ke bawah zona -> Retest Gagal (wajib penetrasi kuat >= 0.35 ATR atau konfirmasi lanjutan)
+            pen_fail = z_low - b_close
+            next_stay_below = (k + 1) < n_bars and float(closes[k + 1]) < z_low
+            if pen_fail >= max(fail_close_atr, 0.35) * b_atr or (
+                b_close < (z_low - fail_close_atr * b_atr) and next_stay_below
+            ):
                 failed_bar = int(k)
                 break
             # Harga menguji kembali area bekas resistance (sekarang kandidat support)
@@ -176,8 +185,12 @@ def detect_zone_retest(
                     "directional_close": bool(bullish_close),
                 })
         else:  # SUPPORT yang ditembus ke bawah (sekarang kandidat resistance)
-            # Harga kembali menembus naik ke atas zona -> Retest Gagal (reclaim support)
-            if b_close > (z_high + fail_close_atr * b_atr):
+            # Harga kembali menembus naik ke atas zona -> Retest Gagal (wajib penetrasi kuat >= 0.35 ATR atau konfirmasi lanjutan)
+            pen_fail = b_close - z_high
+            next_stay_above = (k + 1) < n_bars and float(closes[k + 1]) > z_high
+            if pen_fail >= max(fail_close_atr, 0.35) * b_atr or (
+                b_close > (z_high + fail_close_atr * b_atr) and next_stay_above
+            ):
                 failed_bar = int(k)
                 break
             # Harga menguji kembali area bekas support dari bawah
@@ -211,12 +224,33 @@ def detect_zone_retest(
             "breakout_bar_index": bo_idx,
             "retest_bar_index": failed_bar,
             "retest_bar_time": str(times[failed_bar]),
+            "retest_origin": "FROM_ABOVE" if z_type == "RESISTANCE" else "FROM_BELOW",
             "reaction_confirmed": False,
             "retest_held": False,
             "reason": (
                 f"Retest gagal pada bar #{failed_bar}: harga menembus kembali melewati batas zona "
                 f"({z_low:.2f}-{z_high:.2f}) dan membatalkan skenario role-reversal."
             ),
+        }
+
+    if bo_status == "FALSE_BREAKOUT":
+        return {
+            "zone_id": zone.get("zone_id", "UNKNOWN"),
+            "timeframe": tf,
+            "zone_type": z_type,
+            "status": "NO_RETEST",
+            "label": "NO RETEST",
+            "summary_status": "NOT CONFIRMED",
+            "direction": "NONE",
+            "role_reversal": "NONE",
+            "flipped_zone_type": None,
+            "breakout_bar_index": bo_idx,
+            "retest_bar_index": None,
+            "retest_bar_time": None,
+            "retest_origin": "FROM_ABOVE" if z_type == "RESISTANCE" else "FROM_BELOW",
+            "reaction_confirmed": False,
+            "retest_held": False,
+            "reason": f"Breakout pada {z_type} tergolong FALSE BREAKOUT sehingga tidak valid untuk RETEST IN PROGRESS.",
         }
 
     if not retest_touch_bars:
@@ -239,17 +273,20 @@ def detect_zone_retest(
         }
 
     # Harga sudah menyentuh area retest. Cek apakah sudah ada reaksi candle & penutupan searah breakout!
+    # Wajib minimal 2 bar pasca-breakout agar tidak terjadi sinyal premature pada satu candle.
     last_rt = retest_touch_bars[-1]
     rt_idx = int(last_rt["bar_index"])
     last_close = float(closes[-1])
     last_open = float(opens[-1])
+    bars_after_bo = (len(closes) - 1) - int(bo_idx)
 
     if z_type == "RESISTANCE":
         min_retest_low = min(float(x["low"]) for x in retest_touch_bars)
         bounce_pts = max(0.0, last_close - max(z_low, min_retest_low))
         bounce_atr = bounce_pts / last_atr
-        has_bullish_reaction = any(bool(x["directional_close"]) for x in retest_touch_bars) or (
-            last_close > z_high and last_close > last_open and bounce_atr >= confirm_bounce_atr
+        has_bullish_reaction = (bars_after_bo >= 2) and (last_close > last_open) and (
+            any(bool(x["directional_close"]) for x in retest_touch_bars)
+            or (last_close > z_high and bounce_atr >= confirm_bounce_atr)
         )
         held_outside = last_close >= z_high and float(closes[rt_idx:].min()) >= (z_low - 0.05 * last_atr)
 
@@ -267,6 +304,7 @@ def detect_zone_retest(
                 "breakout_bar_index": bo_idx,
                 "retest_bar_index": rt_idx,
                 "retest_bar_time": last_rt["bar_time"],
+                "retest_origin": "FROM_ABOVE",
                 "reaction_confirmed": True,
                 "retest_held": True,
                 "bounce_atr": round(bounce_atr, 3),
@@ -279,8 +317,9 @@ def detect_zone_retest(
         max_retest_high = max(float(x["high"]) for x in retest_touch_bars)
         drop_pts = max(0.0, min(z_high, max_retest_high) - last_close)
         drop_atr = drop_pts / last_atr
-        has_bearish_reaction = any(bool(x["directional_close"]) for x in retest_touch_bars) or (
-            last_close < z_low and last_close < last_open and drop_atr >= confirm_bounce_atr
+        has_bearish_reaction = (bars_after_bo >= 2) and (last_close < last_open) and (
+            any(bool(x["directional_close"]) for x in retest_touch_bars)
+            or (last_close < z_low and drop_atr >= confirm_bounce_atr)
         )
         held_outside = last_close <= z_low and float(closes[rt_idx:].max()) <= (z_high + 0.05 * last_atr)
 
@@ -298,6 +337,7 @@ def detect_zone_retest(
                 "breakout_bar_index": bo_idx,
                 "retest_bar_index": rt_idx,
                 "retest_bar_time": last_rt["bar_time"],
+                "retest_origin": "FROM_BELOW",
                 "reaction_confirmed": True,
                 "retest_held": True,
                 "bounce_atr": round(drop_atr, 3),
@@ -321,6 +361,7 @@ def detect_zone_retest(
         "breakout_bar_index": bo_idx,
         "retest_bar_index": rt_idx,
         "retest_bar_time": last_rt["bar_time"],
+        "retest_origin": "FROM_ABOVE" if z_type == "RESISTANCE" else "FROM_BELOW",
         "reaction_confirmed": False,
         "retest_held": True,
         "reason": (

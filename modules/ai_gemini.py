@@ -41,7 +41,8 @@ from modules.analisis_pasar import (
 )
 from modules.sinyal_jurnal import (
     validasi_sinyal_struktur, cek_status_eksekusi_sinyal,
-    evaluasi_validitas_sinyal, sinyal_masih_aktif, _STATE_PARSER
+    evaluasi_validitas_sinyal, sinyal_masih_aktif, _STATE_PARSER,
+    create_signal_from_decision, normalize_signal_payload,
 )
 from modules.state_manager import (
     SINYAL_AKTIF_DINAMIS, SINYAL_SEBELUMNYA_DINAMIS,
@@ -275,27 +276,24 @@ Harga saat ini: {harga_sekarang}
 
 {data_text}
 
-ATURAN SELEKSI ZONA (LEBIH PENTING DARIPADA JUMLAH ZONA):
-- METODE INTI: Market Structure (BOS/CHoCH), Liquidity Sweep, dan Order Block.
-- FVG hanya konfirmasi zona: wajib >= 0.30 ATR, belum terisi penuh, dan harus overlap secara harga dengan OB fresh H4/H1.
-- Trigger entry: M5 wajib menunjukkan Sweep lalu CHoCH/BOS atau CISD yang searah. Rejection candle saja tidak cukup untuk setup A+.
-- Supply & Demand terpisah, Breaker Block, Fibonacci/OTE, Volume Profile/POC/VAH/VAL, dan swing historis TIDAK BOLEH membentuk zona, menambah skor zona, atau menjadi alasan entry.
-- EMA, RSI, VWAP, SMT, EQH/EQL hanya konteks/filter pendukung; tidak boleh membuat zona sendiri dan tidak boleh mengalahkan struktur H4/H1.
-- DILARANG melonggarkan ambang FVG, memasukkan zona mitigated/OB tested, memakai fallback historis/psikologis, atau membuat zona pengganti saat tidak ada kandidat.
-- Jika tidak ada OB fresh + FVG untouched yang overlap pada H4/H1, status zona = TIDAK ADA ZONA VALID dan keputusan = WAIT.
-- OB dan FVG dari impuls yang sama dihitung sebagai satu setup OB-terkonfirmasi-FVG, bukan dua konfirmasi independen.
+ATURAN ANALISIS MULTI-TIMEFRAME TREND FOLLOWING + SMC CONFIRMATION:
+- METODE UTAMA: H4 menentukan Primary Trend, H1 mengonfirmasi arah atau pullback sehat, M30 mendeteksi setup (TREND_PULLBACK / TREND_CONTINUATION / BREAKOUT_RETEST / REVERSAL), dan M5 mengonfirmasi entry berbasis CLOSED CANDLES.
+- Area Setup mencakup: OB + FVG terkonfirmasi, Unfilled/Partial FVG searah tren, Breakout-Retest S&R/Swing yang valid, dan Pullback Pocket dalam struktur H1/H4 yang utuh (tanpa menebak counter-trend tanpa CHoCH+Sweep+Displacement).
+- Trigger M5 mengikuti tipe setup: Sweep+CHoCH/BOS+Displacement (atau CHoCH/BOS+Displacement+Rejection jelas dari area pullback), BOS+Displacement searah pada Trend Continuation, dan Breakout Close + Held Retest + Rejection/Trigger pada Breakout Retest.
+- Jangan menganggap pullback sehat di M30 sebagai pembalikan tren selama struktur kunci H4/H1 belum jebol.
+- Jika Python Scanner memutuskan VALID -> tampilkan setup sesuai angka resmi scanner beserta `setup_type` dan `reasons`; jika Python Scanner memutuskan WAIT/INVALID -> dilarang mengarang level entry sendiri.
 
 METODE TOP-DOWN (ikuti urutan ini):
 0. DETEKSI LONJAKAN MOMENTUM SATU ARAH & FASE SIDEWAYS-REVERSAL (WAJIB DICEK PERTAMA!):
    - Cek bagian "[Order Flow Institusi & Sideways Reversal]" pada M30 dan M5.
-   - Jika tertulis "🚨 PERINGATAN LONJAKAN MOMENTUM (TICK-VOLUME, BUKAN DATA INSTITUSI) (ONE-WAY IMPULSE AKTIF)", maka DILARANG KERAS memberi sinyal lawan arah (Counter-Trend) karena level teknikal kecil pasti jebol terus! Hanya boleh ikuti arah impuls saat pullback ke FVG/OB searah, atau beri rekomendasi WAIT sampai terbentuk kotak Sideways/Ranging.
-   - Jika pasar baru selesai impuls lalu membentuk "Kotak Ranging / Sideways Pasca-Impuls", cari setup PEMBALIKAN HARGA (Reversal) berkualitas tinggi: yaitu saat harga melakukan Sweep/Manipulasi di batas atas/bawah kotak sideways lalu masuk kembali disertai CHoCH!
-1. ZONA UTAMA: gunakan hanya RADAR ZONA SELEKTIF (OB + FVG) dari H4/H1. Swing W1/D1 hanya referensi likuiditas, bukan zona entry. Prioritaskan A+ lintas H4/H1; jika hanya A satu timeframe, tunggu konfirmasi lebih kuat.
-2. H4 -> bias besar (Market Structure BOS/CHoCH, EMA sebagai filter, korelasi USD) dan pilih zona paling relevan. Sebutkan rentang harga, asal zona, dan waktu terbentuknya.
-3. H1 -> perhalus zona OB fresh + FVG untouched yang overlap. OB tested atau breaker tidak boleh menjadi zona aktif. Cek CISD, EQH/EQL, RSI Divergence, dan VWAP sebagai konteks.
-4. M30 -> konfirmasi konteks dan reaksi harga di zona H4/H1. M30 tidak boleh menciptakan zona entry baru. Periksa sweep, CHoCH/BOS, CISD, retest, EMA/RSI/VWAP.
-5. M5 -> ENTRY presisi: zona harus sudah tervalidasi dari H4/H1. Tunggu Liquidity Sweep M5 lalu CHoCH/BOS atau CISD M5 yang close dan searah. Sweep tanpa perubahan struktur/delivery bukan trigger; CHoCH/CISD tanpa berada di zona valid juga bukan trigger. Jika belum lengkap, WAIT.
-6. SESI, BERITA & MAKRO: nilai apakah waktu sekarang berada di Kill Zone, apakah ADR harian sudah Exhausted (bensin habis), apakah ada SMT Divergence XAUUSD vs XAGUSD, dan apakah ada rilis berita High-Impact USD sebentar lagi.
+   - Jika tertulis "🚨 PERINGATAN LONJAKAN MOMENTUM (TICK-VOLUME, BUKAN DATA INSTITUSI) (ONE-WAY IMPULSE AKTIF)", jangan beri sinyal lawan arah (Counter-Trend); ikuti arah tren saat pullback/continuation valid atau WAIT.
+   - Reversal hanya sah jika ada Sweep likuiditas di ekstrem + CHoCH terkonfirmasi H1/M30/M5 + Displacement kuat.
+1. ZONA & KONTEKS UTAMA: gunakan RADAR ZONA & KEPUTUSAN PYTHON SCANNER sebagai otoritas utama. Swing D1/H4 membatasi likuiditas & target TP.
+2. H4 -> arah tren utama (HH/HL atau LH/LL, BOS/CHoCH, bila tidak jelas = UNCONFIRMED/WAIT).
+3. H1 -> konfirmasi tren H4 atau pullback sehat tanpa konflik struktural serius.
+4. M30 -> deteksi jenis setup (Trend Pullback / Trend Continuation / Breakout Retest / Reversal); bedakan pullback normal vs reversal struktural.
+5. M5 -> konfirmasi entry presisi berbasis candle CLOSE; larangan entry sebelum trigger lengkap & R:R >= 1:1.5.
+6. SESI, BERITA & MAKRO: evaluasi ADR harian, SMT Divergence XAU vs XAG, dan rilis High-Impact News USD.
 
 SISTEM 4 PILAR KONFLUENSI (Evaluasi tiap setup wajib berdasarkan 4 pilar ini):
 
@@ -562,7 +560,7 @@ def _terapkan_otoritas_scanner(target):
 
     # Keputusan mandiri Python Scanner:
     if status_dec == "VALID" and plan and arah_dec:
-        sig_python = dict(
+        sig_python = create_signal_from_decision(dec) or dict(
             arah=str(plan["arah"]).upper(),
             lo=round(float(plan["entry_min"]), 2),
             hi=round(float(plan["entry_max"]), 2),
@@ -571,9 +569,10 @@ def _terapkan_otoritas_scanner(target):
             sl=float(plan["sl"]),
             tp1=float(plan["tp1"]),
             tp2=float(plan["tp2"]),
-            ket=str(plan.get("keterangan", "Python Scanner Valid"))[:100],
+            ket=str(plan.get("keterangan", "Python Scanner Valid"))[:120],
             tipe_strategi="PYTHON SCANNER VALID",
         )
+        sig_python = normalize_signal_payload(sig_python, extra={"tipe_strategi": "PYTHON SCANNER VALID"})
         ok, alasan_v = validasi_sinyal_struktur(sig_python)
         if ok:
             target["sinyal"] = sig_python

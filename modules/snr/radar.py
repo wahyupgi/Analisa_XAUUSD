@@ -150,6 +150,9 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
     }
 
 
+_GLOBAL_LAST_SNR_STATE = {}
+
+
 class SnrAlertTracker:
     """
     Pelacak perubahan status (State-Change Detector) untuk SNR Radar.
@@ -158,10 +161,13 @@ class SnrAlertTracker:
     """
 
     def __init__(self):
-        self.last_state = {}
+        global _GLOBAL_LAST_SNR_STATE
+        self.last_state = dict(_GLOBAL_LAST_SNR_STATE)
 
     def reset(self):
+        global _GLOBAL_LAST_SNR_STATE
         self.last_state = {}
+        _GLOBAL_LAST_SNR_STATE = {}
 
     def evaluate_alerts(self, radar_result, decision, price_action=None):
         """
@@ -170,6 +176,7 @@ class SnrAlertTracker:
         - new_alerts: list of str (hanya alert yang berubah pada siklus ini, berawalan `[SNR]`)
         - critical_warnings: list of str (peringatan kritis yang wajib tetap terlihat)
         """
+        global _GLOBAL_LAST_SNR_STATE
         radar = radar_result or {}
         dec = decision or {}
         pa = price_action or {}
@@ -177,6 +184,18 @@ class SnrAlertTracker:
         s1 = radar.get("nearest_support") or {}
         r1 = radar.get("nearest_resistance") or {}
         mkt_status = str(dec.get("market_status", radar.get("market_status", "OPEN"))).upper()
+
+        bo_zone = str(pa.get("breakout_zone_label") or "").strip()
+        bo_is_hist = bool(
+            pa.get("breakout_is_historical")
+            or (pa.get("breakout_detail") or {}).get("is_historical")
+        )
+        rt_zone = str(pa.get("retest_zone_label") or "").strip()
+        rt_is_hist = bool(
+            pa.get("retest_is_historical")
+            or (pa.get("retest_detail") or {}).get("is_historical")
+        )
+        rej_zone = str(pa.get("rejection_zone_label") or "").strip()
 
         curr_state = {
             "market_status": mkt_status,
@@ -188,8 +207,13 @@ class SnrAlertTracker:
             "r1_state": str(r1.get("state", "NONE")).upper(),
             "breakout_code": str(pa.get("breakout_code", "NO_BREAKOUT")).upper(),
             "breakout_dir": str(pa.get("breakout_direction", "NONE")).upper(),
+            "breakout_zone": bo_zone,
+            "breakout_is_hist": bo_is_hist,
             "retest_code": str(pa.get("retest_code", "NO_RETEST")).upper(),
+            "retest_zone": rt_zone,
+            "retest_is_hist": rt_is_hist,
             "rejection_code": str(pa.get("rejection_code", "NONE")).upper(),
+            "rejection_zone": rej_zone,
             "broken_count": int(radar.get("broken_zone_count", 0)),
             "invalid_count": int(radar.get("invalidated_zone_count", 0)),
         }
@@ -202,6 +226,7 @@ class SnrAlertTracker:
             if self.last_state.get("market_status") != "CLOSED":
                 alerts.append("[SNR] MARKET CLOSED — ANALISIS HISTORICAL AKTIF (LIVE ENTRY: WAIT)")
             self.last_state = curr_state
+            _GLOBAL_LAST_SNR_STATE = dict(curr_state)
             return {
                 "alerts": alerts,
                 "critical_warnings": critical_warnings,
@@ -211,6 +236,7 @@ class SnrAlertTracker:
             if self.last_state.get("market_status") != "DATA UNAVAILABLE":
                 alerts.append("[SNR] DATA UNAVAILABLE — HISTORICAL DATA TIDAK TERSEDIA")
             self.last_state = curr_state
+            _GLOBAL_LAST_SNR_STATE = dict(curr_state)
             return {
                 "alerts": alerts,
                 "critical_warnings": critical_warnings,
@@ -226,34 +252,44 @@ class SnrAlertTracker:
             elif curr_state["signal"] == "INVALID":
                 alerts.append("[SNR] SETUP / ZONA INVALID")
 
-        # 2. Alert Perubahan Rejection
-        if curr_state["rejection_code"] != self.last_state.get("rejection_code"):
-            if curr_state["rejection_code"] == "BULLISH_REJECTION":
-                alerts.append("[SNR] SUPPORT REJECTION TERKONFIRMASI")
-            elif curr_state["rejection_code"] == "BEARISH_REJECTION":
-                alerts.append("[SNR] RESISTANCE REJECTION TERKONFIRMASI")
-
-        # 3. Alert Perubahan Breakout
+        # 2. Alert Perubahan Rejection (dengan identitas zona)
         if (
+            curr_state["rejection_code"] != self.last_state.get("rejection_code")
+            or curr_state["rejection_zone"] != self.last_state.get("rejection_zone")
+        ):
+            rej_suffix = f" ({rej_zone})" if rej_zone and rej_zone != "NONE" else ""
+            if curr_state["rejection_code"] == "BULLISH_REJECTION":
+                alerts.append(f"[SNR] SUPPORT REJECTION TERKONFIRMASI{rej_suffix}")
+            elif curr_state["rejection_code"] == "BEARISH_REJECTION":
+                alerts.append(f"[SNR] RESISTANCE REJECTION TERKONFIRMASI{rej_suffix}")
+
+        # 3. Alert Perubahan Breakout (hanya untuk breakout aktif fresh, sertakan identitas zona)
+        if not bo_is_hist and (
             curr_state["breakout_code"] != self.last_state.get("breakout_code")
             or curr_state["breakout_dir"] != self.last_state.get("breakout_dir")
+            or curr_state["breakout_zone"] != self.last_state.get("breakout_zone")
         ):
+            bo_suffix = f" ({bo_zone})" if bo_zone and bo_zone != "NONE" else ""
             if curr_state["breakout_code"] == "VALID_BREAKOUT":
                 if curr_state["breakout_dir"] == "BULLISH":
-                    alerts.append("[SNR] RESISTANCE BREAKOUT TERKONFIRMASI")
+                    alerts.append(f"[SNR] RESISTANCE BREAKOUT TERKONFIRMASI{bo_suffix}")
                 else:
-                    alerts.append("[SNR] SUPPORT BREAKDOWN TERKONFIRMASI")
+                    alerts.append(f"[SNR] SUPPORT BREAKDOWN TERKONFIRMASI{bo_suffix}")
             elif curr_state["breakout_code"] == "FALSE_BREAKOUT":
-                alerts.append("[SNR] FALSE BREAKOUT TERDETEKSI")
+                alerts.append(f"[SNR] FALSE BREAKOUT TERDETEKSI{bo_suffix}")
 
-        # 4. Alert Perubahan Retest
-        if curr_state["retest_code"] != self.last_state.get("retest_code"):
+        # 4. Alert Perubahan Retest (hanya jika aktif fresh, sertakan identitas zona)
+        if not rt_is_hist and (
+            curr_state["retest_code"] != self.last_state.get("retest_code")
+            or curr_state["retest_zone"] != self.last_state.get("retest_zone")
+        ):
+            rt_suffix = f" ({rt_zone})" if rt_zone and rt_zone != "NONE" else ""
             if curr_state["retest_code"] == "RETEST_CONFIRMED":
-                alerts.append("[SNR] RETEST TERKONFIRMASI")
+                alerts.append(f"[SNR] RETEST TERKONFIRMASI{rt_suffix}")
             elif curr_state["retest_code"] == "RETEST_IN_PROGRESS":
-                alerts.append("[SNR] RETEST SEDANG BERLANGSUNG")
+                alerts.append(f"[SNR] RETEST SEDANG BERLANGSUNG{rt_suffix}")
             elif curr_state["retest_code"] == "RETEST_FAILED":
-                alerts.append("[SNR] RETEST GAGAL")
+                alerts.append(f"[SNR] RETEST GAGAL{rt_suffix}")
 
         # 5. Alert Interaksi S1 & R1 (Approaching / Touch)
         if curr_state["s1_state"] != self.last_state.get("s1_state") or curr_state["s1_band"] != self.last_state.get("s1_band"):
@@ -282,6 +318,7 @@ class SnrAlertTracker:
             critical_warnings.append("[SNR CRITICAL] Setup/Zona fokus saat ini telah INVALIDATED.")
 
         self.last_state = curr_state
+        _GLOBAL_LAST_SNR_STATE = dict(curr_state)
         return {
             "alerts": alerts,
             "critical_warnings": critical_warnings,

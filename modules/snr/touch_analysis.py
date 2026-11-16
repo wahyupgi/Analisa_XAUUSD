@@ -49,7 +49,7 @@ def analyze_zone_touches(
 
     if clean_df.empty or z_high <= 0:
         empty_res = {
-            "classification": "UNTESTED",
+            "classification": "UNCONFIRMED",
             "valid_touch_count": 0,
             "wick_only_count": 0,
             "total_interactions": 0,
@@ -63,13 +63,19 @@ def analyze_zone_touches(
             "absorption_warning": False,
             "is_broken": False,
             "is_invalidated": False,
+            "lifecycle_status": "UNCONFIRMED",
+            "lifecycle_event": "UNCONFIRMED",
+            "reclaim_status": "UNCONFIRMED",
             "first_break_index": None,
             "touch_quality_score_15": 11.0,
-            "reason": "No post-confirmation bars available; treated as UNTESTED.",
+            "reason": "Closed candle pasca-konfirmasi tidak tersedia; lifecycle zona belum dapat dipastikan.",
         }
         updated = dict(zone)
         updated["touch_status"] = "UNTESTED"
         updated["touch_count"] = 0
+        updated["lifecycle_status"] = "UNCONFIRMED"
+        updated["lifecycle_event"] = "UNCONFIRMED"
+        updated["reclaim_status"] = "UNCONFIRMED"
         updated["touch_analysis"] = empty_res
         return updated
 
@@ -90,10 +96,13 @@ def analyze_zone_touches(
 
     is_broken = False
     is_invalidated = False
+    unconfirmed_break = False
     first_break_index = None
     consecutive_beyond = 0
     price_left_zone_since_last_touch = True
     last_interaction_bar = None
+    last_lifecycle_event = "ACTIVE"
+    last_lifecycle_event_time = None
 
     for k in range(start_idx, n_bars):
         if k in seen_bar_indices:
@@ -112,20 +121,37 @@ def analyze_zone_touches(
             if b_low > z_high + (0.05 * b_atr):
                 price_left_zone_since_last_touch = True
 
-            # Cek penembusan ke bawah support
-            if b_close < (z_low - broken_close_atr * b_atr):
-                is_broken = True
-                consecutive_beyond += 1
+            # Hanya close candle yang dapat mengubah lifecycle; wick tetap sekadar interaksi.
+            if unconfirmed_break:
+                if b_close < z_low:
+                    penetration_atr = (z_low - b_close) / b_atr
+                    consecutive_beyond = consecutive_beyond + 1 if penetration_atr >= broken_close_atr else 0
+                    if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid:
+                        is_broken = True
+                        is_invalidated = True
+                    elif penetration_atr >= broken_close_atr:
+                        is_broken = True
+                else:
+                    consecutive_beyond = 0
+                continue
+            if b_close < z_low:
+                unconfirmed_break = True
                 if first_break_index is None:
                     first_break_index = int(k)
-                if b_close < (z_low - invalid_close_atr * b_atr) or consecutive_beyond >= consec_invalid:
+                penetration_atr = (z_low - b_close) / b_atr
+                consecutive_beyond = int(penetration_atr >= broken_close_atr)
+                if penetration_atr >= invalid_close_atr:
+                    is_broken = True
                     is_invalidated = True
+                elif penetration_atr >= broken_close_atr:
+                    is_broken = True
                 continue
-            else:
-                consecutive_beyond = 0
 
             # Cek apakah candle menyentuh/memasuki zona support
             touches_zone = (b_low <= z_high + 0.04 * b_atr) and (b_high >= z_low - 0.04 * b_atr)
+            if touches_zone:
+                last_lifecycle_event = "SWEEP" if b_low < z_low and b_close >= z_low else "TOUCHED"
+                last_lifecycle_event_time = str(times[k])
             if not touches_zone:
                 continue
 
@@ -177,19 +203,35 @@ def analyze_zone_touches(
             if b_high < z_low - (0.05 * b_atr):
                 price_left_zone_since_last_touch = True
 
-            # Cek penembusan ke atas resistance
-            if b_close > (z_high + broken_close_atr * b_atr):
-                is_broken = True
-                consecutive_beyond += 1
+            if unconfirmed_break:
+                if b_close > z_high:
+                    penetration_atr = (b_close - z_high) / b_atr
+                    consecutive_beyond = consecutive_beyond + 1 if penetration_atr >= broken_close_atr else 0
+                    if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid:
+                        is_broken = True
+                        is_invalidated = True
+                    elif penetration_atr >= broken_close_atr:
+                        is_broken = True
+                else:
+                    consecutive_beyond = 0
+                continue
+            if b_close > z_high:
+                unconfirmed_break = True
                 if first_break_index is None:
                     first_break_index = int(k)
-                if b_close > (z_high + invalid_close_atr * b_atr) or consecutive_beyond >= consec_invalid:
+                penetration_atr = (b_close - z_high) / b_atr
+                consecutive_beyond = int(penetration_atr >= broken_close_atr)
+                if penetration_atr >= invalid_close_atr:
+                    is_broken = True
                     is_invalidated = True
+                elif penetration_atr >= broken_close_atr:
+                    is_broken = True
                 continue
-            else:
-                consecutive_beyond = 0
 
             touches_zone = (b_high >= z_low - 0.04 * b_atr) and (b_low <= z_high + 0.04 * b_atr)
+            if touches_zone:
+                last_lifecycle_event = "SWEEP" if b_high > z_high and b_close <= z_high else "TOUCHED"
+                last_lifecycle_event_time = str(times[k])
             if not touches_zone:
                 continue
 
@@ -236,26 +278,6 @@ def analyze_zone_touches(
                 })
                 last_interaction_bar = int(k)
 
-    # Jika pada candle terakhir harga berhasil kembali ke sisi aktif setelah sempat tembus 1 candle,
-    # evaluasi apakah itu false breakout (bukan invalidated)
-    last_close = float(closes[-1])
-    last_atr = max(0.10, safe_float(atrs[-1], ref_atr))
-    if is_broken and not is_invalidated:
-        if z_type == "SUPPORT" and last_close >= z_low:
-            # Sempat tembus 1 candle namun sudah reclaim kembali ke atas support
-            is_broken = False
-        elif z_type == "RESISTANCE" and last_close <= z_high:
-            is_broken = False
-
-    if is_invalidated:
-        # Pastikan jika pada akhirnya harga masih jauh di luar zona, status INVALIDATED tetap terkunci
-        if z_type == "SUPPORT" and last_close >= z_high:
-            is_invalidated = False
-            is_broken = False
-        elif z_type == "RESISTANCE" and last_close <= z_low:
-            is_invalidated = False
-            is_broken = False
-
     valid_cnt = len(valid_touches)
     wick_cnt = len(wick_only_contacts)
 
@@ -263,6 +285,8 @@ def analyze_zone_touches(
         classification = "INVALIDATED"
     elif is_broken:
         classification = "BROKEN"
+    elif unconfirmed_break:
+        classification = "UNCONFIRMED"
     elif valid_cnt == 0:
         classification = "UNTESTED"
     elif valid_cnt == 1:
@@ -271,6 +295,18 @@ def analyze_zone_touches(
         classification = "TESTED_2X"
     else:
         classification = "TESTED_3X_PLUS"
+
+    history_sufficient = start_idx < n_bars
+    if is_invalidated:
+        lifecycle_status = "INVALIDATED"
+    elif is_broken:
+        lifecycle_status = "BROKEN"
+    elif unconfirmed_break:
+        lifecycle_status = "BREAKDOWN_PENDING"
+    elif not history_sufficient:
+        lifecycle_status = "UNCONFIRMED"
+    else:
+        lifecycle_status = "ACTIVE"
 
     if valid_cnt > 0:
         bounces = [float(t["bounce_atr"]) for t in valid_touches]
@@ -310,6 +346,9 @@ def analyze_zone_touches(
     elif classification == "BROKEN":
         q_score = 3.5
         reason = "Zona BROKEN (ditembus candle closed); hanya relevan untuk skenario retest/role-reversal."
+    elif classification == "UNCONFIRMED":
+        q_score = 0.0
+        reason = "Ada close candle di luar zona, tetapi bukti breakout belum cukup untuk mengonfirmasi lifecycle."
     elif classification == "UNTESTED":
         q_score = 11.5
         reason = "Zona UNTESTED (masih fresh sejak konfirmasi pivot)."
@@ -353,6 +392,11 @@ def analyze_zone_touches(
         "absorption_warning": bool(absorption_warning),
         "is_broken": bool(is_broken),
         "is_invalidated": bool(is_invalidated),
+        "unconfirmed_break": bool(unconfirmed_break and not is_broken and not is_invalidated),
+        "lifecycle_status": lifecycle_status,
+        "lifecycle_event": last_lifecycle_event,
+        "lifecycle_event_time": last_lifecycle_event_time,
+        "reclaim_status": "CONFIRMED" if (is_broken and lifecycle_status == "RECLAIMED") else "WAIT",
         "first_break_index": first_break_index,
         "touch_quality_score_15": round(q_score, 2),
         "reason": reason,
@@ -364,12 +408,11 @@ def analyze_zone_touches(
     updated["wick_touch_count"] = int(wick_cnt)
     updated["is_broken"] = bool(is_broken)
     updated["is_invalidated"] = bool(is_invalidated)
-    updated["is_active"] = not (is_broken or is_invalidated)
-    updated["status"] = (
-        "INVALIDATED"
-        if is_invalidated
-        else ("BROKEN" if is_broken else "ACTIVE")
-    )
+    updated["is_active"] = lifecycle_status in ("ACTIVE", "TOUCHED", "SWEEP")
+    updated["lifecycle_status"] = lifecycle_status
+    updated["lifecycle_event"] = last_lifecycle_event
+    updated["reclaim_status"] = "CONFIRMED" if (is_broken and lifecycle_status == "RECLAIMED") else "WAIT"
+    updated["status"] = lifecycle_status
     updated["touch_analysis"] = touch_info
     return updated
 

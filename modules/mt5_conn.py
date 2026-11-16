@@ -49,11 +49,13 @@ def ambil_data(tf, jumlah, percobaan=3):
     if rates is None or len(rates) == 0:
         return None
     df = pd.DataFrame(rates)
-    # Waktu MT5 = waktu server broker (dibaca sebagai UTC), bukan WIB asli
+    # Waktu MT5 = waktu server/epoch MT5 (UTC); tandai attrs['time_tz'] = 'UTC' agar konversi ke WIB tepat satu kali
     df["time"] = pd.to_datetime(df["time"], unit="s")
     df = df.set_index("time")
-    return df.rename(columns={"open": "Open", "high": "High", "low": "Low",
-                              "close": "Close", "tick_volume": "Volume"})
+    out_df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                                "close": "Close", "tick_volume": "Volume"})
+    out_df.attrs["time_tz"] = "UTC"
+    return out_df
 
 
 def tambah_indikator(df):

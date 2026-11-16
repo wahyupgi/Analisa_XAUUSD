@@ -10,6 +10,7 @@ Klasifikasi Wajib:
 - UNCONFIRMED
 - CONFLICT
 """
+from collections import Counter
 from modules.snr.data_provider import safe_float
 
 
@@ -31,7 +32,7 @@ def evaluate_single_tf_snr_bias(
     6. Dominasi support vs resistance.
     """
     tf = str(timeframe).upper()
-    if df is None or getattr(df, "empty", True):
+    if df is None or getattr(df, "empty", True) or len(df) < 10:
         return {
             "timeframe": tf,
             "bias": "UNCONFIRMED",
@@ -42,7 +43,7 @@ def evaluate_single_tf_snr_bias(
             "reaction_state": "NONE",
             "dominance": "NEUTRAL",
             "price_position": "UNKNOWN",
-            "reason": f"Data candle {tf} tidak mencukupi.",
+            "reason": f"Data candle {tf} tidak mencukupi (minimal 10 candle).",
         }
 
     cp = safe_float(current_price, 0.0)
@@ -181,13 +182,21 @@ def evaluate_single_tf_snr_bias(
         price_position = "BELOW_RESISTANCE_OPEN_AIR"
         bias_score -= 0.5
 
-    # Konfirmasi ringan dari arah penutupan candle terbaru jika selaras struktur
+    # Konfirmasi arah penutupan/momentum terbaru (pada M30 berlaku meski bias_score == 0)
     if momentum_tf and isinstance(momentum_tf, dict):
         m_dir = momentum_tf.get("direction", "NEUTRAL")
-        if m_dir == "BULLISH" and bias_score > 0:
-            bias_score += 0.35
-        elif m_dir == "BEARISH" and bias_score < 0:
-            bias_score -= 0.35
+        if tf == "M30":
+            if m_dir == "BULLISH":
+                bias_score += 0.35
+                reasons.append("momentum M30 BULLISH")
+            elif m_dir == "BEARISH":
+                bias_score -= 0.35
+                reasons.append("momentum M30 BEARISH")
+        else:
+            if m_dir == "BULLISH" and bias_score > 0:
+                bias_score += 0.35
+            elif m_dir == "BEARISH" and bias_score < 0:
+                bias_score -= 0.35
 
     if bias_score >= 1.10:
         final_tf_bias = "BULLISH"
@@ -196,7 +205,21 @@ def evaluate_single_tf_snr_bias(
     else:
         final_tf_bias = "SIDEWAYS"
 
-    reason_text = ", ".join(reasons) if reasons else "keseimbangan antara support dan resistance"
+    if reasons:
+        counts = Counter(reasons)
+        seen = set()
+        deduped = []
+        for r in reasons:
+            if r not in seen:
+                seen.add(r)
+                cnt = counts[r]
+                if cnt > 1:
+                    deduped.append(f"{r} ({cnt} occurrences)")
+                else:
+                    deduped.append(r)
+        reason_text = ", ".join(deduped)
+    else:
+        reason_text = "keseimbangan antara support dan resistance"
     return {
         "timeframe": tf,
         "bias": final_tf_bias,
@@ -243,32 +266,12 @@ def evaluate_snr_market_bias(
             current_price=current_price,
         )
 
-    # M5 digunakan sebagai konfirmasi entry, bukan penentu tunggal bias utama
-    m5_df = frames_dict.get("M5")
+    # M5 digunakan sebagai konfirmasi trigger entry; tetap WAIT hingga trigger terkonfirmasi
     m5_mom = momentum_by_tf.get("M5") or {}
-    m5_zones = zones_by_tf.get("M5") or []
     m5_label = str(m5_entry_state or "WAIT").upper()
 
-    if m5_label in ("WAIT", "NONE", ""):
-        # Cek apakah pada M5 sudah ada breakout/rejection terkonfirmasi
-        has_m5_bull = any(
-            (z.get("rejection_info") or {}).get("status") == "BULLISH_REJECTION"
-            or (z.get("breakout_info") or {}).get("status") == "VALID_BREAKOUT"
-            and (z.get("breakout_info") or {}).get("direction") == "BULLISH"
-            for z in m5_zones
-        )
-        has_m5_bear = any(
-            (z.get("rejection_info") or {}).get("status") == "BEARISH_REJECTION"
-            or (z.get("breakout_info") or {}).get("status") == "VALID_BREAKOUT"
-            and (z.get("breakout_info") or {}).get("direction") == "BEARISH"
-            for z in m5_zones
-        )
-        if has_m5_bull and not has_m5_bear:
-            m5_display = "BULLISH"
-        elif has_m5_bear and not has_m5_bull:
-            m5_display = "BEARISH"
-        else:
-            m5_display = "WAIT"
+    if m5_label in ("WAIT", "NONE", "", "NEUTRAL"):
+        m5_display = "WAIT"
     else:
         m5_display = m5_label
 
@@ -283,28 +286,28 @@ def evaluate_snr_market_bias(
     b_h1 = per_tf["H1"]["bias"]
     b_m30 = per_tf["M30"]["bias"]
 
-    struct_biases = [b_h4, b_h1, b_m30]
-    if all(b == "UNCONFIRMED" for b in struct_biases):
+    h4_h1_conflict = (b_h4 == "BULLISH" and b_h1 == "BEARISH") or (b_h4 == "BEARISH" and b_h1 == "BULLISH")
+    m30_conflict = (b_h4 == "BULLISH" and b_m30 == "BEARISH") or (b_h4 == "BEARISH" and b_m30 == "BULLISH")
+
+    if b_h4 == "UNCONFIRMED" or b_h1 == "UNCONFIRMED":
         overall = "UNCONFIRMED"
         status_label = "UNCONFIRMED"
-        summary_reason = "Data H4, H1, dan M30 belum mencukupi untuk mengonfirmasi bias SNR."
+        summary_reason = f"Data H4 ({b_h4}) atau H1 ({b_h1}) belum mencukupi untuk mengonfirmasi bias SNR."
+    elif h4_h1_conflict:
+        overall = "CONFLICT"
+        status_label = "CONFLICT BIAS"
+        summary_reason = f"Konflik struktur antar timeframe utama (H4={b_h4} vs H1={b_h1}, M30={b_m30})."
     else:
-        # Cek konflik struktural antara H4 dan H1
-        h4_h1_conflict = (b_h4 == "BULLISH" and b_h1 == "BEARISH") or (b_h4 == "BEARISH" and b_h1 == "BULLISH")
         weighted_score = (
             safe_float(per_tf["H4"]["score"], 0.0) * 0.45
             + safe_float(per_tf["H1"]["score"], 0.0) * 0.35
             + safe_float(per_tf["M30"]["score"], 0.0) * 0.20
         )
 
-        if h4_h1_conflict and b_m30 != b_h4 and abs(weighted_score) < 0.85:
-            overall = "CONFLICT"
-            status_label = "CONFLICT BIAS"
-            summary_reason = f"Konflik struktur antar timeframe utama (H4={b_h4} vs H1={b_h1}, M30={b_m30})."
-        elif (
+        if (
             (b_h4 == "BULLISH" and b_h1 in ("BULLISH", "SIDEWAYS"))
             or (b_h1 == "BULLISH" and b_m30 == "BULLISH" and b_h4 == "SIDEWAYS")
-            or weighted_score >= 0.95
+            or (b_h4 != "BEARISH" and b_h1 != "BEARISH" and weighted_score >= 0.95)
         ):
             overall = "BULLISH"
             status_label = "BULLISH BIAS"
@@ -312,15 +315,11 @@ def evaluate_snr_market_bias(
         elif (
             (b_h4 == "BEARISH" and b_h1 in ("BEARISH", "SIDEWAYS"))
             or (b_h1 == "BEARISH" and b_m30 == "BEARISH" and b_h4 == "SIDEWAYS")
-            or weighted_score <= -0.95
+            or (b_h4 != "BULLISH" and b_h1 != "BULLISH" and weighted_score <= -0.95)
         ):
             overall = "BEARISH"
             status_label = "BEARISH BIAS"
             summary_reason = f"Dominasi struktur & reaksi resistance mendukung arah BEARISH (H4={b_h4}, H1={b_h1}, M30={b_m30})."
-        elif h4_h1_conflict:
-            overall = "CONFLICT"
-            status_label = "CONFLICT BIAS"
-            summary_reason = f"Arah H4 ({b_h4}) dan H1 ({b_h1}) berlawanan tanpa dominasi satu arah yang tegas."
         else:
             overall = "SIDEWAYS"
             status_label = "SIDEWAYS BIAS"
@@ -333,6 +332,8 @@ def evaluate_snr_market_bias(
         "h1": b_h1,
         "m30": b_m30,
         "m5": m5_display,
+        "has_conflict": bool(h4_h1_conflict),
+        "m30_conflict": bool(m30_conflict),
         "per_timeframe": per_tf,
         "reason": summary_reason,
     }

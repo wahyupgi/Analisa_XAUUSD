@@ -12,9 +12,10 @@ _DIR_MODULES = os.path.dirname(_DIR_SNR)
 _DIR_PROJECT = os.path.dirname(_DIR_MODULES)
 
 try:
-    from modules.config import SYMBOL as _APP_SYMBOL
+    from modules.config import FILE_STATE_ZONE_TRACKER as _FILE_STATE_ZONE_TRACKER, SYMBOL as _APP_SYMBOL
 except Exception:
     _APP_SYMBOL = "XAUUSD"
+    _FILE_STATE_ZONE_TRACKER = os.path.join(_DIR_PROJECT, "state_zone_tracker.json")
 
 SNR_SYMBOL_DEFAULT = _APP_SYMBOL
 SNR_TIMEFRAMES = ("H4", "H1", "M30", "M5")
@@ -23,6 +24,8 @@ SNR_ENTRY_TIMEFRAME = "M5"
 
 FILE_LOG_SNR_ERROR = os.path.join(_DIR_PROJECT, "snr_scanner_error.log")
 FILE_LOG_SNR_AUDIT = os.path.join(_DIR_PROJECT, "snr_scanner_audit.log")
+FILE_STATE_SNR_LIFECYCLE = _FILE_STATE_ZONE_TRACKER
+SNR_LIFECYCLE_STATE_KEY = "snr_lifecycle_zones"
 
 SNR_TIMEFRAME_BARS = {
     "H4": 220,
@@ -172,6 +175,7 @@ SNR_RISK_PARAMS = {
     "sl_volatility_buffer_atr": 0.25,
     "min_sl_buffer_points": 0.60,
     "max_entry_distance_atr": 0.65,
+    "max_spread_points": 1.0,
     "default_spread_points": 0.25,
     "default_tick_size": 0.01,
     "default_tick_value": 1.0,

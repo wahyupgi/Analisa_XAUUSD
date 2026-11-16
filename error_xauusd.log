@@ -8655,3 +8655,3039 @@ NoneType: None
 [2026-11-14 14:40:45] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
 NoneType: None
 
+[2026-11-16 08:11:23] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:23] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:11:24] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:27] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 08:11:27] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:27] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:27] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:27] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:27] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:27] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:28] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:28] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 4806, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5113, in _decide
+    scan = scan_xauusd_zones(frames=frames, current_price=price, snapshot=live_snap)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 08:11:28] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:28] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:28] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:28] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:11:28] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:37:49] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:37:50] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:37:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:12] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 08:38:12] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:12] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:13] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:13] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:13] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:13] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:13] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:13] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5435, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5819, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 08:38:13] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:15] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:15] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:15] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:38:15] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:39:27] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:39:27] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:39:28] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:39:28] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:39:28] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:39:28] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:39:47] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:42:48] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:43:11] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:21] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 08:43:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:57] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 08:43:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:43:58] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5438, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5822, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 08:43:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:44:00] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:44:00] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:44:00] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 08:44:00] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:11] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:21] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 09:44:38] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:56] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 09:44:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:56] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 09:44:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:57] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5458, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5842, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 09:44:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:58] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:44:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:17] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 09:45:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:51] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 09:45:53] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 09:45:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:53] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:54] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5458, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5842, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 09:45:54] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:45:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:07] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:18] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 09:46:40] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:56] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 09:46:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:57] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5458, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5842, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 09:46:57] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 09:46:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:36:19] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:36:27] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 10:36:45] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:36:59] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 538, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 10:36:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:36:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:36:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:36:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:36:59] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:37:00] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:37:00] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:37:00] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5490, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5874, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 10:37:00] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:37:01] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:37:01] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:37:01] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:37:01] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:14] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:14] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:14] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:14] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:38:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:40:30] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:40:37] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 10:40:56] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 536, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 10:41:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:10] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5501, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5885, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 10:41:11] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:12] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:12] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:12] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:41:12] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 536, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:42:33] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5501, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5885, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 10:42:33] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:57:14] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 10:57:22] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 10:57:40] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:07:29] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 11:08:23] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 11:12:44] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 11:14:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:14:45] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 11:15:05] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:41] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 536, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 11:15:41] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:41] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:42] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:42] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:42] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:42] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:42] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:42] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5501, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5885, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 11:15:42] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:15:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:36:54] extract_snr_supporting_context: RuntimeError('DataValidationError: Data OHLC mengandung nilai NaN / tidak konsisten (High < Low atau <= 0)')
+NoneType: None
+
+[2026-11-16 11:38:51] extract_snr_supporting_context: RuntimeError('DataValidationError: Data OHLC mengandung nilai NaN / tidak konsisten (High < Low atau <= 0)')
+NoneType: None
+
+[2026-11-16 11:39:46] extract_snr_supporting_context: RuntimeError('MissingFramesError: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 11:40:22] extract_snr_supporting_context: RuntimeError('MissingFramesError: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 11:40:47] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:40:52] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 11:41:05] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:41:05] extract_snr_supporting_context: RuntimeError('MissingFramesError: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 11:41:20] extract_snr_supporting_context: RuntimeError('DataValidationError: Data OHLC mengandung nilai NaN / tidak konsisten (High < Low atau <= 0)')
+NoneType: None
+
+[2026-11-16 11:46:37] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 536, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 11:46:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:37] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:38] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:38] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5508, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5892, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 11:46:38] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:46] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:46] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:46] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 11:46:46] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:02:08] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:02:13] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:02:25] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:02:26] extract_snr_supporting_context: RuntimeError('MissingFramesError: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:02:42] extract_snr_supporting_context: RuntimeError('DataValidationError: Data OHLC mengandung nilai NaN / tidak konsisten (High < Low atau <= 0)')
+NoneType: None
+
+[2026-11-16 12:03:18] extract_snr_supporting_context: RuntimeError('MissingFramesError: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:03:51] extract_snr_supporting_context: RuntimeError('DataValidationError: Data OHLC mengandung nilai NaN / tidak konsisten (High < Low atau <= 0)')
+NoneType: None
+
+[2026-11-16 12:05:45] extract_snr_supporting_context: RuntimeError('MissingFramesError: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:05:48] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:09:26] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:09:29] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 536, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:09:44] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5508, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5892, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 12:09:44] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:15:53] extract_snr_supporting_context: RuntimeError('MissingFramesError [empty_data]: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:15:56] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:16:15] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:16:17] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:21] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 536, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 12:16:21] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:16:22] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5542, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5926, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 12:16:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:18:13] extract_snr_supporting_context: ImportError('Simulated missing modules.snr.scanner')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 959, in extract_snr_supporting_context
+    from modules.snr.scanner import run_snr_scan
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1189, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_final_fix_snr_freshness_snapshot.py", line 347, in _fake_import
+    raise ImportError("Simulated missing modules.snr.scanner")
+ImportError: Simulated missing modules.snr.scanner
+
+[2026-11-16 12:18:13] extract_snr_supporting_context: RuntimeError('InvalidPriceError [parameter]: current_price tidak valid (-5.0).')
+NoneType: None
+
+[2026-11-16 12:18:13] extract_snr_supporting_context: RuntimeError('MissingFramesError [empty_data]: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:18:13] extract_snr_supporting_context: RuntimeError('IncompleteDataError [incomplete_data]: Data candle CLOSED tidak mencukupi untuk analisis SNR (H4(5 bar < 20), H1(5 bar < 20), M30(5 bar < 20), M5(5 bar < 20)).')
+NoneType: None
+
+[2026-11-16 12:18:13] extract_snr_supporting_context: RuntimeError('SNR boom')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+RuntimeError: SNR boom
+
+[2026-11-16 12:18:13] extract_snr_supporting_context: TypeError('bad kwarg')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+TypeError: bad kwarg
+
+[2026-11-16 12:18:18] extract_snr_supporting_context: RuntimeError('DataValidationError [data_validation]: OHLC tidak konsisten / harga <= 0 pada M5')
+NoneType: None
+
+[2026-11-16 12:22:24] extract_snr_supporting_context: ImportError('Simulated missing modules.snr.scanner')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 959, in extract_snr_supporting_context
+    from modules.snr.scanner import run_snr_scan
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1189, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_final_fix_snr_freshness_snapshot.py", line 347, in _fake_import
+    raise ImportError("Simulated missing modules.snr.scanner")
+ImportError: Simulated missing modules.snr.scanner
+
+[2026-11-16 12:22:24] extract_snr_supporting_context: RuntimeError('InvalidPriceError [parameter]: current_price tidak valid (-5.0).')
+NoneType: None
+
+[2026-11-16 12:22:24] extract_snr_supporting_context: RuntimeError('MissingFramesError [empty_data]: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:22:24] extract_snr_supporting_context: RuntimeError('IncompleteDataError [incomplete_data]: Data candle CLOSED tidak mencukupi untuk analisis SNR (H4(5 bar < 20), H1(5 bar < 20), M30(5 bar < 20), M5(5 bar < 20)).')
+NoneType: None
+
+[2026-11-16 12:22:24] extract_snr_supporting_context: RuntimeError('SNR boom')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+RuntimeError: SNR boom
+
+[2026-11-16 12:22:24] extract_snr_supporting_context: TypeError('bad kwarg')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+TypeError: bad kwarg
+
+[2026-11-16 12:22:31] extract_snr_supporting_context: RuntimeError('DataValidationError [data_validation]: OHLC tidak konsisten / harga <= 0 pada M5')
+NoneType: None
+
+[2026-11-16 12:24:20] extract_snr_supporting_context: ImportError('Simulated missing modules.snr.scanner')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 959, in extract_snr_supporting_context
+    from modules.snr.scanner import run_snr_scan
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1189, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_final_fix_snr_freshness_snapshot.py", line 347, in _fake_import
+    raise ImportError("Simulated missing modules.snr.scanner")
+ImportError: Simulated missing modules.snr.scanner
+
+[2026-11-16 12:24:20] extract_snr_supporting_context: RuntimeError('InvalidPriceError [parameter]: current_price tidak valid (-5.0).')
+NoneType: None
+
+[2026-11-16 12:24:20] extract_snr_supporting_context: RuntimeError('MissingFramesError [empty_data]: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:24:20] extract_snr_supporting_context: RuntimeError('IncompleteDataError [incomplete_data]: Data candle CLOSED tidak mencukupi untuk analisis SNR (H4(5 bar < 20), H1(5 bar < 20), M30(5 bar < 20), M5(5 bar < 20)).')
+NoneType: None
+
+[2026-11-16 12:24:20] extract_snr_supporting_context: RuntimeError('SNR boom')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+RuntimeError: SNR boom
+
+[2026-11-16 12:24:20] extract_snr_supporting_context: TypeError('bad kwarg')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+TypeError: bad kwarg
+
+[2026-11-16 12:24:27] extract_snr_supporting_context: RuntimeError('DataValidationError [data_validation]: OHLC tidak konsisten / harga <= 0 pada M5')
+NoneType: None
+
+[2026-11-16 12:24:35] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:24:36] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] ekstrak_target_ai_zone_scanner: RuntimeError('x')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\ai_gemini.py", line 536, in _terapkan_otoritas_scanner
+    dec = evaluate_trade_decision()   # kompatibel dengan mock 0-argumen pada unit test
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 487, in boom
+    raise RuntimeError("x")
+RuntimeError: x
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:39] evaluate_trade_decision: RuntimeError('scanner rusak')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5542, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5926, in _decide
+    scan = scan_xauusd_zones(**scan_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_zone_scanner.py", line 428, in boom
+    raise RuntimeError("scanner rusak")
+RuntimeError: scanner rusak
+
+[2026-11-16 12:24:39] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:24:46] extract_snr_supporting_context: RuntimeError('MissingFramesError [empty_data]: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 12:24:48] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:24:51] extract_snr_supporting_context: RuntimeError('DataValidationError [data_validation]: Nilai NaN terdeteksi pada OHLC M5')
+NoneType: None
+
+[2026-11-16 12:25:22] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:25:22] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 12:25:36] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:25:36] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:25:36] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 12:25:36] evaluate_trade_decision_signature: RuntimeError('scan_xauusd_zones tidak menerima parameter snapshot; menggunakan pemanggilan kompatibilitas lama')
+NoneType: None
+
+[2026-11-16 14:16:07] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 14:36:11] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 14:47:34] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 14:47:59] extract_snr_supporting_context: ImportError('Simulated missing modules.snr.scanner')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 959, in extract_snr_supporting_context
+    from modules.snr.scanner import run_snr_scan
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1189, in _execute_mock_call
+    result = effect(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\tests\test_final_fix_snr_freshness_snapshot.py", line 347, in _fake_import
+    raise ImportError("Simulated missing modules.snr.scanner")
+ImportError: Simulated missing modules.snr.scanner
+
+[2026-11-16 14:47:59] extract_snr_supporting_context: RuntimeError('InvalidPriceError [parameter]: current_price tidak valid (-5.0).')
+NoneType: None
+
+[2026-11-16 14:47:59] extract_snr_supporting_context: RuntimeError('MissingFramesError [empty_data]: Frames OHLCV kosong atau tidak valid.')
+NoneType: None
+
+[2026-11-16 14:47:59] extract_snr_supporting_context: RuntimeError('IncompleteDataError [incomplete_data]: Data candle CLOSED tidak mencukupi untuk analisis SNR (H4(5 bar < 20), H1(5 bar < 20), M30(5 bar < 20), M5(5 bar < 20)).')
+NoneType: None
+
+[2026-11-16 14:47:59] extract_snr_supporting_context: RuntimeError('SNR boom')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+RuntimeError: SNR boom
+
+[2026-11-16 14:47:59] extract_snr_supporting_context: TypeError('bad kwarg')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\trend_following.py", line 1072, in extract_snr_supporting_context
+    snr_res = run_snr_scan(
+              ^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1124, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1128, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py", line 1183, in _execute_mock_call
+    raise effect
+TypeError: bad kwarg
+
+[2026-11-16 14:48:06] extract_snr_supporting_context: RuntimeError('DataValidationError [data_validation]: OHLC tidak konsisten / harga <= 0 pada M5')
+NoneType: None
+
+[2026-11-16 14:49:25] _ambil_events_berita: URLError(gaierror(11001, 'getaddrinfo failed'))
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1348, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1303, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1349, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1298, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1058, in _send_output
+    self.send(msg)
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 996, in send
+    self.connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 1468, in connect
+    super().connect()
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\http\client.py", line 962, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 827, in create_connection
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\analisis_pasar.py", line 176, in _ambil_events_berita
+    with urllib.request.urlopen(req, timeout=4) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 216, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 519, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 536, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 496, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1391, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\AppData\Local\Programs\Python\Python311\Lib\urllib\request.py", line 1351, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 11001] getaddrinfo failed>
+
+[2026-11-16 16:00:11] evaluate_trade_decision: KeyError('approach')
+Traceback (most recent call last):
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5831, in evaluate_trade_decision
+    dec = _decide(dec, frames, current_price, spread, news_blackout, server_time, live,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 6502, in _decide
+    return finish("VALID", "")
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 5912, in finish
+    prio = prioritize_radar_zones(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ADMIN\Documents\Analisa_XAUUSD\modules\zone_scanner.py", line 3170, in prioritize_radar_zones
+    app_lbl = f" [{primary_directional['approach']}]" if primary_directional['approach'] in ("FAR", "TOUCHED", "APPROACHING") else ""
+                                                         ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'approach'
+

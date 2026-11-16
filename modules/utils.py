@@ -26,21 +26,29 @@ def get_current_wib() -> datetime:
     return datetime.now(WIB_TZ)
 
 
-def to_wib_datetime(dt_val: Any) -> Optional[datetime]:
+def to_wib_datetime(dt_val: Any, source_tz: str = "WIB") -> Optional[datetime]:
     """
     Konversi berbagai format waktu (timestamp epoch, string, pd.Timestamp, datetime)
     ke objek datetime dengan timezone WIB (UTC+7) yang valid.
+    Konversi dilakukan tepat satu kali:
+    - Jika input berupa epoch (int/float) atau sudah tz-aware, langsung dikonversi ke WIB.
+    - Jika input tz-naive dan source_tz == "UTC", diperlakukan sebagai UTC lalu dikonversi ke WIB (+7).
+    - Selain itu, input tz-naive dianggap sudah dalam WIB.
     Mengembalikan None jika input tidak valid.
     """
     if dt_val is None:
         return None
+    src_is_utc = str(source_tz or "WIB").strip().upper() == "UTC"
+    naive_tz = timezone.utc if src_is_utc else WIB_TZ
     try:
         if isinstance(dt_val, (int, float)):
             if not pd.isna(dt_val) and dt_val > 0:
                 return datetime.fromtimestamp(dt_val, tz=timezone.utc).astimezone(WIB_TZ)
             return None
         if isinstance(dt_val, str):
-            s = str(dt_val).replace(" WIB", "").strip()
+            raw_s = str(dt_val).strip()
+            has_wib_suffix = "WIB" in raw_s.upper()
+            s = raw_s.replace(" WIB", "").replace(" wib", "").strip()
             if not s or s.lower() in ("none", "nan", "nat", "-"):
                 return None
             ts = pd.Timestamp(s)
@@ -48,19 +56,33 @@ def to_wib_datetime(dt_val: Any) -> Optional[datetime]:
                 return None
             if ts.tzinfo is not None:
                 return ts.to_pydatetime().astimezone(WIB_TZ)
-            return ts.to_pydatetime().replace(tzinfo=WIB_TZ)
+            tz_use = WIB_TZ if has_wib_suffix else naive_tz
+            return ts.to_pydatetime().replace(tzinfo=tz_use).astimezone(WIB_TZ)
         if hasattr(dt_val, "tzinfo") and getattr(dt_val, "tzinfo") is not None:
             return dt_val.astimezone(WIB_TZ)
         if isinstance(dt_val, datetime):
-            return dt_val.replace(tzinfo=WIB_TZ)
+            return dt_val.replace(tzinfo=naive_tz).astimezone(WIB_TZ)
         if hasattr(dt_val, "to_pydatetime"):
             pdt = dt_val.to_pydatetime()
             if getattr(pdt, "tzinfo", None) is not None:
                 return pdt.astimezone(WIB_TZ)
-            return pdt.replace(tzinfo=WIB_TZ)
+            return pdt.replace(tzinfo=naive_tz).astimezone(WIB_TZ)
     except Exception:
         return None
     return None
+
+
+def format_wib_timestamp(dt_val: Any = None, default_now: bool = False, source_tz: str = "WIB") -> str:
+    """
+    Memformat berbagai input waktu menjadi string standar WIB: 'YYYY-MM-DD HH:MM:SS WIB'.
+    Jika dt_val tidak valid/None dan default_now=True, menggunakan waktu WIB saat ini.
+    """
+    dt = to_wib_datetime(dt_val, source_tz=source_tz) if dt_val is not None else None
+    if dt is None:
+        if not default_now:
+            return ""
+        dt = get_current_wib()
+    return dt.strftime("%Y-%m-%d %H:%M:%S WIB")
 
 _ANTRIAN_BUNYI = queue.Queue()
 _THREAD_BUNYI = None

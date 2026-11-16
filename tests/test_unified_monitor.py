@@ -347,9 +347,11 @@ class TestUnifiedMonitorMode(unittest.TestCase):
         # 1. `pantau` (Unified ringkas)
         r_unified = xauusd1.execute_cli_command("pantau", snapshot=snap)
         cyc_u = r_unified["cycle_result"]
-        self.assertIn("### A. SMC MONITOR", r_unified["output"])
-        self.assertIn("### B. SNR MONITOR", r_unified["output"])
-        self.assertIn("### C. ACCOUNT MONITOR", r_unified["output"])
+        self.assertIn("XAUUSD SMART MONITOR v2.5", r_unified["output"])
+        self.assertLessEqual(len(r_unified["output"].splitlines()), 30)
+        self.assertIn("### A. SMC MONITOR", cyc_u["formatted_report"])
+        self.assertIn("### B. SNR MONITOR", cyc_u["formatted_report"])
+        self.assertIn("### C. ACCOUNT MONITOR", cyc_u["formatted_report"])
 
         # Regression check: hasil SMC & SNR di dalam Unified Monitor harus sama persis dengan eksekusi mandiri
         self.assertEqual(cyc_u["smc"]["decision"]["status"], smc_dec_solo["status"])

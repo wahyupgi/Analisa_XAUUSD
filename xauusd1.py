@@ -60,6 +60,8 @@ def format_command_menu_help():
         "- scan detail      : Scan SMC detail & audit lengkap",
         "- scan snr         : Scan SNR (Support & Resistance Independen)",
         "- scan snr detail  : Scan SNR detail (22 Bagian Audit)",
+        "- scan gabungan    : Scan Gabungan SMC + SNR (1 Shared Snapshot + Market Context)",
+        "- scan all detail  : Scan Gabungan SMC + SNR Detail (1 Shared Snapshot)",
         "",
         "MONITORING:",
         "- pantau           : Unified Monitor (SMC + SNR + Account)",
@@ -97,6 +99,11 @@ def parse_cli_command(cmd_str):
     tokens = raw.split()
     if not tokens:
         return {"action": "EMPTY", "method": "NONE", "detailed": False}
+
+    if raw in ("scan all detail", "scan gabungan detail", "scan unified detail", "scanner gabungan detail", "scanner unified detail"):
+        return {"action": "SCAN", "method": "UNIFIED", "detailed": True}
+    if raw in ("scan all", "scan gabungan", "scan unified", "scanner gabungan", "scanner unified"):
+        return {"action": "SCAN", "method": "UNIFIED", "detailed": False}
 
     if raw in ("scan snr detail", "scanner snr detail", "snr detail", "scan snd detail", "scanner snd detail", "snd detail"):
         return {"action": "SCAN", "method": "SNR", "detailed": True}
@@ -140,6 +147,25 @@ def execute_cli_command(cmd_str, snapshot=None, max_cycles=1, smc_runner=None, s
     method = parsed["method"]
     detailed = parsed["detailed"]
 
+    if act == "SCAN" and method == "UNIFIED":
+        cyc = _m_unified.run_unified_scan(
+            symbol=SYMBOL,
+            snapshot=snapshot,
+            detailed=detailed,
+            smc_runner=smc_runner,
+            snr_runner=snr_runner,
+        )
+        return {
+            "parsed": parsed,
+            "cycle_result": cyc,
+            "snapshot_id": cyc.get("snapshot_id"),
+            "smc": cyc.get("smc"),
+            "snr": cyc.get("snr"),
+            "comparison": cyc.get("comparison"),
+            "market_context": cyc.get("market_context"),
+            "output": cyc["formatted_report"],
+        }
+
     if act == "SCAN" and method == "SNR":
         res, dec, txt = _m_snr.scan_snr(
             snapshot=snapshot,
@@ -178,10 +204,14 @@ def execute_cli_command(cmd_str, snapshot=None, max_cycles=1, smc_runner=None, s
         }
         m_str = mode_map.get(method, "unified")
         cycle_res = mon.run_cycle(snapshot=snapshot, mode=m_str, detailed=detailed)
+        if m_str == "unified":
+            output = cycle_res.get("detail_report") if detailed else cycle_res.get("compact_report")
+        else:
+            output = cycle_res["formatted_report"]
         return {
             "parsed": parsed,
             "cycle_result": cycle_res,
-            "output": cycle_res["formatted_report"],
+            "output": output,
         }
 
     if act == "HELP":
@@ -441,6 +471,22 @@ def main():
 
         if cmd in ("rekap", "statistik", "stat", "jurnal", "journal", "evaluasi", "riwayat sinyal") or any(k in cmd for k in ("jurnal sinyal", "rekap sinyal", "cek jurnal", "tabel sinyal", "evaluasi sinyal", "zona kena sl", "zona kena tp", "mana zona")):
             tampilkan_rekap()
+            continue
+
+        if cmd in ("scan all detail", "scan gabungan detail", "scan unified detail", "scanner gabungan detail", "scanner unified detail"):
+            try:
+                cyc_u_det = _m_unified.run_unified_scan(symbol=SYMBOL, detailed=True)
+                print("\n" + cyc_u_det["formatted_report"])
+            except Exception as e_u_d:
+                print(f"Gagal menjalankan Scan Gabungan Detail: {e_u_d}")
+            continue
+
+        if cmd in ("scan all", "scan gabungan", "scan unified", "scanner gabungan", "scanner unified"):
+            try:
+                cyc_u = _m_unified.run_unified_scan(symbol=SYMBOL, detailed=False)
+                print("\n" + cyc_u["formatted_report"])
+            except Exception as e_u:
+                print(f"Gagal menjalankan Scan Gabungan: {e_u}")
             continue
 
         if cmd in ("scan snr detail", "scanner snr detail", "snr detail", "scan snd detail", "scanner snd detail", "snd detail"):

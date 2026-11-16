@@ -6,6 +6,78 @@ untuk SNR Advanced Scanner.
 from modules.snr.data_provider import safe_float
 
 
+def format_snr_lifecycle_status(scan_result, decision=None):
+    """Render a short lifecycle snapshot without treating non-active states as entry zones."""
+    sr = scan_result if isinstance(scan_result, dict) else {}
+    dec = decision if isinstance(decision, dict) else sr.get("decision") or {}
+    ranked = sr.get("ranked_zones") or {}
+    supports = [
+        zone for zone in (ranked.get("all_zones") or [])
+        if str(zone.get("zone_type", "")).upper() == "SUPPORT"
+    ]
+    supports.sort(key=lambda zone: safe_float(zone.get("distance_points"), float("inf")))
+    zone = supports[0] if supports else None
+    signal = str(dec.get("signal", "WAIT")).upper()
+    entry_confirmed = dec.get("entry_confirmed", False) if isinstance(dec, dict) else False
+    entry_status = "CONFIRMED" if signal in ("BUY", "SELL") and (entry_confirmed or dec.get("status") == "CONFIRMED") else ("CONFIRMED" if signal in ("BUY", "SELL") else "WAIT")
+
+    if zone is None:
+        disp_status = "UNCONFIRMED" if str(sr.get("market_status", "")).upper() == "DATA UNAVAILABLE" else "NONE"
+        disp_event = "NONE"
+        zone_label = "S1"
+    else:
+        lifecycle = str(zone.get("lifecycle_status", zone.get("status", "UNCONFIRMED"))).upper()
+        event = str(zone.get("lifecycle_event") or lifecycle).upper()
+        reclaim = str(zone.get("reclaim_status") or "WAIT").upper()
+        zone_label = str(zone.get("rank_label") or "S1")
+
+        if lifecycle == "RECLAIMED" or (lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING") and reclaim == "CONFIRMED"):
+            disp_status = "RECLAIMED"
+            disp_event = "RECLAIM CONFIRMED"
+        elif lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING"):
+            disp_status = "BROKEN"
+            disp_event = (
+                "RETEST" if lifecycle == "RETEST"
+                else ("RECLAIM PENDING" if lifecycle == "RECLAIM_PENDING" else "BREAKDOWN")
+            )
+        elif lifecycle == "INVALIDATED":
+            disp_status = "INVALIDATED"
+            disp_event = "INVALIDATED"
+        elif lifecycle == "UNCONFIRMED":
+            disp_status = "UNCONFIRMED"
+            disp_event = "UNCONFIRMED"
+        elif lifecycle in ("ACTIVE", "TOUCHED", "SWEEP"):
+            disp_status = "ACTIVE"
+            disp_event = event if event in ("SWEEP", "TOUCHED") else ("TOUCHED" if event == "ACTIVE" and zone.get("touch_count", 0) > 0 else "NONE")
+        else:
+            disp_status = lifecycle
+            disp_event = event if event not in ("", "N/A") else "NONE"
+
+    # Dapatkan alert perubahan terbaru (hanya alert paling mutakhir)
+    alerts = []
+    if isinstance(sr, dict):
+        if sr.get("alerts"):
+            alerts.extend(sr["alerts"])
+        elif isinstance(sr.get("radar"), dict) and sr["radar"].get("alerts"):
+            alerts.extend(sr["radar"]["alerts"])
+    if not alerts and isinstance(dec, dict) and dec.get("alerts"):
+        alerts.extend(dec["alerts"])
+
+    alert_text = str(alerts[-1]).strip() if alerts else "NONE"
+    if alert_text != "NONE" and alert_text.startswith("[SNR] "):
+        alert_text = alert_text[6:].strip()
+    if len(alert_text) > 48:
+        alert_text = alert_text[:45] + "..."
+
+    lines = [
+        f"{zone_label} STATUS : {disp_status}",
+        f"LAST EVENT: {disp_event}",
+        f"ENTRY     : {entry_status}",
+        f"ALERT     : {alert_text}",
+    ]
+    return lines
+
+
 def format_snr_summary(scan_result, decision=None):
     """
     Menyusun output ringkas SNR Advanced Scanner sesuai format Section U.
@@ -100,8 +172,32 @@ def format_snr_summary(scan_result, decision=None):
     if mkt_status == "OPEN":
         lines.append(f"PRICE       : {price_str}")
         lines.append(f"TIME        : {time_label}")
+    lines.extend(format_snr_lifecycle_status(sr, dec))
+
+    df_info = sr.get("data_freshness_info") or {}
+    conn_disp = str(sr.get("connection_status") or df_info.get("connection_status") or "UNKNOWN")
+    tick_st_disp = str(df_info.get("tick_status") or ("MARKET CLOSED" if mkt_status == "CLOSED" else sr.get("data_freshness", "N/A")))
+    candle_st_disp = str(df_info.get("candle_status") or sr.get("data_freshness", "N/A"))
+    last_tick_disp = str(sr.get("tick_time") or sr.get("snapshot_time") or "N/A")
+    lct_map = sr.get("last_candle_times") or df_info.get("last_candle_times") or {}
+    last_m5_disp = str(sr.get("last_closed_m5") or lct_map.get("M5") or last_candle_str or "N/A")
+    fc_map = sr.get("forming_candles") or {}
+    curr_m5_disp = str(sr.get("current_candle_m5") or (fc_map.get("M5") or {}).get("time") or "N/A")
+    analysis_t_disp = str(sr.get("snapshot_time") or sr.get("server_time") or "N/A")
+    data_val_disp = str(df_info.get("data_validation") or ("PASS" if sr.get("data_freshness") == "FRESH" else "FAIL"))
 
     lines.extend([
+        "",
+        "DATA INTEGRITY",
+        "--------------------------------",
+        f"MT5 CONNECTION   : {conn_disp}",
+        f"TICK STATUS      : {tick_st_disp}",
+        f"CANDLE STATUS    : {candle_st_disp}",
+        f"LAST TICK        : {last_tick_disp}",
+        f"LAST CLOSED M5   : {last_m5_disp}",
+        f"CURRENT CANDLE   : {curr_m5_disp}",
+        f"ANALYSIS TIME    : {analysis_t_disp}",
+        f"DATA VALIDATION  : {data_val_disp}",
         "",
         "MULTI-TF MARKET BIAS",
         f"H4            : {h4_b}",
@@ -160,8 +256,17 @@ def format_snr_summary(scan_result, decision=None):
 
     bo_label = pa.get("breakout_summary", "NOT CONFIRMED")
     rt_label = pa.get("retest_summary", "NOT CONFIRMED")
-    rej_label = pa.get("rejection_summary", "WAIT")
+    rej_label = pa.get("rejection_summary", "NOT CONFIRMED")
     mom_label = pa.get("momentum_summary", "N/A")
+    focus_pa_lbl = pa.get("focus_zone_label")
+    bo_z_lbl = pa.get("breakout_zone_label")
+    rt_z_lbl = pa.get("retest_zone_label")
+    if bo_z_lbl and focus_pa_lbl and bo_z_lbl != focus_pa_lbl and pa.get("breakout_code") != "NO_BREAKOUT":
+        bo_hist_tag = " (HISTORICAL)" if pa.get("breakout_is_historical") else ""
+        bo_label = f"{bo_label}{bo_hist_tag} [{bo_z_lbl}]"
+    if rt_z_lbl and focus_pa_lbl and rt_z_lbl != focus_pa_lbl and pa.get("retest_code") != "NO_RETEST":
+        rt_hist_tag = " (HISTORICAL)" if pa.get("retest_is_historical") else ""
+        rt_label = f"{rt_label}{rt_hist_tag} [{rt_z_lbl}]"
 
     buy_st = dec.get("buy_status", ev.get("buy_status", "WAIT"))
     sell_st = dec.get("sell_status", ev.get("sell_status", "WAIT"))
@@ -199,6 +304,29 @@ def format_snr_summary(scan_result, decision=None):
         f"ZONE       : {zone_lbl}",
         f"TRIGGER    : {trig_st}",
         f"RR         : {rr_st}",
+    ])
+
+    mc = sr.get("market_context") or {}
+    role_ctx = ev.get("snr_role_context")
+    pb_tgt = ev.get("pullback_target_label")
+    if mc or role_ctx:
+        lines.extend([
+            "",
+            "----------------------------------------------------",
+            "MARKET CONTEXT (SNR)",
+            "----------------------------------------------------",
+            f"CONTEXT CLASS : {mc.get('classification', 'N/A')}",
+            f"PRIMARY TREND : {mc.get('primary_trend', mb.get('h4', 'UNCONFIRMED'))}",
+            f"SHORT TERM    : {mc.get('short_term', mom_label)}",
+            f"SNR CONTEXT   : {role_ctx or mc.get('snr_context', zone_lbl)}",
+            f"NEAREST ZONE  : {dec.get('nearest_snr_label') or ev.get('nearest_snr_label', 'N/A')}",
+            f"TREND ENTRY   : {dec.get('trend_entry_label') or ev.get('trend_entry_label', 'N/A')}",
+            f"ENTRY TRIGGER : {dec.get('entry_trigger_label') or ev.get('entry_trigger_label', 'N/A')}",
+            f"PULLBACK AREA : {pb_tgt or 'NONE'}",
+            f"TRADE BIAS    : {mc.get('trade_bias', 'NEUTRAL / WAIT')}",
+        ])
+
+    lines.extend([
         "",
         "----------------------------------------------------",
         "FINAL DECISION",
@@ -492,7 +620,17 @@ def format_snr_detail(scan_result, decision=None):
     lines.append(f"  • SELL Status  : {ev.get('sell_status', 'WAIT')}")
     lines.append(f"  • Setup Type   : {ev.get('setup_type', 'NONE')}")
     lines.append(f"  • Focus Zone   : {ev.get('zone_label', 'N/A')}")
+    lines.append(f"  • Nearest Zone : {ev.get('nearest_snr_label') or dec.get('nearest_snr_label', 'N/A')}")
+    lines.append(f"  • Trend Entry  : {ev.get('trend_entry_label') or dec.get('trend_entry_label', 'N/A')}")
+    lines.append(f"  • Trigger Zone : {ev.get('entry_trigger_label') or dec.get('entry_trigger_label', 'N/A')}")
     lines.append(f"  • Trigger      : {ev.get('trigger_status', 'NOT CONFIRMED')}")
+    if ev.get("snr_role_context"):
+        lines.append(f"  • SNR Role     : {ev.get('snr_role_context')}")
+    if ev.get("pullback_target_label") and ev.get("pullback_target_label") != "NONE":
+        lines.append(f"  • Pullback Area: {ev.get('pullback_target_label')}")
+    mc_det = sr.get("market_context") or {}
+    if mc_det:
+        lines.append(f"  • Context Class: {mc_det.get('classification', 'N/A')} | Short-Term: {mc_det.get('short_term', 'N/A')} | Bias: {mc_det.get('trade_bias', 'NEUTRAL / WAIT')}")
 
     # 19. SL/TP Calculation
     lines.append("")

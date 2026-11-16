@@ -112,10 +112,19 @@ def detect_zone_rejection(
             next_confirmed = False
             next_failed = False
             if has_next:
+                # Rejection dianggap gagal hanya jika candle lanjutan benar-benar menembus batas bawah zona Support
+                # (bukan sekadar menutup sedikit di bawah b_low sementara harga masih bertahan di dalam zona [z_low, z_high]).
+                below_floor_count = 0
                 for m in range(k + 1, n_bars):
-                    if float(closes[m]) < (z_low - 0.10 * b_atr) or float(closes[m]) < b_low:
+                    c_m = float(closes[m])
+                    if c_m < (z_low - 0.15 * b_atr):
                         next_failed = True
                         break
+                    if c_m < z_low:
+                        below_floor_count += 1
+                        if below_floor_count >= 2:
+                            next_failed = True
+                            break
                 if not next_failed:
                     n_open = float(opens[k + 1])
                     n_close = float(closes[k + 1])
@@ -124,28 +133,7 @@ def detect_zone_rejection(
                         next_confirmed = True
 
             if not in_zone:
-                # Pola candlestick di luar konteks lokasi zona -> abaikan / tandai out-of-context
-                if wick_to_range >= min_wick_range and wick_to_body >= min_wick_body:
-                    candidates.append({
-                        "priority": 1,
-                        "status": "FALSE_REJECTION",
-                        "summary_status": "FALSE REJECTION",
-                        "direction": "NONE",
-                        "confirmed": False,
-                        "bar_index": int(k),
-                        "bar_time": str(times[k]),
-                        "in_zone_context": False,
-                        "upper_wick": round(upper_wick, 2),
-                        "lower_wick": round(lower_wick, 2),
-                        "body": round(c_body, 2),
-                        "wick_to_body": round(wick_to_body, 2),
-                        "wick_to_range": round(wick_to_range, 3),
-                        "close_position_ratio": round(close_pos, 3),
-                        "range_atr": round(range_atr, 3),
-                        "next_candle_confirmed": False,
-                        "quality_score_15": 0.0,
-                        "reason": "Pola wick muncul di luar lokasi zona Support (tanpa konteks struktural).",
-                    })
+                # Pola wick di luar lokasi zona tidak memiliki konteks zona -> abaikan agar tidak memicu false alarm
                 continue
 
             # Berada di dalam/dekat zona Support
@@ -181,10 +169,16 @@ def detect_zone_rejection(
                 and next_confirmed
             ):
                 q_score = min(15.0, round(11.5 + min(2.0, (wick_to_range - min_wick_range) * 5.0) + min(1.5, range_atr * 0.8), 2))
+                rej_str = (
+                    "STRONG REJECTION"
+                    if (wick_to_range >= max(0.44, min_wick_range) and wick_to_body >= max(1.45, min_wick_body) and range_atr >= 0.45)
+                    else "MODERATE REJECTION"
+                )
                 candidates.append({
                     "priority": 5,
                     "status": "BULLISH_REJECTION",
-                    "summary_status": "CONFIRMED (BULLISH)",
+                    "rejection_strength": rej_str,
+                    "summary_status": f"CONFIRMED (BULLISH - {rej_str})",
                     "direction": "BULLISH",
                     "confirmed": True,
                     "bar_index": int(k),
@@ -213,7 +207,8 @@ def detect_zone_rejection(
                 candidates.append({
                     "priority": 4,
                     "status": "WEAK_REJECTION",
-                    "summary_status": "WEAK / PENDING",
+                    "rejection_strength": "PENDING" if (wick_to_range >= min_wick_range and not next_confirmed) else "WEAK REJECTION",
+                    "summary_status": "PENDING" if (wick_to_range >= min_wick_range and not next_confirmed) else "WEAK / PENDING",
                     "direction": "BULLISH",
                     "confirmed": False,
                     "bar_index": int(k),
@@ -241,10 +236,19 @@ def detect_zone_rejection(
             next_confirmed = False
             next_failed = False
             if has_next:
+                # Rejection dianggap gagal hanya jika candle lanjutan benar-benar menembus batas atas zona Resistance
+                # (bukan sekadar menutup sedikit di atas b_high sementara harga masih di dalam zona [z_low, z_high]).
+                above_ceil_count = 0
                 for m in range(k + 1, n_bars):
-                    if float(closes[m]) > (z_high + 0.10 * b_atr) or float(closes[m]) > b_high:
+                    c_m = float(closes[m])
+                    if c_m > (z_high + 0.15 * b_atr):
                         next_failed = True
                         break
+                    if c_m > z_high:
+                        above_ceil_count += 1
+                        if above_ceil_count >= 2:
+                            next_failed = True
+                            break
                 if not next_failed:
                     n_open = float(opens[k + 1])
                     n_close = float(closes[k + 1])
@@ -253,27 +257,6 @@ def detect_zone_rejection(
                         next_confirmed = True
 
             if not in_zone:
-                if wick_to_range >= min_wick_range and wick_to_body >= min_wick_body:
-                    candidates.append({
-                        "priority": 1,
-                        "status": "FALSE_REJECTION",
-                        "summary_status": "FALSE REJECTION",
-                        "direction": "NONE",
-                        "confirmed": False,
-                        "bar_index": int(k),
-                        "bar_time": str(times[k]),
-                        "in_zone_context": False,
-                        "upper_wick": round(upper_wick, 2),
-                        "lower_wick": round(lower_wick, 2),
-                        "body": round(c_body, 2),
-                        "wick_to_body": round(wick_to_body, 2),
-                        "wick_to_range": round(wick_to_range, 3),
-                        "close_position_ratio": round(close_pos, 3),
-                        "range_atr": round(range_atr, 3),
-                        "next_candle_confirmed": False,
-                        "quality_score_15": 0.0,
-                        "reason": "Pola wick muncul di luar lokasi zona Resistance (tanpa konteks struktural).",
-                    })
                 continue
 
             if next_failed and wick_to_range >= weak_wick_range:
@@ -308,10 +291,16 @@ def detect_zone_rejection(
                 and next_confirmed
             ):
                 q_score = min(15.0, round(11.5 + min(2.0, (wick_to_range - min_wick_range) * 5.0) + min(1.5, range_atr * 0.8), 2))
+                rej_str = (
+                    "STRONG REJECTION"
+                    if (wick_to_range >= max(0.44, min_wick_range) and wick_to_body >= max(1.45, min_wick_body) and range_atr >= 0.45)
+                    else "MODERATE REJECTION"
+                )
                 candidates.append({
                     "priority": 5,
                     "status": "BEARISH_REJECTION",
-                    "summary_status": "CONFIRMED (BEARISH)",
+                    "rejection_strength": rej_str,
+                    "summary_status": f"CONFIRMED (BEARISH - {rej_str})",
                     "direction": "BEARISH",
                     "confirmed": True,
                     "bar_index": int(k),
@@ -340,7 +329,8 @@ def detect_zone_rejection(
                 candidates.append({
                     "priority": 4,
                     "status": "WEAK_REJECTION",
-                    "summary_status": "WEAK / PENDING",
+                    "rejection_strength": "PENDING" if (wick_to_range >= min_wick_range and not next_confirmed) else "WEAK REJECTION",
+                    "summary_status": "PENDING" if (wick_to_range >= min_wick_range and not next_confirmed) else "WEAK / PENDING",
                     "direction": "BEARISH",
                     "confirmed": False,
                     "bar_index": int(k),
@@ -369,6 +359,7 @@ def detect_zone_rejection(
         best["zone_id"] = zone.get("zone_id", "UNKNOWN")
         best["timeframe"] = tf
         best["zone_type"] = z_type
+        best.setdefault("rejection_strength", "NO REJECTION")
         return best
 
     return {
@@ -376,7 +367,8 @@ def detect_zone_rejection(
         "timeframe": tf,
         "zone_type": z_type,
         "status": "NONE",
-        "summary_status": "WAIT",
+        "rejection_strength": "NO REJECTION",
+        "summary_status": "NOT CONFIRMED",
         "direction": "NONE",
         "confirmed": False,
         "bar_index": None,

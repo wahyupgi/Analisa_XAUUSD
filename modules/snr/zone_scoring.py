@@ -323,16 +323,20 @@ def score_zone(
         + comp_momentum
     )
 
-    # Aturan wajib Section N:
+    # Aturan wajib kualitas SNR:
     # 1. Zona INVALIDATED tidak boleh mendapat skor tinggi.
-    # 2. Jangan memberikan Grade A hanya karena banyak touch (jika TESTED_3X_PLUS dengan tanda absorpsi, batasi < 80).
+    # 2. Zona BROKEN tanpa konfirmasi/proses retest harus dicap.
+    # 3. Jangan memberikan Grade A hanya karena banyak touch atau bounce lemah tanpa konfluensi MTF.
     absorption_warn = bool(touch_data.get("absorption_warning", False))
+    has_conf = bool((confluence_info or {}).get("has_confluence", False))
     if touch_status == "INVALIDATED" or zone.get("lifecycle_status") == "INVALIDATED":
         total_score = min(35.0, round(raw_total * 0.4, 2))
     elif touch_status == "BROKEN" and rt_status not in ("RETEST_CONFIRMED", "RETEST_IN_PROGRESS", "RETEST_WAITING"):
         total_score = min(58.0, round(raw_total * 0.68, 2))
-    elif touch_status == "TESTED_3X_PLUS" and (absorption_warn or not bool(confluence_info.get("has_confluence", False))):
+    elif touch_status == "TESTED_3X_PLUS" and (absorption_warn or not has_conf):
         total_score = min(78.5, round(raw_total, 2))
+    elif comp_reaction < 8.0 and not has_conf:
+        total_score = min(79.0, round(raw_total, 2))
     else:
         total_score = min(100.0, max(0.0, round(raw_total, 2)))
 

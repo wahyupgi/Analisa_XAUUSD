@@ -24,9 +24,14 @@ from modules.config import (
     MAKS_RISIKO_TERBUKA_PCT, MAKS_RUGI_HARIAN_PCT, SERVER_UTC_OFFSET_JAM,
     FILE_JURNAL_SINYAL, FILE_ERROR_LOG, KOLOM_JURNAL_SINYAL,
     ST_BATAL_TERLEWAT, ST_BATAL_SL, ST_BATAL_KEDALUWARSA, ST_SELESAI_TP2, ST_TP1_TERCAPAI,
-    ST_AKTIF_ENTRY, ST_VALID_BERJALAN, ST_VALID_PULLBACK, ST_VALID_DEKAT_SL, STATUS_TERMINAL_SINYAL
+    ST_AKTIF_ENTRY, ST_VALID_BERJALAN, ST_VALID_PULLBACK, ST_VALID_DEKAT_SL, STATUS_TERMINAL_SINYAL,
+    SIGNAL_STATUS_NO_SETUP, SIGNAL_STATUS_SETUP_DETECTED, SIGNAL_STATUS_WAITING_PULLBACK,
+    SIGNAL_STATUS_WAITING_CONFIRMATION, SIGNAL_STATUS_SIGNAL_CONFIRMED, SIGNAL_STATUS_ENTRY_REACHED,
+    SIGNAL_STATUS_ENTRY_MISSED, SIGNAL_STATUS_ACTIVE_TRADE, SIGNAL_STATUS_TP_HIT,
+    SIGNAL_STATUS_SL_HIT, SIGNAL_STATUS_CANCELLED, SIGNAL_STATUS_EXPIRED,
+    CANONICAL_SIGNAL_STATUSES, TERMINAL_CANONICAL_STATUSES, SETUP_TYPES,
 )
-from modules.utils import _catat_error, deteksi_offset
+from modules.utils import _catat_error, deteksi_offset, format_wib_timestamp
 from modules.mt5_conn import (
     pastikan_mt5_aktif, ambil_data, tambah_indikator, _ambil_m1_sejak,
     cek_posisi_terbuka_mt5, status_risiko_akun, _info_tipe_pending
@@ -183,9 +188,187 @@ def _simulasi_jalur(sig, rates, spread=0.0):
     return h
 
 
+def map_status_to_canonical(status_str, has_live_position=False):
+    """Pemetaan eksplisit status legacy ST_* atau status scanner ke 12 status kanonik Signal Manager."""
+    raw = str(status_str or "").strip()
+    upper = raw.upper()
+    if upper in CANONICAL_SIGNAL_STATUSES:
+        if upper == SIGNAL_STATUS_ENTRY_REACHED and has_live_position:
+            return SIGNAL_STATUS_ACTIVE_TRADE
+        return upper
+    if raw == ST_BATAL_TERLEWAT or "TERLEWAT" in upper:
+        return SIGNAL_STATUS_ENTRY_MISSED
+    if raw == ST_BATAL_SL or "SL JEBOL" in upper:
+        return SIGNAL_STATUS_SL_HIT
+    if raw == ST_BATAL_KEDALUWARSA or "KEDALUWARSA" in upper or "EXPIRED" in upper:
+        return SIGNAL_STATUS_EXPIRED
+    if raw == ST_SELESAI_TP2 or raw == ST_TP1_TERCAPAI or "TP1" in upper or "TP2" in upper:
+        return SIGNAL_STATUS_TP_HIT
+    if raw == ST_AKTIF_ENTRY:
+        return SIGNAL_STATUS_ACTIVE_TRADE if has_live_position else SIGNAL_STATUS_ENTRY_REACHED
+    if raw == ST_VALID_BERJALAN or raw == ST_VALID_DEKAT_SL:
+        return SIGNAL_STATUS_ACTIVE_TRADE if has_live_position else SIGNAL_STATUS_SIGNAL_CONFIRMED
+    if raw == ST_VALID_PULLBACK:
+        return SIGNAL_STATUS_SIGNAL_CONFIRMED if has_live_position is False else SIGNAL_STATUS_ACTIVE_TRADE
+    if "CANCEL" in upper or "BATAL" in upper:
+        return SIGNAL_STATUS_CANCELLED
+    if "VALID" in upper or "CONFIRMED" in upper:
+        return SIGNAL_STATUS_SIGNAL_CONFIRMED
+    return SIGNAL_STATUS_NO_SETUP
+
+
+def normalize_signal_payload(sig, extra=None):
+    """
+    Menyeragamkan struktur sinyal agar selalu memiliki metadata lengkap Signal Manager:
+    signal_id, direction, setup_type, timestamp, entry_price, sl, tp1, tp2, rr,
+    invalidation_price, reasons, status (kanonik) + field legacy (arah, lo, hi, ket).
+    """
+    if not isinstance(sig, dict):
+        return sig
+    out = dict(sig)
+    if isinstance(extra, dict):
+        out.update(extra)
+
+    arah = str(out.get("direction") or out.get("arah") or "").upper()
+    if arah in ("BUY", "SELL"):
+        out["arah"] = arah
+        out["direction"] = arah
+
+    lo = float(out.get("lo") or out.get("entry_min") or out.get("entry_price") or 0.0)
+    hi = float(out.get("hi") or out.get("entry_max") or lo or 0.0)
+    if lo > hi and hi > 0:
+        lo, hi = hi, lo
+    if lo > 0:
+        out["lo"] = round(lo, 2)
+        out["hi"] = round(hi, 2)
+        out.setdefault("lo_asli", round(lo, 2))
+        out.setdefault("hi_asli", round(hi, 2))
+
+    entry_p = out.get("entry_price") or out.get("entry_acuan")
+    if not isinstance(entry_p, (int, float)) or float(entry_p) <= 0:
+        entry_p = round((lo + hi) / 2.0, 2) if lo > 0 else 0.0
+    out["entry_price"] = round(float(entry_p), 2)
+
+    sl_v = float(out.get("sl") or 0.0)
+    tp1_v = float(out.get("tp1") or 0.0)
+    tp2_v = float(out.get("tp2") or tp1_v or 0.0)
+    out["sl"] = round(sl_v, 2)
+    out["tp1"] = round(tp1_v, 2)
+    out["tp2"] = round(tp2_v, 2)
+
+    inval_v = out.get("invalidation_price")
+    if not isinstance(inval_v, (int, float)) or float(inval_v) <= 0:
+        inval_v = sl_v
+    out["invalidation_price"] = round(float(inval_v), 2)
+
+    risk_v = abs(out["entry_price"] - sl_v)
+    if risk_v > 0 and tp1_v > 0:
+        out["rr"] = round(abs(tp1_v - out["entry_price"]) / risk_v, 2)
+    else:
+        out["rr"] = float(out.get("rr") or 0.0)
+
+    setup_t = str(out.get("setup_type") or "TREND_PULLBACK").upper()
+    if setup_t not in SETUP_TYPES:
+        setup_t = "TREND_PULLBACK"
+    out["setup_type"] = setup_t
+
+    ts_wib = out.get("timestamp") or format_wib_timestamp(default_now=True)
+    out["timestamp"] = str(ts_wib)
+
+    if not out.get("signal_id"):
+        seed = out.get("t_buat") or int(time.time())
+        out["signal_id"] = f"SIG_{seed}_{arah or 'NA'}_{int(round(out['entry_price']))}"
+
+    reasons_val = out.get("reasons")
+    if isinstance(reasons_val, str):
+        reasons_list = [reasons_val] if reasons_val else []
+    elif isinstance(reasons_val, (list, tuple)):
+        reasons_list = [str(r) for r in reasons_val if r]
+    else:
+        ket_v = str(out.get("ket") or "").strip()
+        reasons_list = [ket_v] if ket_v else []
+    out["reasons"] = reasons_list
+    if not out.get("ket") and reasons_list:
+        out["ket"] = "; ".join(reasons_list[:2])
+
+    cur_st = out.get("status")
+    out["status"] = map_status_to_canonical(cur_st or SIGNAL_STATUS_SIGNAL_CONFIRMED)
+    return out
+
+
+def create_signal_from_decision(dec, extra=None):
+    """Konversi keputusan VALID dari evaluate_trade_decision menjadi payload Signal Manager terstandar."""
+    if not isinstance(dec, dict) or dec.get("status") != "VALID" or not dec.get("plan"):
+        return None
+    plan = dec["plan"]
+    zone = dec.get("zone") or {}
+    arah = str(dec.get("direction") or plan.get("arah") or "").upper()
+    if arah not in ("BUY", "SELL"):
+        return None
+    lo = float(plan.get("entry_min") or zone.get("price_low") or plan.get("entry_acuan", 0.0))
+    hi = float(plan.get("entry_max") or zone.get("price_high") or plan.get("entry_acuan", 0.0))
+    setup_t = str(dec.get("setup_type") or plan.get("setup_type") or "TREND_PULLBACK").upper()
+    inval = float(plan.get("invalidation_price") or zone.get("invalidation_price") or plan.get("sl", 0.0))
+    sig = {
+        "signal_id": f"SIG_{dec.get('snapshot_id') or int(time.time())}_{arah}_{setup_t}",
+        "arah": arah,
+        "direction": arah,
+        "setup_type": setup_t,
+        "timestamp": dec.get("snapshot_time") or dec.get("timestamp") or format_wib_timestamp(default_now=True),
+        "lo": round(min(lo, hi), 2),
+        "hi": round(max(lo, hi), 2),
+        "entry_price": round(float(plan.get("entry_acuan") or ((lo + hi) / 2.0)), 2),
+        "sl": round(float(plan["sl"]), 2),
+        "tp1": round(float(plan["tp1"]), 2),
+        "tp2": round(float(plan.get("tp2") or plan["tp1"]), 2),
+        "rr": float(plan.get("rr") or 0.0),
+        "invalidation_price": round(inval, 2),
+        "reasons": list(dec.get("reasons") or []),
+        "ket": plan.get("keterangan") or "; ".join(dec.get("reasons") or []),
+        "risiko": "MEDIUM RISK" if setup_t in ("TREND_PULLBACK", "BREAKOUT_RETEST") else "LOW RISK",
+        "sumber": "PYTHON_SCANNER",
+        "_from_python_scanner": True,
+        "status": str(dec.get("signal_status") or SIGNAL_STATUS_SIGNAL_CONFIRMED),
+    }
+    return normalize_signal_payload(sig, extra=extra)
+
+
+def resolve_unified_signal_status(sig, harga_bid, pos_list=None, order_list=None, decision_status=None, check_mt5=False):
+    """
+    Resolusi konsisten status siklus hidup sinyal:
+    Membedakan SIGNAL CONFIRMED vs ENTRY REACHED vs ACTIVE TRADE (posisi MT5 nyata)
+    vs ENTRY MISSED / TP HIT / SL HIT / CANCELLED / EXPIRED.
+    """
+    if not sig or not isinstance(sig, dict) or not sig.get("lo"):
+        if str(decision_status or "").upper() in (SIGNAL_STATUS_SETUP_DETECTED, SIGNAL_STATUS_WAITING_PULLBACK, SIGNAL_STATUS_WAITING_CONFIRMATION):
+            return str(decision_status).upper(), "Menunggu konfirmasi setup"
+        return SIGNAL_STATUS_NO_SETUP, "Tidak ada setup aktif"
+
+    st_leg, alasan = evaluasi_validitas_sinyal(sig, harga_bid) if harga_bid and harga_bid > 0 else (SIGNAL_STATUS_SIGNAL_CONFIRMED, "Menunggu harga")
+    has_live_pos = False
+    if pos_list is not None or order_list is not None or check_mt5:
+        try:
+            _, kat_eks, info_eks = cek_status_eksekusi_sinyal(
+                sig,
+                pos_list=pos_list if pos_list is not None else (() if not check_mt5 else None),
+                order_list=order_list if order_list is not None else (() if not check_mt5 else None),
+            )
+            has_live_pos = (kat_eks == "DIAMBIL")
+        except Exception:
+            has_live_pos = False
+
+    canon = map_status_to_canonical(st_leg, has_live_position=has_live_pos)
+    if canon == SIGNAL_STATUS_TP_HIT and st_leg == ST_TP1_TERCAPAI and has_live_pos:
+        canon = SIGNAL_STATUS_TP_HIT
+    return canon, alasan
+
+
 def sinyal_masih_aktif(status_str):
-    """True bila sinyal belum BATAL / KEDALUWARSA / SELESAI TP2 (tidak bergantung pencocokan substring rapuh)."""
+    """True bila sinyal belum terminal (BATAL/SL/KEDALUWARSA/SELESAI TP2/CANCELLED/EXPIRED/ENTRY MISSED)."""
     if not status_str or status_str == "UNKNOWN":
+        return False
+    upper = str(status_str).strip().upper()
+    if upper in TERMINAL_CANONICAL_STATUSES or upper == SIGNAL_STATUS_NO_SETUP:
         return False
     if status_str in STATUS_TERMINAL_SINYAL:
         return False
@@ -766,6 +949,9 @@ def _stempel_sinyal(sig, data_lama, catatan=""):
         sig["t_buat"] = ts_now
         sig["harga_buat"] = float(tick.bid)
         sig["spread_buat"] = round(float(tick.ask - tick.bid), 3)
+        norm = normalize_signal_payload(sig)
+        if isinstance(norm, dict):
+            sig.update(norm)
         _catat_sinyal_csv(sig, catatan)
 
 
@@ -773,6 +959,13 @@ def gerbang_sinyal_baru(sig):
     """Gerbang keras (kode) untuk penerbitan sinyal baru: validitas SL, buffer ATR, jarak entry, spread, blackout berita High-impact USD,
     batas rugi harian, batas total risiko terbuka. Mengembalikan (ok, [alasan]). Bila MT5 tak tersedia: tidak memblokir."""
     alasan = []
+    norm_sig = normalize_signal_payload(sig)
+    if isinstance(norm_sig, dict):
+        sig.update(norm_sig)
+    is_scanner_verified = bool(
+        sig.get("_from_python_scanner")
+        or str(sig.get("sumber", "")).upper() == "PYTHON_SCANNER"
+    )
     if not pastikan_mt5_aktif():
         return True, alasan
     tick = mt5.symbol_info_tick(SYMBOL)
@@ -794,30 +987,31 @@ def gerbang_sinyal_baru(sig):
         if (arah_cek == "BUY" and tick.bid >= tp1_cek) or (arah_cek == "SELL" and tick.bid <= tp1_cek):
             alasan.append(f"harga live ({tick.bid:.2f}) sudah mencapai/melewati TP1 ({tp1_cek:.2f})")
 
-        # 2. Pastikan buffer SL dari tepi luar zona cukup aman terhadap volatilitas (ATR M5) agar tidak mudah kena sweep tipis
-        min_buf_sl = max(2.2, round(0.9 * atr_val, 2))
-        if arah_cek == "BUY":
-            if (lo_cek - sl_cek) < min_buf_sl:
-                sl_aman = round(lo_cek - min_buf_sl, 2)
-                mid_c = (lo_cek + hi_cek) / 2.0
-                if (mid_c - sl_aman) <= SL_JARAK_MAKS:
-                    sig["sl"] = sl_aman
-                    sl_cek = sl_aman
-                    risiko_baru = mid_c - sl_aman
-                    if (tp1_cek - mid_c) / max(risiko_baru, 0.1) < RR_MIN:
-                        sig["tp1"] = round(mid_c + RR_MIN * risiko_baru, 2)
-                        sig["tp2"] = round( max(tp2_cek, mid_c + 2.6 * risiko_baru), 2)
-        elif arah_cek == "SELL":
-            if (sl_cek - hi_cek) < min_buf_sl:
-                sl_aman = round(hi_cek + min_buf_sl, 2)
-                mid_c = (lo_cek + hi_cek) / 2.0
-                if (sl_aman - mid_c) <= SL_JARAK_MAKS:
-                    sig["sl"] = sl_aman
-                    sl_cek = sl_aman
-                    risiko_baru = sl_aman - mid_c
-                    if (mid_c - tp1_cek) / max(risiko_baru, 0.1) < RR_MIN:
-                        sig["tp1"] = round(mid_c - RR_MIN * risiko_baru, 2)
-                        sig["tp2"] = round(min(tp2_cek, mid_c - 2.6 * risiko_baru), 2)
+        # 2. Pastikan buffer SL dari tepi luar zona cukup aman terhadap volatilitas (ATR M5) untuk sinyal non-scanner
+        if not is_scanner_verified:
+            min_buf_sl = max(2.2, round(0.9 * atr_val, 2))
+            if arah_cek == "BUY":
+                if (lo_cek - sl_cek) < min_buf_sl:
+                    sl_aman = round(lo_cek - min_buf_sl, 2)
+                    mid_c = (lo_cek + hi_cek) / 2.0
+                    if (mid_c - sl_aman) <= SL_JARAK_MAKS:
+                        sig["sl"] = sl_aman
+                        sl_cek = sl_aman
+                        risiko_baru = mid_c - sl_aman
+                        if (tp1_cek - mid_c) / max(risiko_baru, 0.1) < RR_MIN:
+                            sig["tp1"] = round(mid_c + RR_MIN * risiko_baru, 2)
+                            sig["tp2"] = round(max(tp2_cek, mid_c + 2.6 * risiko_baru), 2)
+            elif arah_cek == "SELL":
+                if (sl_cek - hi_cek) < min_buf_sl:
+                    sl_aman = round(hi_cek + min_buf_sl, 2)
+                    mid_c = (lo_cek + hi_cek) / 2.0
+                    if (sl_aman - mid_c) <= SL_JARAK_MAKS:
+                        sig["sl"] = sl_aman
+                        sl_cek = sl_aman
+                        risiko_baru = sl_aman - mid_c
+                        if (mid_c - tp1_cek) / max(risiko_baru, 0.1) < RR_MIN:
+                            sig["tp1"] = round(mid_c - RR_MIN * risiko_baru, 2)
+                            sig["tp2"] = round(min(tp2_cek, mid_c - 2.6 * risiko_baru), 2)
 
         mid = (sig.get("lo_asli", sig["lo"]) + sig.get("hi_asli", sig["hi"])) / 2.0
         if abs(mid - tick.bid) > ENTRY_JARAK_MAKS:
@@ -835,8 +1029,8 @@ def gerbang_sinyal_baru(sig):
             alasan.append(f"batas rugi harian tercapai ({st['rugi_hari_pct']:.2f}% >= {MAKS_RUGI_HARIAN_PCT:g}%)")
         if st["risiko_terbuka_pct"] >= MAKS_RISIKO_TERBUKA_PCT:
             alasan.append(f"total risiko terbuka {st['risiko_terbuka_pct']:.2f}% >= {MAKS_RISIKO_TERBUKA_PCT:g}%")
-    # --- Filter Trend: sinyal harus searah bias HTF ---
-    if FILTER_TREND_AKTIF:
+    # --- Filter Trend: sinyal dari Python Scanner sudah tervalidasi penuh oleh struktur H4->H1->M30->M5 ---
+    if FILTER_TREND_AKTIF and not is_scanner_verified:
         try:
             bias = bias_htf_cached()
             arah = str(sig.get("arah", "")).upper()
@@ -852,8 +1046,8 @@ def gerbang_sinyal_baru(sig):
                     alasan.append(f"melawan trend HTF ({arah} vs bias HTF {bias['bias']}, skor {bias['skor']:+d}) — ubah FILTER_TREND_AKTIF=False untuk menonaktifkan")
         except Exception as e:
             _catat_error("gerbang_trend", e)
-    # --- Filter Sesi: sinyal baru hanya diizinkan di sesi London & New York ---
-    if FILTER_SESI_AKTIF and tick and getattr(tick, "time", 0) > 0:
+    # --- Filter Sesi: sinyal baru non-scanner hanya diizinkan di sesi London & New York ---
+    if FILTER_SESI_AKTIF and not is_scanner_verified and tick and getattr(tick, "time", 0) > 0:
         offset = SERVER_UTC_OFFSET_JAM
         if offset is None:
             offset = deteksi_offset(tick, df if "df" in locals() else None)

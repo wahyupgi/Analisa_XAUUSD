@@ -36,7 +36,8 @@ from modules.analisis_teknikal import (
 from modules.sinyal_jurnal import (
     evaluasi_validitas_sinyal, cek_status_eksekusi_sinyal,
     tentukan_klasifikasi_risiko_sinyal, evaluasi_limit_kena_kentut,
-    tandai_sinyal_diambil_jurnal, gerbang_sinyal_baru
+    tandai_sinyal_diambil_jurnal, gerbang_sinyal_baru,
+    resolve_unified_signal_status,
 )
 from modules.ai_gemini import ekstrak_target_ai
 from modules.state_manager import (
@@ -1150,6 +1151,24 @@ def _build_monitor_snapshot(
     radar_active_cnt = int(rec.get("monitor_active_count", len(wl_list)) or 0)
     radar_excl_cnt = int(rec.get("excluded_count", 0) or 0)
 
+    setup_type_disp = str(
+        dec.get("setup_type")
+        or (dec.get("plan") or {}).get("setup_type")
+        or (sinyal_aktif.get("setup_type") if isinstance(sinyal_aktif, dict) else None)
+        or ("TREND_PULLBACK" if confirmed_st == "VALID" else "NONE")
+    ).upper()
+    try:
+        sig_lifecycle, _ = resolve_unified_signal_status(
+            sinyal_aktif,
+            bid_val,
+            pos_list=positions if positions is not None else (),
+            order_list=orders if orders is not None else (),
+            decision_status=dec.get("signal_status") or confirmed_st,
+            check_mt5=False,
+        )
+    except Exception:
+        sig_lifecycle = str(dec.get("signal_status") or ("SIGNAL CONFIRMED" if confirmed_st == "VALID" else "NO SETUP"))
+
     return {
         "time_str": time_str,
         "price": price_val,
@@ -1159,6 +1178,8 @@ def _build_monitor_snapshot(
         "h1_bias": h1_short,
         "m5_status": m5_label,
         "signal": signal_str,
+        "setup_type": setup_type_disp,
+        "signal_status": sig_lifecycle,
         "confirmed_status": confirmed_st,
         "zone_touch_status": zt_status,
         "displacement_status": disp_status,
@@ -1283,6 +1304,7 @@ def format_monitor_detail(monitor_data: dict) -> str:
         "=" * 70,
         f"- Current Price    : {price_str} | Market Bias: H4 {d.get('h4_bias', 'N/A')} | H1 {d.get('h1_bias', 'N/A')}",
         f"- M5 Structure     : {d.get('m5_status', 'WAIT')} | Signal: {d.get('signal', 'WAIT')} | Confirmed: {d.get('confirmed_status', 'WAIT')}",
+        f"- Setup & Lifecycle: Type={d.get('setup_type', 'NONE')} | Status={d.get('signal_status', 'NO SETUP')}",
         f"- Validation State : ZoneTouch={d.get('zone_touch_status', 'WAIT')} | Displacement={d.get('displacement_status', 'NOT CHECKED')} | R:R={d.get('rr_status', 'NOT CHECKED')}",
         f"- Sumber Zona Aktif: Python Scanner Radar Qualified ({len(wl)} zona aktif terpantau, Single Snapshot)",
     ]

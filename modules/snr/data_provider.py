@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover
     mt5 = None
 
 from modules.config import SYMBOL as DEFAULT_APP_SYMBOL, TIMEFRAMES as APP_TIMEFRAMES
+from modules.utils import format_wib_timestamp, get_current_wib
 from modules.mt5_conn import ambil_data, pastikan_mt5_aktif
 from modules.snr.config import (
     FILE_LOG_SNR_AUDIT,
@@ -107,18 +108,55 @@ def prepare_snr_frame(df, has_unclosed_last_bar=False):
 
     for req_col in ("Open", "High", "Low", "Close"):
         if req_col not in work.columns:
-            return pd.DataFrame(), None
+            empty_df = pd.DataFrame()
+            empty_df.attrs["invalid_ohlc"] = True
+            return empty_df, None
         work[req_col] = pd.to_numeric(work[req_col], errors="coerce")
 
+    had_invalid_ohlc = False
+    if not work.empty:
+        tail_chk = work.iloc[-min(len(work), 5):]
+        if tail_chk[["Open", "High", "Low", "Close"]].isna().any().any():
+            had_invalid_ohlc = True
+        bad_ohlc = (
+            (work["High"] < work["Low"])
+            | (work["Close"] <= 0)
+            | (work["Open"] <= 0)
+            | (work["High"] <= 0)
+            | (work["Low"] <= 0)
+        )
+        if bad_ohlc.any():
+            had_invalid_ohlc = True
+
     work = work.dropna(subset=["Open", "High", "Low", "Close"]).reset_index(drop=True)
+    if not work.empty:
+        valid_ohlc = (work["High"] >= work["Low"]) & (work["Close"] > 0) & (work["Open"] > 0)
+        work = work[valid_ohlc].reset_index(drop=True)
     if work.empty:
-        return pd.DataFrame(), None
+        empty_df = pd.DataFrame()
+        if had_invalid_ohlc:
+            empty_df.attrs["invalid_ohlc"] = True
+        return empty_df, None
 
     if "Time" not in work.columns:
         if isinstance(df.index, pd.DatetimeIndex):
             work["Time"] = df.index[: len(work)]
         else:
             work["Time"] = pd.date_range("2026-01-01", periods=len(work), freq="5min")
+
+    # Deteksi duplikasi & ketidakurutan timestamp sebelum normalisasi
+    src_attrs = dict(getattr(df, "attrs", {}) or {})
+    had_duplicate_ts = False
+    had_out_of_order_ts = False
+    try:
+        ts_chk = pd.to_datetime(work["Time"], errors="coerce")
+        if len(ts_chk) > 1:
+            if ts_chk.duplicated().any():
+                had_duplicate_ts = True
+            if not ts_chk.is_monotonic_increasing:
+                had_out_of_order_ts = True
+    except Exception:
+        pass
 
     # Urutkan berdasarkan waktu secara kronologis untuk mencegah ketidakurutan timestamp
     try:
@@ -127,6 +165,7 @@ def prepare_snr_frame(df, has_unclosed_last_bar=False):
         work = work.reset_index(drop=True)
 
     # Pisahkan candle yang belum closed (forming/open candle)
+    src_is_unclosed = src_attrs.get("is_closed") is False or src_attrs.get("has_unclosed_last_bar") is True
     forming_candle = None
     if "is_closed" in work.columns:
         unclosed_mask = work["is_closed"].astype(bool) == False  # noqa: E712
@@ -138,12 +177,26 @@ def prepare_snr_frame(df, has_unclosed_last_bar=False):
         if forming_mask.any():
             forming_candle = work[forming_mask].iloc[-1].to_dict()
             work = work[~forming_mask].reset_index(drop=True)
-    elif has_unclosed_last_bar and len(work) > 1:
+    elif (has_unclosed_last_bar or src_is_unclosed) and len(work) > 1:
         forming_candle = work.iloc[-1].to_dict()
         work = work.iloc[:-1].reset_index(drop=True)
 
     if work.empty:
-        return pd.DataFrame(), forming_candle
+        empty_df = pd.DataFrame()
+        if had_invalid_ohlc:
+            empty_df.attrs["invalid_ohlc"] = True
+        return empty_df, forming_candle
+
+    if had_invalid_ohlc:
+        work.attrs["invalid_ohlc"] = True
+    if had_duplicate_ts:
+        work.attrs["duplicate_timestamps"] = True
+    if had_out_of_order_ts:
+        work.attrs["out_of_order_timestamps"] = True
+    if "time_tz" in src_attrs:
+        work.attrs["time_tz"] = src_attrs["time_tz"]
+    if src_is_unclosed:
+        work.attrs["is_closed"] = False
 
     # Hitung ATR14 pada candle closed jika belum tersedia atau bernilai NaN
     if "ATR14" not in work.columns or work["ATR14"].isna().all():
@@ -530,6 +583,292 @@ def detect_snr_market_status(
     }
 
 
+def _snr_align_ts(ts_a, ts_b, b_tz_hint="WIB"):
+    a_tz = getattr(ts_a, "tzinfo", None) is not None
+    b_tz = getattr(ts_b, "tzinfo", None) is not None
+    if a_tz == b_tz:
+        return ts_a, ts_b
+    if a_tz and not b_tz:
+        try:
+            if str(b_tz_hint or "WIB").upper() == "UTC":
+                return ts_a, ts_b.tz_localize("UTC")
+            return ts_a.tz_localize(None), ts_b
+        except Exception:
+            return ts_a, ts_b
+    try:
+        return ts_a, ts_b.tz_convert("UTC").tz_localize(None)
+    except Exception:
+        try:
+            return ts_a, ts_b.tz_localize(None)
+        except Exception:
+            return ts_a, ts_b
+
+
+def validate_snr_data_freshness(
+    prepared_frames,
+    server_time=None,
+    tick=None,
+    market_status="OPEN",
+    connection_status="UNKNOWN",
+    bid=0.0,
+    ask=0.0,
+    snapshot=None,
+):
+    """
+    Validasi DATA FRESHNESS untuk SNR Advanced Scanner:
+    FRESH / STALE / INVALID / NO DATA.
+    """
+    tf_minutes = {"M5": 5, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
+    last_candle_times = {}
+    ages_minutes = {}
+    stale_tfs = []
+    frames_map = prepared_frames or {}
+    mkt_st = str(market_status or "OPEN").upper()
+    conn_st = str(connection_status or "UNKNOWN").upper()
+
+    if isinstance(snapshot, dict) and snapshot.get("snapshot_status") == "DATA_INCOMPLETE":
+        return {
+            "status": "INVALID",
+            "ok": False,
+            "reason": snapshot.get("error_reason") or "Snapshot pasar DATA_INCOMPLETE",
+            "market_status": mkt_st,
+            "connection_status": conn_st,
+            "last_candle_times": last_candle_times,
+            "ages_minutes": ages_minutes,
+            "stale_timeframes": stale_tfs,
+            "is_market_closed": mkt_st == "CLOSED",
+        }
+
+    if isinstance(snapshot, dict) and snapshot.get("data_freshness") in ("INVALID", "NO DATA", "STALE"):
+        snap_df_status = str(snapshot.get("data_freshness")).upper()
+        snap_df_info = snapshot.get("data_freshness_info") if isinstance(snapshot.get("data_freshness_info"), dict) else {}
+        # Evaluasi waktu candle tetap dikumpulkan
+        for tf in ("H4", "H1", "M30", "M5"):
+            df_tf = frames_map.get(tf)
+            if df_tf is not None and not df_tf.empty and "Time" in df_tf.columns:
+                raw_t = df_tf["Time"].iloc[-1]
+                src_tz = str((getattr(df_tf, "attrs", {}) or {}).get("time_tz", "WIB"))
+                last_candle_times[tf] = format_wib_timestamp(raw_t, default_now=False, source_tz=src_tz) or str(raw_t)
+        default_tick_st = "MARKET CLOSED" if mkt_st == "CLOSED" else snap_df_status
+        default_candle_st = "HISTORICAL (CLOSED)" if mkt_st == "CLOSED" else snap_df_status
+        return {
+            "status": snap_df_status,
+            "ok": False,
+            "reason": snap_df_info.get("reason") or snapshot.get("error_reason") or f"Status snapshot: {snap_df_status}",
+            "market_status": mkt_st,
+            "connection_status": conn_st,
+            "tick_status": snap_df_info.get("tick_status") or default_tick_st,
+            "candle_status": snap_df_info.get("candle_status") or default_candle_st,
+            "data_validation": snap_df_info.get("data_validation") or "FAIL",
+            "last_candle_times": last_candle_times or dict(snap_df_info.get("last_candle_times") or {}),
+            "ages_minutes": dict(snap_df_info.get("ages_minutes") or ages_minutes),
+            "stale_timeframes": list(snap_df_info.get("stale_timeframes") or stale_tfs),
+            "is_market_closed": bool(snap_df_info.get("is_market_closed", mkt_st == "CLOSED")),
+        }
+
+    # Cek validitas tick bila diberikan
+    if tick is not None:
+        tb = getattr(tick, "bid", None) if not isinstance(tick, dict) else tick.get("bid")
+        ta = getattr(tick, "ask", None) if not isinstance(tick, dict) else tick.get("ask")
+        try:
+            fb = float(tb) if tb is not None else 0.0
+            fa = float(ta) if ta is not None else 0.0
+            if not math.isfinite(fb) or not math.isfinite(fa) or (fa > 0 and fa < fb) or fb < 0:
+                return {
+                    "status": "INVALID",
+                    "ok": False,
+                    "reason": "Tick Bid/Ask tidak valid",
+                    "market_status": mkt_st,
+                    "connection_status": conn_st,
+                    "tick_status": "INVALID",
+                    "candle_status": "HISTORICAL (CLOSED)" if mkt_st == "CLOSED" else "UNKNOWN",
+                    "data_validation": "FAIL",
+                    "last_candle_times": last_candle_times,
+                    "ages_minutes": ages_minutes,
+                    "stale_timeframes": stale_tfs,
+                    "is_market_closed": mkt_st == "CLOSED",
+                }
+        except Exception:
+            return {
+                "status": "INVALID",
+                "ok": False,
+                "reason": "Tick Bid/Ask korup",
+                "market_status": mkt_st,
+                "connection_status": conn_st,
+                "tick_status": "INVALID",
+                "candle_status": "HISTORICAL (CLOSED)" if mkt_st == "CLOSED" else "UNKNOWN",
+                "data_validation": "FAIL",
+                "last_candle_times": last_candle_times,
+                "ages_minutes": ages_minutes,
+                "stale_timeframes": stale_tfs,
+                "is_market_closed": mkt_st == "CLOSED",
+            }
+
+    if bid > 0 and ask > 0 and ask < bid:
+        return {
+            "status": "INVALID",
+            "ok": False,
+            "reason": f"Ask ({ask:.2f}) lebih kecil dari Bid ({bid:.2f})",
+            "market_status": mkt_st,
+            "connection_status": conn_st,
+            "tick_status": "INVALID",
+            "candle_status": "HISTORICAL (CLOSED)" if mkt_st == "CLOSED" else "UNKNOWN",
+            "data_validation": "FAIL",
+            "last_candle_times": last_candle_times,
+            "ages_minutes": ages_minutes,
+            "stale_timeframes": stale_tfs,
+            "is_market_closed": mkt_st == "CLOSED",
+        }
+
+    non_empty = [tf for tf in ("H4", "H1", "M30", "M5") if isinstance(frames_map.get(tf), pd.DataFrame) and not frames_map[tf].empty]
+    any_invalid = any(
+        isinstance(frames_map.get(tf), pd.DataFrame) and bool(getattr(frames_map[tf], "attrs", {}).get("invalid_ohlc", False))
+        for tf in ("H4", "H1", "M30", "M5")
+    )
+    any_dup = any(
+        isinstance(frames_map.get(tf), pd.DataFrame) and bool(getattr(frames_map[tf], "attrs", {}).get("duplicate_timestamps", False))
+        for tf in ("H4", "H1", "M30", "M5")
+    )
+    any_ooo = any(
+        isinstance(frames_map.get(tf), pd.DataFrame) and bool(getattr(frames_map[tf], "attrs", {}).get("out_of_order_timestamps", False))
+        for tf in ("H4", "H1", "M30", "M5")
+    )
+    if any_invalid or any_dup or any_ooo:
+        inv_rsn = (
+            "Candle duplikat terdeteksi pada data historis"
+            if any_dup
+            else (
+                "Urutan timestamp candle tidak berurutan (out-of-order)"
+                if any_ooo
+                else "Data OHLC mengandung nilai NaN / tidak konsisten (High < Low atau <= 0)"
+            )
+        )
+        return {
+            "status": "INVALID",
+            "ok": False,
+            "reason": inv_rsn,
+            "market_status": mkt_st,
+            "connection_status": conn_st,
+            "tick_status": "INVALID" if mkt_st != "CLOSED" else "MARKET CLOSED",
+            "candle_status": "INVALID",
+            "data_validation": "FAIL",
+            "last_candle_times": last_candle_times,
+            "ages_minutes": ages_minutes,
+            "stale_timeframes": stale_tfs,
+            "is_market_closed": mkt_st == "CLOSED",
+        }
+
+    if not non_empty or mkt_st == "DATA UNAVAILABLE":
+        return {
+            "status": "NO DATA",
+            "ok": False,
+            "reason": "Data candle historis MT5 tidak tersedia",
+            "market_status": mkt_st,
+            "connection_status": "DISCONNECTED" if conn_st == "UNKNOWN" else conn_st,
+            "tick_status": "NO DATA",
+            "candle_status": "NO DATA",
+            "data_validation": "FAIL",
+            "last_candle_times": last_candle_times,
+            "ages_minutes": ages_minutes,
+            "stale_timeframes": stale_tfs,
+            "is_market_closed": False,
+        }
+
+    for tf in ("H4", "H1", "M30", "M5"):
+        df_tf = frames_map.get(tf)
+        if df_tf is None or df_tf.empty or "Time" not in df_tf.columns:
+            continue
+        raw_t = df_tf["Time"].iloc[-1]
+        src_tz = str((getattr(df_tf, "attrs", {}) or {}).get("time_tz", "WIB"))
+        last_candle_times[tf] = format_wib_timestamp(raw_t, default_now=False, source_tz=src_tz) or str(raw_t)
+
+    # Hitung usia candle terhadap server_time (hanya jika server_time bertipe waktu valid)
+    stale_msg = None
+    tick_stale = False
+    candle_stale = False
+    ref_srv_ts = None
+    if isinstance(snapshot, dict) and snapshot.get("server_time") is not None:
+        ref_srv_ts = snapshot.get("server_time")
+    elif tick is not None and getattr(tick, "time", 0) and getattr(tick, "time", 0) > 0:
+        ref_srv_ts = pd.Timestamp(int(getattr(tick, "time")), unit="s")
+    elif isinstance(server_time, (pd.Timestamp, datetime)) or (isinstance(server_time, str) and server_time and "WIB" not in server_time):
+        ref_srv_ts = server_time
+
+    if ref_srv_ts is not None:
+        try:
+            srv_ts = pd.Timestamp(ref_srv_ts)
+            if not pd.isna(srv_ts):
+                for tf in ("M5", "M30", "H1", "H4"):
+                    df_tf = frames_map.get(tf)
+                    if df_tf is None or df_tf.empty or "Time" not in df_tf.columns:
+                        continue
+                    lts = pd.Timestamp(df_tf["Time"].iloc[-1])
+                    if pd.isna(lts):
+                        continue
+                    src_tz = str((getattr(df_tf, "attrs", {}) or {}).get("time_tz", "WIB"))
+                    s_al, l_al = _snr_align_ts(srv_ts, lts, b_tz_hint=src_tz)
+                    age_min = (s_al - l_al).total_seconds() / 60.0
+                    ages_minutes[tf] = round(age_min, 2)
+                    tf_min = tf_minutes[tf]
+                    if age_min < -tf_min:
+                        stale_tfs.append(tf)
+                        tick_stale = True
+                        stale_msg = stale_msg or f"Tick lebih lama dari candle {tf} terakhir ({abs(age_min):.0f} menit; stale tick)"
+                    elif age_min > tf_min * 3 + 5:
+                        stale_tfs.append(tf)
+                        candle_stale = True
+                        stale_msg = stale_msg or f"Data {tf} terlambat ({age_min:.0f} menit sejak candle terakhir)"
+        except Exception:
+            pass
+
+    if mkt_st == "CLOSED":
+        return {
+            "status": "STALE",
+            "ok": False,
+            "reason": stale_msg or "Market sedang tutup (data sesi penutupan terakhir; bukan error koneksi MT5)",
+            "market_status": "CLOSED",
+            "connection_status": conn_st,
+            "tick_status": "MARKET CLOSED",
+            "candle_status": "HISTORICAL (CLOSED)",
+            "data_validation": "FAIL",
+            "last_candle_times": last_candle_times,
+            "ages_minutes": ages_minutes,
+            "stale_timeframes": stale_tfs,
+            "is_market_closed": True,
+        }
+
+    if stale_msg:
+        return {
+            "status": "STALE",
+            "ok": False,
+            "reason": stale_msg,
+            "market_status": mkt_st,
+            "connection_status": conn_st,
+            "tick_status": "STALE" if tick_stale else "FRESH",
+            "candle_status": "STALE" if candle_stale else "FRESH",
+            "data_validation": "FAIL",
+            "last_candle_times": last_candle_times,
+            "ages_minutes": ages_minutes,
+            "stale_timeframes": stale_tfs,
+            "is_market_closed": False,
+        }
+
+    return {
+        "status": "FRESH",
+        "ok": True,
+        "reason": "Data SNR lengkap dan segar",
+        "market_status": mkt_st,
+        "connection_status": conn_st,
+        "tick_status": "FRESH",
+        "candle_status": "FRESH",
+        "data_validation": "PASS",
+        "last_candle_times": last_candle_times,
+        "ages_minutes": ages_minutes,
+        "stale_timeframes": [],
+        "is_market_closed": False,
+    }
+
+
 def fetch_snr_market_data(
     symbol=None,
     snapshot=None,
@@ -550,6 +889,8 @@ def fetch_snr_market_data(
     cfg = config or get_snr_config()
     sym = symbol or (snapshot.get("symbol") if isinstance(snapshot, dict) else None) or cfg.get("symbol", DEFAULT_APP_SYMBOL)
     tf_bars = cfg.get("timeframe_bars", {})
+    snapshot_id = snapshot.get("snapshot_id") if isinstance(snapshot, dict) else None
+    has_snapshot = isinstance(snapshot, dict) and ("frames" in snapshot or bool(snapshot_id))
 
     raw_frames = {}
     if isinstance(frames, dict) and frames:
@@ -558,18 +899,25 @@ def fetch_snr_market_data(
         raw_frames = dict(snapshot["frames"])
 
     mt5_ready = False
-    if live and len(raw_frames) < len(SNR_TIMEFRAMES):
+    if live and not has_snapshot and len(raw_frames) < len(SNR_TIMEFRAMES):
         try:
             mt5_ready = bool(pastikan_mt5_aktif())
         except Exception:
             mt5_ready = False
+    elif live and not has_snapshot and mt5 is not None:
+        try:
+            mt5_ready = getattr(mt5, "terminal_info", lambda: None)() is not None
+        except Exception:
+            mt5_ready = False
+    elif isinstance(snapshot, dict) and snapshot.get("mt5_connected") is not None:
+        mt5_ready = bool(snapshot.get("mt5_connected"))
 
     prepared_frames = {}
     forming_candles = {}
 
     for tf in SNR_TIMEFRAMES:
         df_src = raw_frames.get(tf)
-        if (df_src is None or (isinstance(df_src, pd.DataFrame) and df_src.empty)) and live and mt5_ready:
+        if (df_src is None or (isinstance(df_src, pd.DataFrame) and df_src.empty)) and live and mt5_ready and not has_snapshot:
             df_src = _fetch_mt5_historical_candles(sym, tf, int(tf_bars.get(tf, 220)))
 
         df_clean, forming_bar = prepare_snr_frame(df_src, has_unclosed_last_bar=has_unclosed_last_bar)
@@ -577,18 +925,25 @@ def fetch_snr_market_data(
         if forming_bar is not None:
             forming_candles[tf] = forming_bar
 
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("forming_candles"), dict) and not forming_candles:
+        forming_candles = dict(snapshot.get("forming_candles") or {})
+
     # Ambil informasi harga bid/ask/mid
     bid = 0.0
     ask = 0.0
     time_label = "SNAPSHOT"
     server_time = None
+    snapshot_time_wib = None
+    snap_price_override = None
 
     if isinstance(snapshot, dict):
         bid = safe_float(snapshot.get("bid"), 0.0)
         ask = safe_float(snapshot.get("ask"), 0.0)
+        snap_price_override = safe_float(snapshot.get("snapshot_price") or snapshot.get("current_price") or snapshot.get("mid"), 0.0)
         if bid <= 0:
-            bid = safe_float(snapshot.get("snapshot_price") or snapshot.get("current_price") or snapshot.get("mid"), 0.0)
+            bid = snap_price_override
         server_time = snapshot.get("server_time")
+        snapshot_time_wib = snapshot.get("snapshot_time")
         if snapshot.get("live", False) or snapshot.get("mt5_connected", False):
             time_label = "MT5 LIVE"
 
@@ -599,8 +954,13 @@ def fetch_snr_market_data(
             bid = t_bid
         if t_ask > 0:
             ask = t_ask
+        t_time = getattr(tick, "time", None) if not isinstance(tick, dict) else tick.get("time")
+        if t_time and t_time > 0:
+            snapshot_time_wib = snapshot_time_wib or format_wib_timestamp(t_time, default_now=True)
+            if server_time is None:
+                server_time = pd.Timestamp(int(t_time), unit="s")
         time_label = "MT5 LIVE"
-    elif bid <= 0 and live and mt5_ready and mt5 is not None:
+    elif bid <= 0 and live and mt5_ready and mt5 is not None and not has_snapshot:
         for sym_tick in (sym, DEFAULT_APP_SYMBOL, "XAUUSDc", "XAUUSD"):
             if not sym_tick:
                 continue
@@ -610,6 +970,11 @@ def fetch_snr_market_data(
                     bid = safe_float(getattr(live_tick, "bid", 0.0), 0.0)
                     ask = safe_float(getattr(live_tick, "ask", 0.0), 0.0)
                     tick = live_tick
+                    t_time = getattr(live_tick, "time", 0)
+                    if t_time and t_time > 0:
+                        snapshot_time_wib = snapshot_time_wib or format_wib_timestamp(t_time, default_now=True)
+                        if server_time is None:
+                            server_time = pd.Timestamp(int(t_time), unit="s")
                     time_label = "MT5 LIVE"
                     break
             except Exception:
@@ -629,6 +994,13 @@ def fetch_snr_market_data(
     data_source = mkt_info["data_source"]
     snr_analysis = mkt_info["snr_analysis"]
     last_candle = mkt_info["last_candle"]
+    ref_tf_tz = "WIB"
+    for tf_tz_cand in ("M5", "M30", "H1", "H4"):
+        df_cand = prepared_frames.get(tf_tz_cand)
+        if df_cand is not None and not df_cand.empty:
+            ref_tf_tz = str((getattr(df_cand, "attrs", {}) or {}).get("time_tz", "WIB"))
+            break
+    last_candle_wib = format_wib_timestamp(last_candle, default_now=False, source_tz=ref_tf_tz) if last_candle != "DATA UNAVAILABLE" else "DATA UNAVAILABLE"
 
     # Saat MARKET CLOSED, gunakan harga penutupan candle terakhir (jangan klaim harga live)
     if mkt_status == "CLOSED":
@@ -654,25 +1026,94 @@ def fetch_snr_market_data(
     spread = round(max(0.0, ask - bid), max(2, spec["digits"])) if (bid > 0 and ask > 0) else spec["spread_points"]
     spec["spread_points"] = spread
     price = round(bid, spec["digits"]) if bid > 0 else 0.0
+    if isinstance(snapshot, dict) and snapshot.get("spread") is not None and safe_float(snapshot.get("spread"), -1.0) >= 0:
+        # Pertahankan spread eksplisit dari shared snapshot bila ada
+        snap_sp = safe_float(snapshot.get("spread"), spread)
+        if snap_sp >= 0 and (tick is None):
+            spread = round(snap_sp, max(2, spec["digits"]))
+            spec["spread_points"] = spread
+
+    conn_status = (
+        str(snapshot.get("connection_status")).upper()
+        if isinstance(snapshot, dict) and snapshot.get("connection_status")
+        else ("CONNECTED" if mt5_ready else ("CALLER_SUPPLIED" if raw_frames else "DISCONNECTED"))
+    )
+    fresh_info = validate_snr_data_freshness(
+        prepared_frames,
+        server_time=server_time,
+        tick=tick,
+        market_status=mkt_status,
+        connection_status=conn_status,
+        bid=bid,
+        ask=ask,
+        snapshot=snapshot,
+    )
+    if fresh_info["status"] == "INVALID":
+        snr_analysis = "DATA INVALID"
+    elif fresh_info["status"] == "NO DATA":
+        snr_analysis = "DATA UNAVAILABLE"
+
+    if live and mt5_ready and not has_snapshot and mkt_status == "OPEN" and "M5" not in forming_candles:
+        try:
+            from modules.mt5_conn import ambil_candle_berjalan
+            tf_m5 = _resolve_mt5_tf_constant("M5")
+            if tf_m5 is not None:
+                rc = ambil_candle_berjalan(tf_m5)
+                if rc is not None and int(rc["time"]) > 0:
+                    forming_candles["M5"] = {
+                        "time": format_wib_timestamp(int(rc["time"]), default_now=False, source_tz="UTC"),
+                        "open": float(rc["open"]),
+                        "high": float(rc["high"]),
+                        "low": float(rc["low"]),
+                        "close": float(rc["close"]),
+                        "is_closed": False,
+                        "source": "mt5_pos0",
+                    }
+        except Exception:
+            pass
+
+    snap_time_final = snapshot_time_wib or format_wib_timestamp(server_time, default_now=True, source_tz=ref_tf_tz if server_time == last_candle else "WIB")
+    srv_time_final = format_wib_timestamp(server_time, default_now=True, source_tz=ref_tf_tz if server_time == last_candle else "WIB")
+    tick_time_final = (
+        snapshot.get("tick_time")
+        if isinstance(snapshot, dict) and snapshot.get("tick_time")
+        else (snapshot_time_wib or (snap_time_final if tick is not None else ""))
+    )
+    mid_val = round((bid + ask) / 2.0, spec["digits"]) if (bid > 0 and ask > 0) else price
+    snap_price_final = (
+        round(snap_price_override, spec["digits"])
+        if (mkt_status == "OPEN" and snap_price_override and snap_price_override > 0)
+        else price
+    )
 
     atr_diag = compute_atr_diagnostics(prepared_frames)
 
     return {
         "symbol": sym,
+        "snapshot_id": snapshot_id,
+        "snapshot_time": snap_time_final,
+        "snapshot_price": snap_price_final,
         "price": price,
         "last_price": price,
-        "last_candle": last_candle,
+        "last_candle": last_candle_wib or last_candle,
+        "last_candle_times": fresh_info["last_candle_times"],
+        "last_closed_m5": fresh_info["last_candle_times"].get("M5", ""),
+        "current_candle_m5": (forming_candles.get("M5") or {}).get("time", ""),
+        "tick_time": tick_time_final,
         "market_status": mkt_status,
         "market_status_label": mkt_info["market_status_label"],
         "data_source": data_source,
         "snr_analysis": snr_analysis,
         "market_status_reason": mkt_info["reason"],
+        "connection_status": fresh_info["connection_status"],
+        "data_freshness": fresh_info["status"],
+        "data_freshness_info": fresh_info,
         "bid": round(bid, spec["digits"]) if bid > 0 else 0.0,
         "ask": round(ask, spec["digits"]) if ask > 0 else 0.0,
-        "mid": round((bid + ask) / 2.0, spec["digits"]) if (bid > 0 and ask > 0) else price,
+        "mid": mid_val,
         "spread": spread,
         "time_label": time_label,
-        "server_time": server_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "server_time": srv_time_final,
         "frames": prepared_frames,
         "forming_candles": forming_candles,
         "symbol_spec": spec,

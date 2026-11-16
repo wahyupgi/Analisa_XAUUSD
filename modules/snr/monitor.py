@@ -7,7 +7,11 @@ import time
 from modules.config import SYMBOL as DEFAULT_APP_SYMBOL
 from modules.snr.config import get_snr_config
 from modules.snr.data_provider import log_snr_error, safe_float
-from modules.snr.formatter import format_snr_detail, format_snr_summary
+from modules.snr.formatter import (
+    format_snr_detail,
+    format_snr_lifecycle_status,
+    format_snr_summary,
+)
 from modules.snr.radar import SnrAlertTracker
 from modules.snr.scanner import evaluate_snr_decision, run_snr_scan
 
@@ -49,7 +53,6 @@ def format_snr_monitor_section(cycle_result, detailed=False):
 
     active_sups = ranked.get("active_supports") or []
     active_ress = ranked.get("active_resistances") or []
-
     mkt_status = str(sr.get("market_status", dec.get("market_status", "OPEN"))).upper()
     data_source = str(sr.get("data_source", "MT5 HISTORICAL" if mkt_status == "CLOSED" else ("DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "MT5 LIVE")))
     snr_analysis = str(sr.get("snr_analysis", dec.get("snr_analysis", "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "AVAILABLE")))
@@ -65,6 +68,8 @@ def format_snr_monitor_section(cycle_result, detailed=False):
         f"SNR ANALYSIS    : {snr_analysis} | LIVE ENTRY: {live_entry}",
         f"MARKET BIAS     : H4={mb.get('h4', 'N/A')} | H1={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')} | M5={mb.get('m5', 'WAIT')} -> {mb.get('overall_bias', 'UNCONFIRMED')}",
     ]
+
+    lines.extend(format_snr_lifecycle_status(sr, dec))
 
     if active_sups:
         lines.append("ACTIVE SUPPORT  :")
@@ -100,9 +105,24 @@ def format_snr_monitor_section(cycle_result, detailed=False):
     else:
         lines.append("ACTIVE RESIST.  : N/A (Tidak ada resistance aktif)")
 
+    mc = sr.get("market_context") or {}
+    pa_bo_disp = pa.get("breakout_summary", "NOT CONFIRMED")
+    if pa.get("breakout_zone_label") and pa.get("focus_zone_label") and pa.get("breakout_zone_label") != pa.get("focus_zone_label") and pa.get("breakout_code") != "NO_BREAKOUT":
+        pa_bo_disp = f"{pa_bo_disp} [{pa.get('breakout_zone_label')}]"
+    pa_rt_disp = pa.get("retest_summary", "NOT CONFIRMED")
+    if pa.get("retest_zone_label") and pa.get("focus_zone_label") and pa.get("retest_zone_label") != pa.get("focus_zone_label") and pa.get("retest_code") != "NO_RETEST":
+        pa_rt_disp = f"{pa_rt_disp} [{pa.get('retest_zone_label')}]"
+
+    # Informational trend-aligned monitoring zone; independent SNR decision logic remains unchanged.
+    overall = str(mb.get("overall_bias", "")).upper()
+    aligned_zone = active_ress[0] if overall == "BEARISH" and active_ress else (active_sups[0] if overall == "BULLISH" and active_sups else None)
+    aligned_label = (f"RESISTANCE {aligned_zone.get('rank_label', 'R1')}" if overall == "BEARISH" else f"SUPPORT {aligned_zone.get('rank_label', 'S1')}") if aligned_zone else "NONE"
+    lines.append(f"TREND ENTRY ZONE: {aligned_label} (referensi arah tren, bukan sinyal entry)")
+
     lines.extend([
-        f"PRICE ACTION    : Rejection={pa.get('rejection_summary', 'WAIT')} | Breakout={pa.get('breakout_summary', 'NOT CONFIRMED')} | Retest={pa.get('retest_summary', 'NOT CONFIRMED')} | Momentum={pa.get('momentum_summary', 'N/A')}",
+        f"PRICE ACTION    : Rejection={pa.get('rejection_summary', 'NOT CONFIRMED')} | Breakout={pa_bo_disp} | Retest={pa_rt_disp} | Momentum={pa.get('momentum_summary', 'N/A')}",
         f"ENTRY CONFIRM.  : Focus={ev.get('zone_label', 'N/A')} | Trigger={ev.get('trigger_status', 'NOT CONFIRMED')} | BUY={ev.get('buy_status', 'WAIT')} | SELL={ev.get('sell_status', 'WAIT')}",
+        f"SNR CONTEXT     : {ev.get('snr_role_context') or mc.get('snr_context') or ev.get('zone_label', 'N/A')}",
         f"SNR DECISION    : {dec.get('signal', 'WAIT')} (Direction: {dec.get('direction', 'NONE')})",
     ])
 

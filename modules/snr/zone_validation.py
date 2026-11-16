@@ -49,35 +49,41 @@ def validate_single_zone(zone, df=None, current_price=None, config=None, has_unc
         reasons.append("Zona menggunakan pivot yang belum terkonfirmasi.")
 
     touch_status = str(evaluated.get("touch_status", "UNTESTED")).upper()
-    is_broken = bool(evaluated.get("is_broken", touch_status == "BROKEN"))
-    is_invalidated = bool(evaluated.get("is_invalidated", touch_status == "INVALIDATED"))
+    detected_lifecycle = str(evaluated.get("lifecycle_status", "ACTIVE")).upper()
+    is_broken = bool(evaluated.get("is_broken")) or touch_status == "BROKEN"
+    is_invalidated = bool(evaluated.get("is_invalidated")) or touch_status == "INVALIDATED"
+    current_price_beyond = False
+    if current_price is not None and safe_float(current_price, 0.0) > 0:
+        cp = safe_float(current_price, 0.0)
+        z_type = str(evaluated.get("zone_type", "SUPPORT")).upper()
+        current_price_beyond = (z_type == "SUPPORT" and cp < z_low) or (z_type == "RESISTANCE" and cp > z_high)
 
     if not is_valid_structure:
         lifecycle = "INVALIDATED"
     elif is_invalidated:
         lifecycle = "INVALIDATED"
         reasons.append("Zona telah ditembus jauh melewati batas invalidasi.")
-    elif is_broken:
+    elif is_broken or detected_lifecycle == "BROKEN":
         lifecycle = "BROKEN"
         reasons.append("Zona telah ditembus (BROKEN); dialihkan ke pemantauan potensi retest/flip.")
+    elif detected_lifecycle in (
+        "BREAKDOWN_PENDING", "RETEST", "RECLAIM_PENDING", "RECLAIMED", "UNCONFIRMED"
+    ):
+        lifecycle = detected_lifecycle
+        reasons.append(f"Lifecycle zona: {lifecycle}.")
+    elif current_price_beyond:
+        lifecycle = "UNCONFIRMED"
+        evaluated["touch_status"] = "UNCONFIRMED"
+        reasons.append("Harga berada di sisi breakout tanpa konfirmasi candle tertutup yang cukup.")
+    elif detected_lifecycle in ("TOUCHED", "SWEEP"):
+        lifecycle = detected_lifecycle
+        reasons.append(f"Interaksi candle tertutup terakhir: {lifecycle}.")
     else:
         lifecycle = "ACTIVE"
         if current_price is not None and safe_float(current_price, 0.0) > 0:
             cp = safe_float(current_price, 0.0)
-            z_type = str(evaluated.get("zone_type", "SUPPORT")).upper()
             dist_atr = abs(cp - safe_float(evaluated.get("mid"), cp)) / ref_atr
-            # Jika harga sudah berada di sisi berlawanan dari fungsi asli zona
-            if z_type == "SUPPORT" and cp < (z_low - 0.15 * ref_atr):
-                lifecycle = "BROKEN"
-                evaluated["is_broken"] = True
-                evaluated["touch_status"] = "BROKEN"
-                reasons.append("Harga saat ini berada tegas di bawah zona Support.")
-            elif z_type == "RESISTANCE" and cp > (z_high + 0.15 * ref_atr):
-                lifecycle = "BROKEN"
-                evaluated["is_broken"] = True
-                evaluated["touch_status"] = "BROKEN"
-                reasons.append("Harga saat ini berada tegas di atas zona Resistance.")
-            elif dist_atr > 12.0:
+            if dist_atr > 12.0:
                 lifecycle = "HISTORICAL"
                 reasons.append(f"Zona masih utuh namun berjarak jauh ({dist_atr:.1f} ATR) sebagai level historis.")
 
@@ -88,7 +94,7 @@ def validate_single_zone(zone, df=None, current_price=None, config=None, has_unc
     evaluated["max_allowed_width"] = round(allowed_max_width, 2)
     evaluated["is_structurally_valid"] = bool(is_valid_structure)
     evaluated["lifecycle_status"] = lifecycle
-    evaluated["is_active"] = lifecycle == "ACTIVE"
+    evaluated["is_active"] = lifecycle in ("ACTIVE", "TOUCHED", "SWEEP")
     evaluated["status"] = lifecycle
     evaluated["validation_reasons"] = reasons
     return evaluated

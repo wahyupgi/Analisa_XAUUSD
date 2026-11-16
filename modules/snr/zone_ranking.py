@@ -27,7 +27,10 @@ def classify_zone_strength_category(zone):
     lifecycle = str(zone.get("lifecycle_status", zone.get("status", "ACTIVE"))).upper()
     has_conf = bool((zone.get("confluence_info") or {}).get("has_confluence", False))
 
-    if lifecycle in ("INVALIDATED", "BROKEN") and str((zone.get("retest_info") or {}).get("status", "")) != "RETEST_CONFIRMED":
+    if lifecycle in (
+        "INVALIDATED", "BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED",
+        "BREAKDOWN_PENDING", "UNCONFIRMED",
+    ) and str((zone.get("retest_info") or {}).get("status", "")) != "RETEST_CONFIRMED":
         tier = "WEAK"
     elif grade == "A" or (grade == "B" and has_conf and score >= 76.0):
         tier = "STRONG"
@@ -151,6 +154,7 @@ def rank_zones(zones, current_price=None):
     historical_zones = []
     broken_zones = []
     invalidated_zones = []
+    unconfirmed_zones = []
     major_zones = []
 
     for z in zones or []:
@@ -179,23 +183,25 @@ def rank_zones(zones, current_price=None):
         ):
             major_zones.append(item)
 
-        if lifecycle == "ACTIVE":
+        if lifecycle in ("ACTIVE", "TOUCHED", "SWEEP"):
             if z_type == "SUPPORT":
-                # Support aktif berada di bawah atau sedang diuji oleh harga saat ini
-                if cp <= 0 or safe_float(item.get("low"), 0.0) <= (cp + 0.25 * max(0.5, safe_float(item.get("ref_atr"), 2.0))):
+                # Support aktif berada di bawah atau sedang diuji oleh harga saat ini (cp >= z_low)
+                if cp <= 0 or safe_float(item.get("low"), 0.0) <= cp:
                     active_sup_candidates.append(item)
                 else:
                     broken_zones.append(item)
             else:
-                # Resistance aktif berada di atas atau sedang diuji oleh harga saat ini
-                if cp <= 0 or safe_float(item.get("high"), 0.0) >= (cp - 0.25 * max(0.5, safe_float(item.get("ref_atr"), 2.0))):
+                # Resistance aktif berada di atas atau sedang diuji oleh harga saat ini (cp <= z_high)
+                if cp <= 0 or safe_float(item.get("high"), 0.0) >= cp:
                     active_res_candidates.append(item)
                 else:
                     broken_zones.append(item)
         elif lifecycle == "HISTORICAL":
             historical_zones.append(item)
-        elif lifecycle == "BROKEN":
+        elif lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED"):
             broken_zones.append(item)
+        elif lifecycle in ("BREAKDOWN_PENDING", "UNCONFIRMED"):
+            unconfirmed_zones.append(item)
         else:
             invalidated_zones.append(item)
 
@@ -218,6 +224,7 @@ def rank_zones(zones, current_price=None):
         rz["rank_label"] = f"R{idx_r + 1}"
 
     broken_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
+    unconfirmed_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
     historical_zones.sort(key=lambda x: (-x.get("score", 0.0), x["distance_points"]))
     major_zones.sort(key=lambda x: (-x.get("score", 0.0), x["distance_points"]))
 
@@ -232,6 +239,7 @@ def rank_zones(zones, current_price=None):
         "historical_zones": historical_zones,
         "broken_zones": broken_zones,
         "invalidated_zones": invalidated_zones,
+        "unconfirmed_zones": unconfirmed_zones,
         "by_category": by_category,
     }
 

@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 .env
 * (1).*
+audit_zone_scanner.jsonl
 

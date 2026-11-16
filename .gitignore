@@ -5,3 +5,12 @@ __pycache__/
 * (1).*
 audit_zone_scanner.jsonl
 
+# Bot Runtime Data, Log & State
+*.log
+*.jsonl
+*.tmp
+*.bak
+state_*.json
+jurnal_sinyal_xauusd.csv
+Jurnal_XAUUSD_*.md
+

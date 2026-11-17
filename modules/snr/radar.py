@@ -291,7 +291,7 @@ class SnrAlertTracker:
                 alerts.append("[SNR] SETUP / ZONA INVALID")
 
         # 2. Alert Perubahan Rejection (dengan identitas zona)
-        if rej_detail.get("confirmed") and not rej_detail.get("is_historical") and (
+        if (rej_detail.get("confirmed") or pa.get("rejection_summary") == "CONFIRMED") and not rej_detail.get("is_historical") and (
             curr_state["rejection_code"] != self.last_state.get("rejection_code")
             or curr_state["rejection_zone_id"] != self.last_state.get("rejection_zone_id")
         ):

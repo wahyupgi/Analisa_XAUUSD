@@ -67,11 +67,17 @@ def zone_confirmation_start(zone, frame):
     tf = str(zone.get("timeframe", "")).upper()
     minutes = {"M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240}.get(tf)
     if not confirmed_time or minutes is None:
-        return len(frame)
+        conf_idx = zone.get("confirmed_index", zone.get("formation_index"))
+        if conf_idx is not None:
+            return min(len(frame), int(conf_idx) + 1)
+        return 0
     confirmed = pd.to_datetime(confirmed_time, errors="coerce", utc=True)
     times = pd.to_datetime(frame["Time"], errors="coerce", utc=True)
     if pd.isna(confirmed) or times.isna().any():
-        return len(frame)
+        conf_idx = zone.get("confirmed_index", zone.get("formation_index"))
+        if conf_idx is not None:
+            return min(len(frame), int(conf_idx) + 1)
+        return 0
     zone_tz = str(zone.get("time_tz") or frame.attrs.get("time_tz", "WIB")).upper()
     frame_tz = str(frame.attrs.get("time_tz", "WIB")).upper()
     if pd.Timestamp(confirmed_time).tzinfo is None and zone_tz != "UTC":

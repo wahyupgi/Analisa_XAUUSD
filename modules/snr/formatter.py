@@ -227,20 +227,26 @@ def format_snr_focus_plan(decision, entry_validation=None, zone_override=None, m
 
 def format_snr_summary(scan_result, decision=None):
     """
-    Menyusun output ringkas SNR Advanced Scanner sesuai format Section U.
-    Menggunakan hasil perhitungan aktual; informasi yang belum diperiksa ditampilkan
-    sebagai N/A atau NOT CHECKED.
+    Menyusun output ringkas SNR Advanced Scanner:
+    Ringkas, padat, tanpa kalimat berulang, namun informasi zona dan alasannya sangat jelas.
     """
     sr = scan_result or {}
     dec = decision or sr.get("decision") or {}
     mb = sr.get("market_bias") or {}
     ranked = sr.get("ranked_zones") or {}
-    pa = sr.get("price_action") or {}
     ev = sr.get("entry_validation") or {}
 
     price_val = safe_float(sr.get("price"), 0.0)
+    if price_val <= 0:
+        price_val = safe_float(sr.get("last_price"), 0.0)
     price_str = f"{price_val:.2f}" if price_val > 0 else "N/A"
-    time_label = sr.get("time_label") or "N/A"
+
+    time_label = (
+        sr.get("time_label")
+        or sr.get("snapshot_time")
+        or sr.get("tick_time")
+        or (str(sr.get("server_time")) if sr.get("server_time") else "N/A")
+    )
 
     mkt_status = str(sr.get("market_status") or dec.get("market_status") or "OPEN").strip().upper()
     if mkt_status in ("MARKET OPEN", "MARKET_OPEN"):
@@ -250,129 +256,49 @@ def format_snr_summary(scan_result, decision=None):
     elif mkt_status in ("UNAVAILABLE", "NO_DATA", "DATA UNAVAILABLE"):
         mkt_status = "DATA UNAVAILABLE"
 
-    data_source = sr.get("data_source") or (
-        "MT5 HISTORICAL"
-        if mkt_status == "CLOSED"
-        else ("DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "MT5 LIVE")
-    )
-    last_price_val = safe_float(sr.get("last_price", price_val), 0.0)
-    last_price_str = (
-        f"{last_price_val:.2f}"
-        if (last_price_val > 0 and mkt_status != "DATA UNAVAILABLE")
-        else "DATA UNAVAILABLE"
-    )
-    last_candle_str = sr.get("last_candle") or (
-        str(sr.get("server_time")) if (sr.get("server_time") and mkt_status != "DATA UNAVAILABLE") else "DATA UNAVAILABLE"
-    )
-    snr_analysis = sr.get("snr_analysis") or dec.get("snr_analysis") or (
-        "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "AVAILABLE"
-    )
-
-    h4_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("h4", "UNCONFIRMED")
-    h1_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("h1", "UNCONFIRMED")
-    m30_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("m30", "UNCONFIRMED")
-    m5_b = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else ("WAIT" if mkt_status == "CLOSED" else mb.get("m5", "WAIT"))
-    snr_status = "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else mb.get("snr_status", "UNCONFIRMED")
+    if mkt_status == "DATA UNAVAILABLE":
+        price_str = "DATA UNAVAILABLE"
+        time_label = "N/A"
+        h4_b = h1_b = m30_b = m5_b = "DATA UNAVAILABLE"
+    else:
+        h4_b = mb.get("h4", "UNCONFIRMED")
+        h1_b = mb.get("h1", "UNCONFIRMED")
+        m30_b = mb.get("m30", "UNCONFIRMED")
+        m5_b = "WAIT" if mkt_status == "CLOSED" else mb.get("m5", "WAIT")
 
     active_sups = ranked.get("active_supports") or []
     active_ress = ranked.get("active_resistances") or []
-
-    if mkt_status == "DATA UNAVAILABLE":
-        sup_summary = "DATA UNAVAILABLE"
-        res_summary = "DATA UNAVAILABLE"
-    else:
-        if active_sups:
-            s0 = active_sups[0]
-            sup_summary = (
-                f"{s0.get('rank_label', 'S1')} {safe_float(s0.get('low')):.2f} - {safe_float(s0.get('high')):.2f} "
-                f"(Grade {s0.get('grade', 'D')} | Score {safe_float(s0.get('score')):.2f} | Strength {s0.get('strength_short', 'MODERATE')})"
-            )
-        else:
-            sup_summary = "NONE"
-
-        if active_ress:
-            r0 = active_ress[0]
-            res_summary = (
-                f"{r0.get('rank_label', 'R1')} {safe_float(r0.get('low')):.2f} - {safe_float(r0.get('high')):.2f} "
-                f"(Grade {r0.get('grade', 'D')} | Score {safe_float(r0.get('score')):.2f} | Strength {r0.get('strength_short', 'MODERATE')})"
-            )
-        else:
-            res_summary = "NONE"
-
-    sig_final = dec.get("signal", "WAIT")
-    live_entry = dec.get("live_entry") or sr.get("live_entry") or (
-        "WAIT — MARKET CLOSED"
-        if mkt_status == "CLOSED"
-        else ("WAIT — DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else sig_final)
-    )
 
     lines = [
         "====================================================",
         "          XAUUSD SNR ADVANCED SCANNER",
         "====================================================",
-        "",
         f"MARKET STATUS : {mkt_status}",
-        f"DATA SOURCE   : {data_source}",
-        f"LAST PRICE    : {last_price_str}",
-        f"LAST CANDLE   : {last_candle_str}",
-    ]
-    if mkt_status == "OPEN":
-        lines.append(f"PRICE       : {price_str}")
-        lines.append(f"TIME        : {time_label}")
-    lines.extend(format_snr_lifecycle_status(sr, dec))
-
-    df_info = sr.get("data_freshness_info") or {}
-    conn_disp = str(sr.get("connection_status") or df_info.get("connection_status") or "UNKNOWN")
-    tick_st_disp = str(df_info.get("tick_status") or ("MARKET CLOSED" if mkt_status == "CLOSED" else sr.get("data_freshness", "N/A")))
-    candle_st_disp = str(df_info.get("candle_status") or sr.get("data_freshness", "N/A"))
-    last_tick_disp = str(sr.get("tick_time") or sr.get("snapshot_time") or "N/A")
-    lct_map = sr.get("last_candle_times") or df_info.get("last_candle_times") or {}
-    last_m5_disp = str(sr.get("last_closed_m5") or lct_map.get("M5") or last_candle_str or "N/A")
-    fc_map = sr.get("forming_candles") or {}
-    curr_m5_disp = str(sr.get("current_candle_m5") or (fc_map.get("M5") or {}).get("time") or "N/A")
-    analysis_t_disp = str(sr.get("snapshot_time") or sr.get("server_time") or "N/A")
-    data_val_disp = str(df_info.get("data_validation") or ("PASS" if sr.get("data_freshness") == "FRESH" else "FAIL"))
-
-    lines.extend([
-        "",
-        "DATA INTEGRITY",
-        "--------------------------------",
-        f"MT5 CONNECTION   : {conn_disp}",
-        f"TICK STATUS      : {tick_st_disp}",
-        f"CANDLE STATUS    : {candle_st_disp}",
-        f"LAST TICK        : {last_tick_disp}",
-        f"LAST CLOSED M5   : {last_m5_disp}",
-        f"CURRENT CANDLE   : {curr_m5_disp}",
-        f"ANALYSIS TIME    : {analysis_t_disp}",
-        f"DATA VALIDATION  : {data_val_disp}",
-        "",
-        "MULTI-TF MARKET BIAS",
-        f"H4            : {h4_b}",
-        f"H1            : {h1_b}",
-        f"M30           : {m30_b}",
-        f"M5            : {m5_b}",
-        "",
-        f"SNR STATUS  : {snr_status}",
-        f"SUPPORT       : {sup_summary}",
-        f"RESISTANCE    : {res_summary}",
-        "",
-        f"SNR ANALYSIS  : {snr_analysis}",
-        f"LIVE ENTRY    : {live_entry}",
+        f"PRICE       : {price_str} | TIME: {time_label} | STATUS: {mkt_status}",
+        f"MARKET BIAS : H4: {h4_b} | H1: {h1_b} | M30: {m30_b} | M5: {m5_b}",
         "",
         "----------------------------------------------------",
         "SUPPORT ZONES",
         "----------------------------------------------------",
-    ])
+    ]
 
-    if active_sups:
+    if mkt_status == "DATA UNAVAILABLE":
+        lines.append("S1 : DATA UNAVAILABLE")
+    elif active_sups:
         for idx_s, sz in enumerate(active_sups[:2]):
-            lines.append(f"{sz.get('rank_label', f'S{idx_s + 1}')} : {safe_float(sz.get('low')):.2f} - {safe_float(sz.get('high')):.2f}")
-            lines.append(f"     Grade {sz.get('grade', 'D')} | Score {safe_float(sz.get('score')):.2f} | Strength {sz.get('strength_short', 'MODERATE')}")
-            lines.append(f"     Reason: {build_snr_zone_reason(sz, mb.get('h4'))}")
+            rank_lbl = sz.get("rank_label", f"S{idx_s + 1}")
+            lo_str = f"{safe_float(sz.get('low')):.2f}"
+            hi_str = f"{safe_float(sz.get('high')):.2f}"
+            grade = sz.get("grade", "D")
+            score_str = f"{safe_float(sz.get('score')):.2f}"
+            strength = sz.get("strength_short", "MODERATE")
+            reason_str = build_snr_zone_reason(sz, mb.get("h4"))
+            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} (Grade {grade} | Score {score_str} | Strength {strength})")
+            lines.append(f"     Reason: {reason_str}")
             if idx_s == 0 and len(active_sups[:2]) > 1:
                 lines.append("")
     else:
-        lines.append("S1 : N/A (Belum ada zona support aktif)")
+        lines.append("S1 : NONE (Belum ada zona support aktif)")
 
     lines.extend([
         "",
@@ -381,109 +307,74 @@ def format_snr_summary(scan_result, decision=None):
         "----------------------------------------------------",
     ])
 
-    if active_ress:
+    if mkt_status == "DATA UNAVAILABLE":
+        lines.append("R1 : DATA UNAVAILABLE")
+    elif active_ress:
         for idx_r, rz in enumerate(active_ress[:2]):
-            lines.append(f"{rz.get('rank_label', f'R{idx_r + 1}')} : {safe_float(rz.get('low')):.2f} - {safe_float(rz.get('high')):.2f}")
-            lines.append(f"     Grade {rz.get('grade', 'D')} | Score {safe_float(rz.get('score')):.2f} | Strength {rz.get('strength_short', 'MODERATE')}")
-            lines.append(f"     Reason: {build_snr_zone_reason(rz, mb.get('h4'))}")
+            rank_lbl = rz.get("rank_label", f"R{idx_r + 1}")
+            lo_str = f"{safe_float(rz.get('low')):.2f}"
+            hi_str = f"{safe_float(rz.get('high')):.2f}"
+            grade = rz.get("grade", "D")
+            score_str = f"{safe_float(rz.get('score')):.2f}"
+            strength = rz.get("strength_short", "MODERATE")
+            reason_str = build_snr_zone_reason(rz, mb.get("h4"))
+            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} (Grade {grade} | Score {score_str} | Strength {strength})")
+            lines.append(f"     Reason: {reason_str}")
             if idx_r == 0 and len(active_ress[:2]) > 1:
                 lines.append("")
     else:
-        lines.append("R1 : N/A (Belum ada zona resistance aktif)")
-
-    bo_label = pa.get("breakout_summary", "NOT CONFIRMED")
-    rt_label = pa.get("retest_summary", "NOT CONFIRMED")
-    rej_label = pa.get("rejection_summary", "NOT CONFIRMED")
-    mom_label = pa.get("momentum_summary", "N/A")
-    focus_pa_lbl = pa.get("focus_zone_label")
-    bo_z_lbl = pa.get("breakout_zone_label")
-    rt_z_lbl = pa.get("retest_zone_label")
-    if bo_z_lbl and focus_pa_lbl and bo_z_lbl != focus_pa_lbl and pa.get("breakout_code") != "NO_BREAKOUT":
-        bo_hist_tag = " (HISTORICAL)" if pa.get("breakout_is_historical") else ""
-        bo_label = f"{bo_label}{bo_hist_tag} [{bo_z_lbl}]"
-    if rt_z_lbl and focus_pa_lbl and rt_z_lbl != focus_pa_lbl and pa.get("retest_code") != "NO_RETEST":
-        rt_hist_tag = " (HISTORICAL)" if pa.get("retest_is_historical") else ""
-        rt_label = f"{rt_label}{rt_hist_tag} [{rt_z_lbl}]"
-
-    buy_st = dec.get("buy_status", ev.get("buy_status", "WAIT"))
-    sell_st = dec.get("sell_status", ev.get("sell_status", "WAIT"))
-    zone_lbl = dec.get("zone_label", ev.get("zone_label", "N/A"))
-    trig_st = dec.get("trigger_status", ev.get("trigger_status", "NOT CONFIRMED"))
-    rr_st = dec.get("rr_display", ev.get("rr_status", "NOT CHECKED"))
+        lines.append("R1 : NONE (Belum ada zona resistance aktif)")
 
     sig_final = dec.get("signal", "WAIT")
     dir_final = dec.get("direction", "NONE")
     reason_final = dec.get("reason", "Waiting for valid SNR confirmation.")
+    focus_lbl = dec.get("zone_label") or ev.get("zone_label")
+    target_z = dec.get("target_zone") or ev.get("target_zone") or dec.get("trend_entry_zone") or ev.get("trend_entry_zone")
+    if (not focus_lbl or focus_lbl == "N/A") and target_z:
+        t_lo = safe_float(target_z.get("low"))
+        t_hi = safe_float(target_z.get("high"))
+        focus_lbl = f"{target_z.get('rank_label', 'ZONE')} ({t_lo:.2f} - {t_hi:.2f})"
+    elif focus_lbl and target_z and "(" not in focus_lbl:
+        t_lo = safe_float(target_z.get("low"))
+        t_hi = safe_float(target_z.get("high"))
+        focus_lbl = f"{focus_lbl} ({t_lo:.2f} - {t_hi:.2f})"
 
-    final_status_lbl = dec.get(
-        "final_status",
-        "MARKET CLOSED"
-        if mkt_status == "CLOSED"
-        else ("DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else sig_final),
-    )
-
-    lines.extend([
-        "",
-        "----------------------------------------------------",
-        "PRICE ACTION",
-        "----------------------------------------------------",
-        f"BREAKOUT  : {bo_label}",
-        f"RETEST    : {rt_label}",
-        f"REJECTION : {rej_label}",
-        f"MOMENTUM  : {mom_label}",
-        "",
-        "----------------------------------------------------",
-        "ENTRY VALIDATION",
-        "----------------------------------------------------",
-        f"BUY  : {buy_st}",
-        f"SELL : {sell_st}",
-        "",
-        f"ZONE       : {zone_lbl}",
-        f"TRIGGER    : {trig_st}",
-        f"RR         : {rr_st}",
-    ])
-
-    mc = sr.get("market_context") or {}
-    role_ctx = ev.get("snr_role_context")
-    pb_tgt = ev.get("pullback_target_label")
-    candidate_zone = dec.get("trend_entry_zone") or ev.get("trend_entry_zone") or dec.get("target_zone") or ev.get("target_zone") or {}
-    inside_candidate = bool(
-        candidate_zone and price_val > 0
-        and safe_float(candidate_zone.get("low")) <= price_val <= safe_float(candidate_zone.get("high"))
-    )
-    if mc or role_ctx:
-        lines.extend([
-            "",
-            "----------------------------------------------------",
-            "MARKET CONTEXT (SNR)",
-            "----------------------------------------------------",
-            f"CONTEXT CLASS : {mc.get('classification', 'N/A')}",
-            f"PRIMARY TREND : {mc.get('primary_trend', mb.get('h4', 'UNCONFIRMED'))}",
-            f"SHORT TERM    : {mc.get('short_term', mom_label)}",
-            f"SNR CONTEXT   : {role_ctx or mc.get('snr_context', zone_lbl)}",
-            f"NEAREST ZONE  : {dec.get('nearest_snr_label') or ev.get('nearest_snr_label', 'N/A')}",
-            f"PULLBACK CANDIDATE : {dec.get('trend_entry_label') or ev.get('trend_entry_label', 'N/A')}",
-            f"INTERACTION   : {'PRICE IN CANDIDATE' if inside_candidate else 'NO CURRENT TOUCH'}",
-            f"M5 EVAL ZONE  : {dec.get('entry_trigger_label') or ev.get('entry_trigger_label', 'N/A')}",
-            f"NEXT PULLBACK : {pb_tgt or 'NONE'}",
-            f"TRADE BIAS    : {mc.get('trade_bias', 'NEUTRAL / WAIT')}",
-        ])
-    lines.extend(["", "----------------------------------------------------", "ZONE PLAN", "----------------------------------------------------"])
-    lines.append(format_snr_focus_plan(dec, ev, market_bias=mb))
+    # Cek plan jika ada (Confirmed Entry atau Provisional Plan)
+    plan_line = None
+    if sig_final in ("BUY", "SELL"):
+        e_val = safe_float(dec.get("effective_entry") or dec.get("entry"), 0.0)
+        sl_val = safe_float(dec.get("sl"), 0.0)
+        tp_val = safe_float(dec.get("tp1"), 0.0)
+        rr_disp = dec.get("rr_display")
+        if e_val > 0 and sl_val > 0 and tp_val > 0:
+            rr_str = f" | RR {rr_disp}" if rr_disp and rr_disp != "NOT CHECKED" else ""
+            plan_line = f"ENTRY {sig_final} : {e_val:.2f} | SL: {sl_val:.2f} | TP: {tp_val:.2f}{rr_str} (CONFIRMED)"
+    else:
+        prov = ev.get("provisional_plan")
+        if isinstance(prov, dict) and prov.get("status") == "PROVISIONAL":
+            pe = safe_float(prov.get("entry"), 0.0)
+            psl = safe_float(prov.get("sl"), 0.0)
+            ptp = safe_float(prov.get("tp1"), 0.0)
+            if pe > 0 and psl > 0 and ptp > 0:
+                p_dir = prov.get("direction", "PLAN")
+                p_rr = f"1:{abs(ptp - pe) / abs(pe - psl):.2f}"
+                plan_line = f"{p_dir} PLAN : {pe:.2f} | SL: {psl:.2f} | TP: {ptp:.2f} (RR {p_rr}, PROVISIONAL)"
 
     lines.extend([
         "",
         "----------------------------------------------------",
         "FINAL DECISION",
         "----------------------------------------------------",
-        f"FINAL STATUS : {final_status_lbl}",
         f"SIGNAL     : {sig_final}",
-        f"LIVE ENTRY : {live_entry}",
-        f"DIRECTION  : {dir_final}",
     ])
-
+    if dir_final not in ("NONE", "N/A"):
+        lines.append(f"DIRECTION  : {dir_final}")
+    if focus_lbl and focus_lbl != "N/A":
+        lines.append(f"FOCUS      : {focus_lbl}")
+    if plan_line:
+        lines.append(f"PLAN       : {plan_line}")
+    lines.append(f"REASON     : {reason_final}")
     lines.extend([
-        f"REASON     : {reason_final}",
         "",
         "====================================================",
     ])

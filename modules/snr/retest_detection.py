@@ -78,7 +78,10 @@ def detect_zone_retest(
     bo_status = str(breakout_result.get("status", "NO_BREAKOUT"))
     bo_idx = breakout_result.get("breakout_bar_index")
 
-    if bo_status != "VALID_BREAKOUT" or bo_idx is None:
+    has_valid_bo = (bo_status == "VALID_BREAKOUT") or (
+        bo_status in ("BREAKOUT_PENDING_CONFIRMATION", "FALSE_BREAKOUT") and breakout_result.get("prior_confirmed_breakout")
+    )
+    if not has_valid_bo or bo_idx is None:
         return {
             "zone_id": zone.get("zone_id", "UNKNOWN"),
             "timeframe": tf,

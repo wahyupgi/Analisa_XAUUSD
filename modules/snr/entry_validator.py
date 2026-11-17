@@ -19,12 +19,46 @@ from modules.snr.retest_detection import detect_zone_retest
 from modules.snr.risk_reward import calculate_snr_risk_reward, opposing_risk_zones
 
 
-def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price):
+def _zone_was_tested(zone, clean_m5=None):
+    """Memeriksa apakah zona SNR sudah pernah disentuh, diuji, atau dijemput harga."""
+    if not isinstance(zone, dict):
+        return False
+    if int(zone.get("touch_count", 0) or 0) > 0:
+        return True
+    if int(zone.get("valid_touch_count", 0) or 0) > 0:
+        return True
+    if int(zone.get("reactions", 0) or 0) > 0:
+        return True
+    t_status = str(zone.get("touch_status", "")).upper()
+    if t_status and t_status != "UNTESTED":
+        return True
+    event = str(zone.get("lifecycle_event", "")).upper()
+    if event in ("TOUCHED", "SWEEP", "HISTORICAL_TOUCH", "TESTED"):
+        return True
+    st = str(zone.get("lifecycle_status", zone.get("status", ""))).upper()
+    if st in ("TOUCHED", "SWEEP", "TESTED", "HISTORICAL_TOUCH"):
+        return True
+    if clean_m5 is not None and not clean_m5.empty:
+        z_low = safe_float(zone.get("low"), 0.0)
+        z_high = safe_float(zone.get("high"), z_low)
+        z_type = str(zone.get("zone_type", "")).upper()
+        z_lbl = str(zone.get("rank_label", "")).upper()
+        if z_type == "RESISTANCE" or "R" in z_lbl or "RESISTANCE" in z_lbl:
+            if (clean_m5["High"] >= z_low).any():
+                return True
+        elif z_type == "SUPPORT" or "S" in z_lbl or "SUPPORT" in z_lbl:
+            if (clean_m5["Low"] <= z_high).any():
+                return True
+    return False
+
+
+def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price, clean_m5=None):
     """
     Memilih dan memisahkan tiga konsep zona SNR:
       1. NEAREST_SNR_ZONE  : Zona support/resistance terdekat dengan harga saat ini.
       2. TREND_ENTRY_ZONE  : Zona yang mendukung arah tren utama (Resistance jika BEARISH, Support jika BULLISH).
-      3. ENTRY_TRIGGER_ZONE: Zona yang sedang digunakan untuk validasi entry (pada follow-trend mode = TREND_ENTRY_ZONE).
+      3. ENTRY_TRIGGER_ZONE: Zona yang sedang digunakan untuk validasi entry.
+      4. FOCUS_ZONE        : Zona yang secara aktif berinteraksi atau sedang diuji harga saat ini.
     """
     active_sups = (ranked_zones or {}).get("active_supports") or []
     active_ress = (ranked_zones or {}).get("active_resistances") or []
@@ -73,26 +107,54 @@ def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price)
         nearest_zone = None
         nearest_label = "NONE"
 
-    # 2. TREND_ENTRY_ZONE
+    # 2. TREND_ENTRY_ZONE & FOCUS_ZONE
     is_bearish = (h4_bias == "BEARISH") or (not h4_bias and bias_str == "BEARISH")
     is_bullish = (h4_bias == "BULLISH") or (not h4_bias and bias_str == "BULLISH")
 
     if is_bearish:
         trend_entry_zone = r1
         trend_entry_label = f"RESISTANCE {r1.get('rank_label', 'R1')}" if r1 else "NONE"
+
+        s1_inside = bool(s1 and (s1.get("price_inside_zone") or (safe_float(s1.get("low")) <= cp <= safe_float(s1.get("high")))))
+        r1_tested = _zone_was_tested(r1, clean_m5)
+        r1_departed = bool(r1 and (cp < safe_float(r1.get("low"), 0.0)) and r1_tested)
+
+        if s1_inside or (r1_departed and d_s1 <= d_r1) or (s1 and d_s1 < d_r1 and r1_tested):
+            focus_zone = s1
+            focus_label = f"SUPPORT {s1.get('rank_label', 'S1')}" if s1 else nearest_label
+            entry_trigger_zone = trend_entry_zone or s1
+            entry_trigger_label = trend_entry_label or focus_label
+        else:
+            focus_zone = trend_entry_zone if trend_entry_zone else nearest_zone
+            focus_label = trend_entry_label if trend_entry_zone else nearest_label
+            entry_trigger_zone = trend_entry_zone
+            entry_trigger_label = trend_entry_label
+
     elif is_bullish:
         trend_entry_zone = s1
         trend_entry_label = f"SUPPORT {s1.get('rank_label', 'S1')}" if s1 else "NONE"
+
+        r1_inside = bool(r1 and (r1.get("price_inside_zone") or (safe_float(r1.get("low")) <= cp <= safe_float(r1.get("high")))))
+        s1_tested = _zone_was_tested(s1, clean_m5)
+        s1_departed = bool(s1 and (cp > safe_float(s1.get("high"), 0.0)) and s1_tested)
+
+        if r1_inside or (s1_departed and d_r1 <= d_s1) or (r1 and d_r1 < d_s1 and s1_tested):
+            focus_zone = r1
+            focus_label = f"RESISTANCE {r1.get('rank_label', 'R1')}" if r1 else nearest_label
+            entry_trigger_zone = trend_entry_zone or r1
+            entry_trigger_label = trend_entry_label or focus_label
+        else:
+            focus_zone = trend_entry_zone if trend_entry_zone else nearest_zone
+            focus_label = trend_entry_label if trend_entry_zone else nearest_label
+            entry_trigger_zone = trend_entry_zone
+            entry_trigger_label = trend_entry_label
     else:
         trend_entry_zone = nearest_zone
         trend_entry_label = nearest_label
-
-    # 3. ENTRY_TRIGGER_ZONE
-    entry_trigger_zone = trend_entry_zone
-    entry_trigger_label = trend_entry_label
-
-    focus_zone = entry_trigger_zone if entry_trigger_zone else nearest_zone
-    focus_label = entry_trigger_label if entry_trigger_zone else nearest_label
+        entry_trigger_zone = nearest_zone
+        entry_trigger_label = nearest_label
+        focus_zone = nearest_zone
+        focus_label = nearest_label
 
     return (
         focus_zone,
@@ -146,7 +208,7 @@ def validate_snr_entry(
         trend_entry_label,
         entry_trigger_zone,
         entry_trigger_label,
-    ) = _select_target_zone_for_monitoring(ranked_zones, market_bias, cp)
+    ) = _select_target_zone_for_monitoring(ranked_zones, market_bias, cp, clean_m5=clean_m5)
 
     def _blocked_wait(reason_msg, trigger_st="WAIT", rr_st="NOT CHECKED"):
         return {
@@ -694,31 +756,65 @@ def validate_snr_entry(
 
     # Default: WAIT (belum ada konfirmasi lengkap; RR ditampilkan NOT CHECKED sesuai Section U)
     if h4_bear_counter:
-        if r1 is not None and entered_resistance:
+        if s1 and (s1.get("price_inside_zone") or entered_support or cp <= (s1_high + 0.20 * m5_atr)):
+            if _zone_was_tested(r1, clean_m5):
+                default_wait_msg = (
+                    f"WAIT_SUPPORT_REACTION: Harga telah terjemput di Resistance {r1.get('rank_label', 'R1')} "
+                    f"({r1_low:.2f}-{r1_high:.2f}) dan running turun menguji Support {s1.get('rank_label', 'S1')} "
+                    f"({s1_low:.2f}-{s1_high:.2f}). Menunggu konfirmasi M5 Breakdown {s1.get('rank_label', 'S1')} "
+                    f"untuk sell continuation, atau pantau reaksi support."
+                )
+            else:
+                default_wait_msg = (
+                    f"WAIT_SUPPORT_REACTION: Harga di Support {s1.get('rank_label', 'S1')} ({s1_low:.2f}-{s1_high:.2f}) "
+                    f"saat tren utama BEARISH; pantau potensi M5 Breakdown atau pantulan menuju Resistance {r1.get('rank_label', 'R1')} "
+                    f"({r1_low:.2f}-{r1_high:.2f})."
+                ) if r1 else f"WAIT_SUPPORT_REACTION: Harga di Support {s1.get('rank_label', 'S1')} ({s1_low:.2f}-{s1_high:.2f}) saat tren utama BEARISH."
+        elif r1 is not None and (r1.get("price_inside_zone") or (entered_resistance and cp >= r1_low - 0.20 * m5_atr)):
             default_wait_msg = f"WAITING BEARISH CONFIRMATION at Resistance {r1.get('rank_label', 'R1')} ({r1_low:.2f}-{r1_high:.2f})."
-        else:
-            if s1 and (s1.get("price_inside_zone") or entered_support):
+        elif r1:
+            if _zone_was_tested(r1, clean_m5) and cp < r1_low:
                 default_wait_msg = (
-                    f"WAITING RESISTANCE PULLBACK (Trend Entry: Resistance {r1.get('rank_label', 'R1')} @ {r1_low:.2f}-{r1_high:.2f} "
-                    f"| Support {s1.get('rank_label', 'S1')} is Context Only)."
-                ) if r1 else f"WAITING RESISTANCE PULLBACK (Support {s1.get('rank_label', 'S1')} is Context Only)."
-            elif r1:
-                default_wait_msg = f"WAITING RESISTANCE PULLBACK (Trend Entry: Resistance {r1.get('rank_label', 'R1')} @ {r1_low:.2f}-{r1_high:.2f})."
+                    f"RUNNING_TO_SUPPORT: Harga telah terjemput di Resistance {r1.get('rank_label', 'R1')} "
+                    f"({r1_low:.2f}-{r1_high:.2f}) dan sedang running turun menuju Support {s1.get('rank_label', 'S1') if s1 else 'berikutnya'}."
+                )
             else:
-                default_wait_msg = "WAITING RESISTANCE PULLBACK (No active resistance detected)."
+                distance = max(r1_low - cp, 0.0)
+                approach = safe_float(cfg.get("radar", {}).get("approaching_distance_atr"), 0.60) * max(0.25, safe_float(r1.get("ref_atr"), 2.0))
+                code = "WAIT_ZONE_TOUCH" if distance <= approach else "WAIT_ZONE_APPROACH"
+                default_wait_msg = f"{code}: Menunggu harga mencapai {trend_entry_label}."
+        else:
+            default_wait_msg = "WAITING RESISTANCE PULLBACK (No active resistance detected)."
     elif h4_bull_counter:
-        if s1 is not None and entered_support:
-            default_wait_msg = f"WAITING BULLISH CONFIRMATION at Support {s1.get('rank_label', 'S1')} ({s1_low:.2f}-{s1_high:.2f})."
-        else:
-            if r1 and (r1.get("price_inside_zone") or entered_resistance):
+        if r1 and (r1.get("price_inside_zone") or entered_resistance or cp >= (r1_low - 0.20 * m5_atr)):
+            if _zone_was_tested(s1, clean_m5):
                 default_wait_msg = (
-                    f"WAITING SUPPORT PULLBACK (Trend Entry: Support {s1.get('rank_label', 'S1')} @ {s1_low:.2f}-{s1_high:.2f} "
-                    f"| Resistance {r1.get('rank_label', 'R1')} is Context Only)."
-                ) if s1 else f"WAITING SUPPORT PULLBACK (Resistance {r1.get('rank_label', 'R1')} is Context Only)."
-            elif s1:
-                default_wait_msg = f"WAITING SUPPORT PULLBACK (Trend Entry: Support {s1.get('rank_label', 'S1')} @ {s1_low:.2f}-{s1_high:.2f})."
+                    f"WAIT_RESISTANCE_REACTION: Harga telah terjemput di Support {s1.get('rank_label', 'S1')} "
+                    f"({s1_low:.2f}-{s1_high:.2f}) dan running naik menguji Resistance {r1.get('rank_label', 'R1')} "
+                    f"({r1_low:.2f}-{r1_high:.2f}). Menunggu konfirmasi M5 Breakout {r1.get('rank_label', 'R1')} "
+                    f"untuk buy continuation, atau pantau reaksi resistance."
+                )
             else:
-                default_wait_msg = "WAITING SUPPORT PULLBACK (No active support detected)."
+                default_wait_msg = (
+                    f"WAIT_RESISTANCE_REACTION: Harga di Resistance {r1.get('rank_label', 'R1')} ({r1_low:.2f}-{r1_high:.2f}) "
+                    f"saat tren utama BULLISH; pantau potensi M5 Breakout atau penolakan menuju Support {s1.get('rank_label', 'S1')} "
+                    f"({s1_low:.2f}-{s1_high:.2f})."
+                ) if s1 else f"WAIT_RESISTANCE_REACTION: Harga di Resistance {r1.get('rank_label', 'R1')} ({r1_low:.2f}-{r1_high:.2f}) saat tren utama BULLISH."
+        elif s1 is not None and (s1.get("price_inside_zone") or (entered_support and cp <= s1_high + 0.20 * m5_atr)):
+            default_wait_msg = f"WAITING BULLISH CONFIRMATION at Support {s1.get('rank_label', 'S1')} ({s1_low:.2f}-{s1_high:.2f})."
+        elif s1:
+            if _zone_was_tested(s1, clean_m5) and cp > s1_high:
+                default_wait_msg = (
+                    f"RUNNING_TO_RESISTANCE: Harga telah terjemput di Support {s1.get('rank_label', 'S1')} "
+                    f"({s1_low:.2f}-{s1_high:.2f}) dan sedang running naik menuju Resistance {r1.get('rank_label', 'R1') if r1 else 'berikutnya'}."
+                )
+            else:
+                distance = max(cp - s1_high, 0.0)
+                approach = safe_float(cfg.get("radar", {}).get("approaching_distance_atr"), 0.60) * max(0.25, safe_float(s1.get("ref_atr"), 2.0))
+                code = "WAIT_ZONE_TOUCH" if distance <= approach else "WAIT_ZONE_APPROACH"
+                default_wait_msg = f"{code}: Menunggu harga mencapai {trend_entry_label}."
+        else:
+            default_wait_msg = "WAITING SUPPORT PULLBACK (No active support detected)."
     elif focus_label.startswith("RESISTANCE"):
         default_wait_msg = "Waiting for valid resistance rejection."
     elif focus_label.startswith("SUPPORT"):
@@ -745,10 +841,21 @@ def validate_snr_entry(
         if not closed_touch and inside_now:
             default_wait_msg = "WAIT_M5_CONFIRMATION: Harga di zona; tunggu interaksi candle M5 tertutup."
         elif not closed_touch or not entered:
-            distance = max(safe_float(target.get("low")) - cp, cp - safe_float(target.get("high")), 0.0)
-            approach = safe_float(cfg.get("radar", {}).get("approaching_distance_atr"), 0.60) * max(0.25, safe_float(target.get("ref_atr"), 2.0))
-            code = "WAIT_ZONE_TOUCH" if distance <= approach else "WAIT_ZONE_APPROACH"
-            default_wait_msg = f"{code}: Menunggu harga mencapai {focus_label}."
+            if focus_is_resistance and _zone_was_tested(target, clean_m5) and cp < safe_float(target.get("low")):
+                default_wait_msg = (
+                    f"RUNNING_TO_SUPPORT: Harga telah terjemput di {focus_label} dan sedang running turun "
+                    f"menuju Support {s1.get('rank_label', 'S1') if s1 else 'berikutnya'}."
+                )
+            elif focus_is_support and _zone_was_tested(target, clean_m5) and cp > safe_float(target.get("high")):
+                default_wait_msg = (
+                    f"RUNNING_TO_RESISTANCE: Harga telah terjemput di {focus_label} dan sedang running naik "
+                    f"menuju Resistance {r1.get('rank_label', 'R1') if r1 else 'berikutnya'}."
+                )
+            else:
+                distance = max(safe_float(target.get("low")) - cp, cp - safe_float(target.get("high")), 0.0)
+                approach = safe_float(cfg.get("radar", {}).get("approaching_distance_atr"), 0.60) * max(0.25, safe_float(target.get("ref_atr"), 2.0))
+                code = "WAIT_ZONE_TOUCH" if distance <= approach else "WAIT_ZONE_APPROACH"
+                default_wait_msg = f"{code}: Menunggu harga mencapai {focus_label}."
         elif not rejection_valid:
             default_wait_msg = f"WAIT_M5_CONFIRMATION: Belum ada rejection M5 terkonfirmasi pada {focus_label}."
         elif not directional_close or not momentum_valid:

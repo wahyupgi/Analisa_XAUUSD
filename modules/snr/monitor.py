@@ -71,6 +71,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
 
         lines = [
             "### B. SNR MONITOR",
+            "STATUS          : OK",
             f"BIAS            : H4={mb.get('h4', 'N/A')} | H1={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')}",
             f"SUPPORT         : {_zone_label(active_sups)}",
             f"RESISTANCE      : {_zone_label(active_ress)}",

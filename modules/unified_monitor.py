@@ -17,6 +17,9 @@ Aturan Utama:
 - Alert independen beridentitas metode ([SMC] ... dan [SNR] ...) hanya muncul saat terjadi perubahan status.
 """
 from datetime import datetime, timezone
+import json
+import math
+import os
 import re
 import shutil
 import time
@@ -26,7 +29,7 @@ try:
 except Exception:  # pragma: no cover
     mt5 = None
 
-from modules.config import SYMBOL as DEFAULT_APP_SYMBOL
+from modules.config import SYMBOL as DEFAULT_APP_SYMBOL, FILE_STATE_ZONE_TRACKER
 from modules.config import PANTAU_FULL_REFRESH_SECONDS, PANTAU_INTERVALS_SECONDS
 from modules.utils import format_wib_timestamp
 from modules.mt5_conn import pastikan_mt5_aktif
@@ -36,7 +39,7 @@ from modules.pantau import (
     mode_pantau_mt5,
 )
 from modules.snr.data_provider import safe_float
-from modules.snr.formatter import format_snr_lifecycle_status
+from modules.snr.formatter import format_snr_focus_plan, format_snr_lifecycle_status
 from modules.snr.monitor import (
     SnrCycleEngine,
     format_snr_monitor_section,
@@ -46,12 +49,638 @@ from modules.zone_scanner import (
     _extract_risk_monitor_snapshot,
     create_market_snapshot,
     evaluate_trade_decision,
+    format_smc_zone_lines,
     format_scan_presentation,
     scan_xauusd_zones,
+    smc_zone_summary,
 )
 
 
 _GLOBAL_LAST_SMC_STATE = {}
+
+
+def _position_value(position, name, default=None):
+    return position.get(name, default) if isinstance(position, dict) else getattr(position, name, default)
+
+
+class PantauFocusTracker:
+    """Track independently published SMC/SNR zones without placing or modifying orders."""
+
+    def __init__(self, symbol):
+        self.symbol = symbol
+        self.focus = {"SMC": None, "SNR": None}
+        self.completed = {"SMC": None, "SNR": None}
+        self.active_methods = set()
+        self.refresh_required = False
+        self._saved_state = None
+        self._last_tick = None
+        self._history_error_active = False
+        self._load()
+
+    def _load(self):
+        if not os.path.exists(FILE_STATE_ZONE_TRACKER):
+            return
+        try:
+            with open(FILE_STATE_ZONE_TRACKER, "r", encoding="utf-8") as state_file:
+                data = json.load(state_file)
+            if not isinstance(data, dict):
+                raise ValueError("Shared zone state harus berupa object.")
+            namespaces = data.get("pantau_focus_state", {})
+            if not isinstance(namespaces, dict):
+                raise ValueError("State fokus pantau harus berupa object.")
+            saved = namespaces.get(self.symbol)
+            if saved is None:
+                return
+            if not isinstance(saved, dict) or not isinstance(saved.get("focus"), dict) or not isinstance(saved.get("completed"), dict):
+                raise ValueError("State fokus pantau tidak valid.")
+            for method in self.focus:
+                record = saved["focus"].get(method)
+                completed = saved["completed"].get(method)
+                if record is not None:
+                    if not isinstance(record, dict) or not isinstance(record.get("zone"), dict) or not all(
+                        key in record for key in ("zone_id", "low", "high", "direction", "issued_at", "plan", "touched", "ticket", "ever_taken", "account_status", "uncertain")
+                    ):
+                        raise ValueError(f"State fokus {method} tidak lengkap.")
+                    record["uncertain"] = True
+                    record["account_status"] = ""
+                if completed is not None and (not isinstance(completed, dict) or "zone_id" not in completed or "left" not in completed):
+                    raise ValueError(f"State zona selesai {method} tidak valid.")
+                self.focus[method] = record
+                self.completed[method] = completed
+        except (OSError, ValueError, TypeError) as exc:
+            from modules.utils import _catat_error
+            _catat_error("pantau_focus_load", exc)
+            raise RuntimeError("State fokus pantau tidak dapat dibaca; pemantauan dihentikan.") from exc
+
+    def _save(self):
+        focus = {}
+        for method, record in self.focus.items():
+            if record is None:
+                focus[method] = None
+                continue
+            saved = dict(record)
+            zone = record["zone"]
+            saved["zone"] = {
+                key: zone.get(key) for key in ("zone_id", "zone_type", "timeframe", "rank_label", "grade")
+                if zone.get(key) is None or isinstance(zone.get(key), (str, int, float, bool))
+            }
+            saved["zone"].update(
+                {"price_low": record["low"], "price_high": record["high"]}
+                if method == "SMC" else {"low": record["low"], "high": record["high"]}
+            )
+            focus[method] = saved
+        state = {"focus": focus, "completed": self.completed}
+        temporary_path = FILE_STATE_ZONE_TRACKER + f".pantau.{os.getpid()}.tmp"
+        try:
+            serialized = json.dumps(state, sort_keys=True, ensure_ascii=True)
+            if serialized == self._saved_state:
+                return
+            if os.path.exists(FILE_STATE_ZONE_TRACKER):
+                with open(FILE_STATE_ZONE_TRACKER, "r", encoding="utf-8") as state_file:
+                    data = json.load(state_file)
+                if not isinstance(data, dict):
+                    raise ValueError("Shared zone state harus berupa object.")
+            else:
+                data = {}
+            namespaces = data.setdefault("pantau_focus_state", {})
+            if not isinstance(namespaces, dict):
+                raise ValueError("State fokus pantau harus berupa object.")
+            namespaces[self.symbol] = state
+            with open(temporary_path, "w", encoding="utf-8") as state_file:
+                json.dump(data, state_file, indent=2, ensure_ascii=True)
+            os.replace(temporary_path, FILE_STATE_ZONE_TRACKER)
+            self._saved_state = serialized
+        except (OSError, TypeError, ValueError) as exc:
+            from modules.utils import _catat_error
+            _catat_error("pantau_focus_save", exc)
+            raise RuntimeError("State fokus pantau tidak dapat disimpan; pemantauan dihentikan.") from exc
+
+    @staticmethod
+    def _candidate(method, result):
+        if not isinstance(result, dict) or result.get("status") != "OK":
+            return None, None
+        dec = result.get("decision") or {}
+        scan = result.get("scan_result") or {}
+        if method == "SMC":
+            zone = dec.get("zone") or dec.get("primary_zone") or {}
+            if not zone:
+                priority = dec.get("radar_priority") or scan.get("radar_priority") or {}
+                zone = priority.get("primary_directional_zone") or priority.get("primary_zone") or {}
+            summary = smc_zone_summary(zone, dec) if zone else {}
+            plan = {
+                "direction": summary.get("direction"),
+                "entry": summary.get("entry"),
+                "sl": summary.get("sl"),
+                "tp1": summary.get("tp1"),
+            } if summary.get("kind") in ("CONFIRMED", "PENDING", "PROVISIONAL") else None
+        else:
+            zone = dec.get("target_zone") or {}
+            ev = scan.get("entry_validation") or {}
+            provisional = ev.get("provisional_plan") or {}
+            if dec.get("signal") in ("BUY", "SELL"):
+                plan = {
+                    "direction": dec.get("signal"), "entry": dec.get("effective_entry"),
+                    "sl": dec.get("sl"), "tp1": dec.get("tp1"),
+                }
+            elif provisional.get("status") == "PROVISIONAL":
+                plan = {key: provisional.get(key) for key in ("direction", "entry", "sl", "tp1")}
+            else:
+                plan = None
+        return zone if isinstance(zone, dict) else None, plan
+
+    @staticmethod
+    def _bounds(method, zone):
+        if method == "SMC":
+            return safe_float(zone.get("price_low")), safe_float(zone.get("price_high"))
+        return safe_float(zone.get("low")), safe_float(zone.get("high"))
+
+    @staticmethod
+    def _valid_plan(plan):
+        if not isinstance(plan, dict):
+            return False
+        entry = safe_float(plan.get("entry"))
+        sl = safe_float(plan.get("sl"))
+        tp = safe_float(plan.get("tp1"))
+        direction = str(plan.get("direction") or "").upper()
+        return entry > 0 and sl > 0 and tp > 0 and (
+            sl < entry < tp if direction == "BUY" else tp < entry < sl if direction == "SELL" else False
+        )
+
+    @staticmethod
+    def _current_zone(method, result, zone_id):
+        scan = (result or {}).get("scan_result") or {}
+        if method == "SMC":
+            zones = (scan.get("radar_zones") or []) + (scan.get("active_zones") or []) + (scan.get("rejected_zones") or [])
+        else:
+            zones = ((scan.get("ranked_zones") or {}).get("all_zones") or [])
+        return next((z for z in zones if isinstance(z, dict) and z.get("zone_id") == zone_id), None)
+
+    @staticmethod
+    def _next_zone(method, result, previous, current_zone):
+        scan = (result or {}).get("scan_result") or {}
+        if method == "SMC":
+            priority = (result.get("decision") or {}).get("radar_priority") or scan.get("radar_priority") or {}
+            zones = priority.get("aligned_zones") or []
+        else:
+            ranked = scan.get("ranked_zones") or {}
+            zones = (ranked.get("active_supports") or []) + (ranked.get("active_resistances") or [])
+        for zone in zones:
+            if not isinstance(zone, dict) or not zone.get("zone_id") or zone["zone_id"] == previous["zone_id"]:
+                continue
+            if zone.get("zone_type") != current_zone.get("zone_type"):
+                continue
+            lifecycle = str(zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
+            if zone.get("is_valid") is False or lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN", "UNCONFIRMED"):
+                continue
+            return zone
+        return None
+
+    def _observations(self, snapshot):
+        stamp = int(safe_float(snapshot.get("tick_time_msc")))
+        bid = safe_float(snapshot.get("tick_bid_raw"))
+        ask = safe_float(snapshot.get("tick_ask_raw"))
+        if stamp <= 0 or bid <= 0 or ask < bid:
+            raise ValueError("Timestamp milidetik atau Bid/Ask tick tidak tersedia.")
+        current = (stamp, bid, ask)
+        previous = self._last_tick
+        if previous is None:
+            self._last_tick = current
+            return [current]
+        if stamp < previous[0]:
+            raise ValueError("Waktu tick MT5 bergerak mundur.")
+        ticks = mt5.copy_ticks_range(
+            self.symbol,
+            datetime.fromtimestamp(previous[0] // 1000, tz=timezone.utc),
+            datetime.fromtimestamp(stamp // 1000 + 1, tz=timezone.utc),
+            mt5.COPY_TICKS_ALL,
+        )
+        if ticks is None:
+            raise RuntimeError(f"Riwayat tick MT5 tidak tersedia: {mt5.last_error()}")
+        history = [
+            (int(tick["time_msc"]), float(tick["bid"]), float(tick["ask"]))
+            for tick in ticks if previous[0] <= int(tick["time_msc"]) <= stamp
+        ]
+        if any(not math.isfinite(t[1]) or not math.isfinite(t[2]) or t[1] <= 0 or t[2] < t[1] for t in history):
+            raise ValueError("Riwayat tick berisi Bid/Ask tidak valid.")
+        starts = [i for i, tick in enumerate(history) if tick == previous]
+        ends = [i for i, tick in enumerate(history) if tick == current]
+        if not starts or not ends or any(history[i][0] > history[i + 1][0] for i in range(len(history) - 1)):
+            raise ValueError("Batas riwayat tick tidak lengkap atau urutannya tidak valid.")
+        start, end = starts[-1], ends[0]
+        if start > end:
+            if previous == current and all(tick == previous for tick in history):
+                start = end
+            else:
+                raise ValueError("Urutan tick pada milidetik yang sama tidak dapat dipastikan.")
+        if any(tick != previous for tick in history[:start] if tick[0] == previous[0]):
+            raise ValueError("Tick awal pada milidetik yang sama ambigu.")
+        if any(tick != current for tick in history[end + 1:ends[-1] + 1]):
+            raise ValueError("Tick akhir pada milidetik yang sama ambigu.")
+        self._last_tick = current
+        return history[start + 1:end + 1] or [current]
+
+    def update(self, results, snapshot, positions, full_refresh):
+        alerts = []
+        self.refresh_required = False
+        self.active_methods = {method for method in ("SMC", "SNR") if results.get(method) is not None}
+        snap = snapshot if isinstance(snapshot, dict) else {}
+        bid, ask = safe_float(snap.get("bid")), safe_float(snap.get("ask"))
+        price = safe_float(snap.get("snapshot_price"))
+        fresh = (
+            snap.get("data_ok") is not False and snap.get("live") is True
+            and str(snap.get("market_status") or "").upper() == "OPEN"
+            and str(snap.get("data_freshness") or "").upper() not in ("STALE", "INVALID", "NO DATA")
+            and 0 < bid <= ask and price > 0
+        )
+        observations = []
+        history_complete = True
+        if fresh:
+            try:
+                observations = self._observations(snap)
+                self._history_error_active = False
+            except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError, OverflowError) as exc:
+                history_complete = False
+                if not self._history_error_active:
+                    from modules.utils import _catat_error
+                    _catat_error("pantau_focus_tick_history", exc)
+                    alerts.append("[DATA] RIWAYAT TICK TIDAK LENGKAP; URUTAN HARGA TIDAK PASTI")
+                self._history_error_active = True
+                stamp = int(safe_float(snap.get("tick_time_msc")))
+                tick_bid = safe_float(snap.get("tick_bid_raw"))
+                tick_ask = safe_float(snap.get("tick_ask_raw"))
+                if stamp > 0 and 0 < tick_bid <= tick_ask:
+                    observations = [(stamp, tick_bid, tick_ask)]
+
+        candidates = {method: self._candidate(method, results.get(method)) for method in ("SMC", "SNR")}
+        new_focus = set()
+        plan_updates = {}
+        for method in ("SMC", "SNR"):
+            if method not in self.active_methods:
+                continue
+            zone, plan = candidates[method]
+            record = self.focus[method]
+            completed = self.completed[method]
+            if record is None and full_refresh and completed and zone and zone.get("zone_id") == completed["zone_id"]:
+                alternative = self._next_zone(method, results[method], completed, zone)
+                if alternative is not None:
+                    zone, plan = alternative, None
+            if record is None and full_refresh and fresh and isinstance(zone, dict) and zone.get("zone_id"):
+                low, high = self._bounds(method, zone)
+                state = str(zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
+                kind = str(zone.get("zone_type") or "").upper()
+                direction = "BUY" if kind in ("DEMAND", "SUPPORT") else "SELL" if kind in ("SUPPLY", "RESISTANCE") else ""
+                completed = self.completed[method]
+                if completed and completed["zone_id"] == zone["zone_id"]:
+                    if not low <= price <= high:
+                        completed["left"] = True
+                    if not (completed["left"] and low <= price <= high and (
+                        (results[method].get("decision") or {}).get("status") == "VALID"
+                        if method == "SMC" else (results[method].get("decision") or {}).get("signal") in ("BUY", "SELL")
+                    )):
+                        continue
+                if direction and 0 < low <= high and state not in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN", "UNCONFIRMED") and zone.get("is_valid") is not False:
+                    record = {
+                        "zone": dict(zone), "zone_id": zone["zone_id"], "low": low, "high": high,
+                        "direction": direction, "issued_at": time.time(), "plan": None, "touched": False,
+                        "ticket": None, "ever_taken": False, "account_status": "", "uncertain": False,
+                    }
+                    self.focus[method] = record
+                    new_focus.add(method)
+                    self.completed[method] = None
+                    if completed:
+                        alerts.append(
+                            f"[{method}] ZONA BERIKUTNYA {low:.2f}-{high:.2f}; "
+                            "KANDIDAT RANKING, MENUNGGU VALIDASI ENTRY"
+                        )
+            if record and full_refresh and zone and zone.get("zone_id") == record["zone_id"]:
+                if not record["touched"]:
+                    plan_updates[method] = (
+                        {"direction": plan["direction"], **{key: safe_float(plan[key]) for key in ("entry", "sl", "tp1")}}
+                        if self._valid_plan(plan) and plan["direction"] == record["direction"] else None
+                    )
+                elif not record["plan"] and not record["ever_taken"] and self._valid_plan(plan) and plan["direction"] == record["direction"]:
+                    plan_updates[method] = {"direction": plan["direction"], **{key: safe_float(plan[key]) for key in ("entry", "sl", "tp1")}}
+                if method in new_focus and method in plan_updates:
+                    record["plan"] = plan_updates.pop(method)
+
+        matches = {}
+        for method, record in self.focus.items():
+            matches[method] = []
+            if not record or positions is None:
+                continue
+            for position in positions:
+                symbol = str(_position_value(position, "symbol", ""))
+                kind = _position_value(position, "type")
+                direction = "BUY" if kind == 0 or str(kind).upper() == "BUY" else "SELL" if kind == 1 or str(kind).upper() == "SELL" else ""
+                opened = safe_float(_position_value(position, "price_open"))
+                opened_at = safe_float(_position_value(position, "time"))
+                opened_msc = safe_float(_position_value(position, "time_msc"))
+                if opened_msc > 0:
+                    opened_at = opened_msc / 1000.0
+                ticket = _position_value(position, "ticket")
+                if (
+                    symbol == self.symbol and direction == record["direction"] and ticket
+                    and record["low"] <= opened <= record["high"]
+                    and opened_at >= record["issued_at"]
+                    and (not record["ticket"] or ticket == record["ticket"])
+                ):
+                    matches[method].append(position)
+
+        for method, record in list(self.focus.items()):
+            if not record or method not in self.active_methods:
+                continue
+            if not fresh or positions is None or not history_complete:
+                if not record["uncertain"]:
+                    alerts.append(f"[{method}] DATA ATAU RIWAYAT TIDAK LENGKAP; FOKUS DIPERTAHANKAN")
+                record["uncertain"] = True
+            other = "SNR" if method == "SMC" else "SMC"
+            match = matches[method]
+            shared = bool(match and any(
+                _position_value(p, "ticket") == _position_value(match[0], "ticket")
+                for p in matches[other]
+            ))
+            account_status = "POSITIONS UNAVAILABLE" if positions is None else "AMBIGUOUS" if len(match) > 1 or shared else "RUNNING" if len(match) == 1 else (
+                "POSITION NOT OBSERVED" if record["ever_taken"] else "NO MATCHING POSITION"
+            )
+            if account_status != record["account_status"]:
+                if account_status == "RUNNING":
+                    record["ticket"] = _position_value(match[0], "ticket")
+                    record["ever_taken"] = True
+                    if not record["touched"]:
+                        alerts.append(f"[{method}] POSISI DIBUKA DI ZONA {record['low']:.2f}-{record['high']:.2f}")
+                    record["touched"] = True
+                    alerts.append(f"[{method}] RUNNING: POSISI MT5 COCOK #{record['ticket']} (ASOSIASI OTOMATIS)")
+                elif account_status == "AMBIGUOUS":
+                    alerts.append(f"[{method}] POSISI MT5 AMBIGU; ENTRY BELUM DAPAT DIPASTIKAN")
+                elif account_status == "POSITION NOT OBSERVED":
+                    alerts.append(f"[{method}] POSISI #{record['ticket']} TIDAK LAGI TERLIHAT; HASIL BELUM DIPASTIKAN")
+                elif account_status == "POSITIONS UNAVAILABLE":
+                    alerts.append(f"[{method}] POSISI MT5 TIDAK DAPAT DIBACA")
+                elif record["touched"]:
+                    alerts.append(f"[{method}] BELUM ADA POSISI MT5 YANG COCOK DENGAN ZONA")
+                record["account_status"] = account_status
+
+            current = self._current_zone(method, results.get(method), record["zone_id"]) if full_refresh else None
+            if method == "SNR" and current is not None and (
+                safe_float(current.get("touch_count")) > 0
+                or str(current.get("lifecycle_event") or "").upper() in ("TOUCHED", "SWEEP")
+            ):
+                if not record.get("historical_touch"):
+                    record["historical_touch"] = True
+                    alerts.append("[SNR] ZONA PERNAH DISENTUH (HISTORIS); BUKAN BUKTI ENTRY")
+            lifecycle = str((current or {}).get("lifecycle_status") or (current or {}).get("status") or "").upper()
+            invalid = current is not None and lifecycle in ("INVALIDATED", "BROKEN", "EXPIRED", "MITIGATED")
+            plan = record.get("plan") or {}
+            sl, tp = safe_float(plan.get("sl")), safe_float(plan.get("tp1"))
+            outcome = ""
+            ticks = observations[-1:] if method in new_focus else observations
+            for tick_stamp, tick_bid, tick_ask in ticks:
+                if tick_stamp < record["issued_at"] * 1000:
+                    continue
+                tick_price = (tick_bid + tick_ask) / 2.0
+                previous_price = safe_float(record.get("last_price"))
+                if not record["touched"] and previous_price > 0 and (
+                    previous_price < record["low"] and tick_price > record["high"]
+                    or previous_price > record["high"] and tick_price < record["low"]
+                ):
+                    if not record["uncertain"]:
+                        alerts.append(f"[{method}] HARGA MELEWATI ZONA TANPA TICK DI DALAMNYA; HASIL TIDAK PASTI")
+                    record["uncertain"] = True
+                record["last_price"] = tick_price
+                new_touch = False
+                if record["low"] <= tick_price <= record["high"] and not record["touched"]:
+                    record["touched"] = True
+                    new_touch = True
+                    alerts.append(f"[{method}] HARGA DI ZONA {record['low']:.2f}-{record['high']:.2f}; ENTRY BELUM DIPASTIKAN")
+                    if account_status == "NO MATCHING POSITION":
+                        alerts.append(f"[{method}] BELUM ADA POSISI MT5 YANG COCOK DENGAN ZONA")
+                    self.refresh_required = True
+                exit_price = tick_bid if record["direction"] == "BUY" else tick_ask
+                sl_hit = sl > 0 and (exit_price <= sl if record["direction"] == "BUY" else exit_price >= sl)
+                tp_hit = tp > 0 and (exit_price >= tp if record["direction"] == "BUY" else exit_price <= tp)
+                if new_touch and (sl_hit or tp_hit) and account_status != "RUNNING":
+                    record["uncertain"] = True
+                    alerts.append(f"[{method}] ZONA DAN BATAS RENCANA DALAM TICK SAMA; URUTAN TIDAK PASTI")
+                opened_msc = safe_float(_position_value(match[0], "time_msc")) if account_status == "RUNNING" else 0
+                if not opened_msc and account_status == "RUNNING":
+                    opened_msc = safe_float(_position_value(match[0], "time")) * 1000
+                if not record["uncertain"] and account_status != "AMBIGUOUS" and record["touched"] and tick_stamp >= opened_msc:
+                    if sl_hit:
+                        outcome = f"HARGA TERPANTAU DI SL RENCANA {sl:.2f}"
+                    elif tp_hit:
+                        outcome = f"HARGA TERPANTAU DI TP1 RENCANA {tp:.2f}"
+                if outcome:
+                    break
+            if not outcome and not record["uncertain"] and account_status == "NO MATCHING POSITION" and invalid and not record["ever_taken"]:
+                outcome = "ZONA INVALID SEBELUM POSISI TERDETEKSI"
+            if outcome:
+                note = "POSISI BELUM TERDETEKSI" if not record["ever_taken"] else "STATUS PENUTUPAN MT5 BELUM DIPASTIKAN"
+                alerts.append(f"[{method}] {outcome}; {note}")
+                self.completed[method] = {"zone_id": record["zone_id"], "left": not record["low"] <= price <= record["high"]}
+                self.focus[method] = None
+                self.refresh_required = True
+            elif method in plan_updates and (not record["touched"] or not record["plan"] and not record["ever_taken"]):
+                old_plan = record["plan"]
+                record["plan"] = plan_updates[method]
+                if record["touched"] and not old_plan and record["plan"]:
+                    alerts.append(f"[{method}] RENCANA SL/TP1 TERSEDIA; BUKAN KONFIRMASI ENTRY")
+                elif not record["touched"] and old_plan != record["plan"]:
+                    alerts.append(f"[{method}] RENCANA SL/TP1 {'DIPERBARUI' if record['plan'] else 'TIDAK TERSEDIA'}; BUKAN KONFIRMASI ENTRY")
+        self._save()
+        return alerts
+
+    def gate(self, method, result, detailed=False):
+        if not isinstance(result, dict) or result.get("status") != "OK":
+            return result
+        record = self.focus[method]
+        completed = self.completed[method]
+        zone, current_plan = self._candidate(method, result)
+        candidate_id = zone.get("zone_id") if isinstance(zone, dict) else None
+        dec = result.get("decision") or {}
+        signal_direction = (
+            str(dec.get("direction") or "").upper() if method == "SMC" and dec.get("status") == "VALID"
+            else str(dec.get("signal") or "").upper() if method == "SNR"
+            else ""
+        )
+        blocked = (
+            bool(record and candidate_id != record["zone_id"])
+            or bool(record and record["uncertain"])
+            or bool(record and (record["ever_taken"] or record["account_status"] == "AMBIGUOUS"))
+            or bool(record and signal_direction in ("BUY", "SELL") and signal_direction != record["direction"])
+            or bool(record and record["touched"] and self._valid_plan(current_plan) and (
+                not self._valid_plan(record["plan"])
+                or any(safe_float(current_plan[key]) != safe_float(record["plan"][key]) for key in ("entry", "sl", "tp1"))
+            ))
+            or bool(not record and completed and candidate_id == completed["zone_id"])
+        )
+        if not blocked:
+            return result
+        result = dict(result)
+        result["alerts"] = []
+        result["critical_warnings"] = []
+        dec = dict(result.get("decision") or {})
+        reason = (
+            "WAIT_HISTORY_RECONCILIATION: Urutan harga atau posisi tidak pasti."
+            if record and record["uncertain"] else
+            "WAIT_FOCUS_RESOLUTION: Menunggu SL/TP1 atau invalidasi zona sebelum entry."
+            if record else "MENUNGGU ZONA ATAU KUNJUNGAN BARU."
+        )
+        if method == "SMC":
+            dec.update(
+                status="WAIT", direction=None, zone=None, primary_zone=None, plan=None,
+                nearest_valid_zone=None, next_radar_zone=None, signal_status="WAITING CONFIRMATION",
+                reasons=[reason], zone_plans={}, early_setup={"best_setup": None, "all_setups": []},
+                radar_priority={"primary_zone": None},
+            )
+            dec["stages"] = {
+                **{key: {"status": "NOT_CHECKED", "msg": reason} for key in (
+                    "zone_validation", "zone_touch", "liquidity_sweep", "structure_trigger",
+                    "displacement", "entry_validation", "risk_reward",
+                )},
+                "DATA": {"ok": False, "msg": reason},
+            }
+            dec["active_setup"] = {"final_decision": "WAIT", "blocker": reason}
+            scan = dict(result.get("scan_result") or {})
+            scan["radar_priority"] = {"primary_zone": None}
+            result["scan_result"] = scan
+            result["decision"] = dec
+            result["summary"] = extract_smc_monitor_summary(scan, dec)
+            result["formatted_section"] = format_smc_monitor_section(result, detailed=detailed)
+        else:
+            same_zone = bool(record and candidate_id == record["zone_id"])
+            same_bounds = bool(
+                same_zone
+                and abs(safe_float(zone.get("low")) - record["low"]) < 1e-8
+                and abs(safe_float(zone.get("high")) - record["high"]) < 1e-8
+            )
+            old_zone = zone if same_bounds else record["zone"] if record else None
+            focus = {
+                key: old_zone.get(key) for key in (
+                    "zone_id", "zone_type", "timeframe", "rank_label", "low", "high", "grade", "score",
+                    "swing_class", "confluence_info", "historical_reaction_count", "touch_analysis", "lifecycle_event",
+                    "lifecycle_status", "status",
+                )
+            } if old_zone else None
+            if focus and not same_bounds:
+                focus["lifecycle_status"] = "UNCONFIRMED"
+            scan = dict(result.get("scan_result") or {})
+            original_ev = scan.get("entry_validation") or {}
+            original_plan = original_ev.get("provisional_plan") or {}
+            plan_rr = original_plan.get("rr_calculation") or {}
+            entry_rr = original_ev.get("rr_calculation") or {}
+            if same_zone and original_ev.get("final_status") == "WAIT":
+                validation_reason = str(original_ev.get("reason") or "")
+                if validation_reason and not same_bounds:
+                    validation_reason = (
+                        f"ZONA SCAN {safe_float(zone.get('low')):.2f}-{safe_float(zone.get('high')):.2f}: "
+                        + validation_reason
+                    )
+                result["focus_validation_reason"] = validation_reason
+            if not same_bounds or original_ev.get("final_status") != "WAIT":
+                entry_rr = {}
+            failed_plan = (
+                original_plan if same_bounds and plan_rr.get("rr_failed")
+                else {"status": "N/A", "note": "FOKUS BELUM DIVALIDASI ULANG"}
+            )
+            dec.update(
+                signal="WAIT", direction="NONE", live_entry="WAIT", target_zone=focus,
+                entry=None, effective_entry=None, sl=None, tp1=None, tp2=None, reason=reason,
+                trigger_status="NOT CONFIRMED", rr_display="NOT CHECKED",
+            )
+            ev = dict(original_ev)
+            ev.update(
+                final_status="WAIT", target_zone=focus, reason=reason, trigger_status="NOT CONFIRMED",
+                provisional_plan=failed_plan,
+                rr_calculation=entry_rr if entry_rr.get("checked") else {"checked": False, "valid": False, "rr_display": "NOT CHECKED"},
+                recent_closed_touch=bool(original_ev.get("recent_closed_touch")) if same_bounds else False,
+                focus_change=original_ev.get("focus_change") if same_bounds else None,
+            )
+            scan["entry_validation"] = ev
+            scan["decision"] = dec
+            scan["price_action"] = {
+                "rejection_summary": "NOT CHECKED",
+                "breakout_summary": "NOT CHECKED",
+                "retest_summary": "NOT CHECKED",
+                "momentum_summary": "NOT CHECKED",
+            }
+            result["scan_result"] = scan
+            result["decision"] = dec
+            result["formatted_section"] = format_snr_monitor_section(result, detailed=detailed)
+        return result
+
+    def scoped_alerts(self, method, result, detailed=False):
+        if not isinstance(result, dict) or result.get("status") != "OK":
+            return result
+        record = self.focus[method]
+        zone_id = record["zone_id"] if record else None
+        alerts = []
+        scan = result.get("scan_result") or {}
+        radar = scan.get("radar") or result.get("radar") or {}
+        action = scan.get("price_action") or {}
+        for alert in result.get("alerts") or []:
+            text = str(alert).upper()
+            keep = "MARKET CLOSED" in text or "DATA UNAVAILABLE" in text
+            if zone_id and not record["uncertain"]:
+                if method == "SMC":
+                    keep = not any(word in text for word in ("PERUBAHAN ZONA", "ZONA TERMITIGASI", "ZONA SUPPLY INVALID", "ZONA DEMAND INVALID"))
+                elif "SUPPORT S1" in text:
+                    keep = (radar.get("nearest_support") or {}).get("zone_id") == zone_id
+                elif "RESISTANCE R1" in text:
+                    keep = (radar.get("nearest_resistance") or {}).get("zone_id") == zone_id
+                elif "REJECTION" in text:
+                    keep = (action.get("rejection_detail") or {}).get("zone_id") == zone_id
+                elif "BREAKOUT" in text or "BREAKDOWN" in text:
+                    keep = (action.get("breakout_detail") or {}).get("zone_id") == zone_id
+                elif "RETEST" in text:
+                    keep = (action.get("retest_detail") or {}).get("zone_id") == zone_id
+                elif "ZONA " in text and ("BROKEN" in text or "INVALID" in text):
+                    keep = str(zone_id) in str(alert)
+                elif "SETUP" in text:
+                    keep = ((result.get("decision") or {}).get("target_zone") or {}).get("zone_id") == zone_id
+            if keep:
+                alerts.append(alert)
+        result = dict(result)
+        result["alerts"] = alerts
+        if method == "SMC":
+            result["formatted_section"] = format_smc_monitor_section(result, detailed=detailed)
+        else:
+            result["formatted_section"] = format_snr_monitor_section(result, detailed=detailed)
+        return result
+
+    def lines(self):
+        lines = []
+        for method, record in self.focus.items():
+            if method not in self.active_methods:
+                continue
+            if not record:
+                if self.completed[method]:
+                    lines.append(f"{method} FOCUS: MENUNGGU ZONA ATAU KUNJUNGAN BARU")
+                continue
+            plan = record.get("plan") or {}
+            status = (
+                "ZONA DISENTUH" if record["touched"] else
+                "ZONA PERNAH DISENTUH (HISTORIS)" if record.get("historical_touch") else
+                "MENUNGGU ZONA"
+            )
+            position = (
+                "RUNNING; POSISI COCOK OTOMATIS" if record["account_status"] == "RUNNING" else
+                "POSISI AMBIGU" if record["account_status"] == "AMBIGUOUS" else
+                "POSISI MT5 TIDAK DAPAT DIBACA" if record["account_status"] == "POSITIONS UNAVAILABLE" else
+                "POSISI TIDAK TERLIHAT" if record["ever_taken"] else
+                "POSISI BELUM TERDETEKSI" if record["touched"] or record.get("historical_touch") else ""
+            )
+            if position:
+                status += f"; {position}"
+            if record["uncertain"]:
+                if status == "MENUNGGU ZONA":
+                    status = "SENTUHAN BELUM TERBUKTI"
+                status += " | RIWAYAT / HASIL TIDAK PASTI"
+            levels = (
+                f" | SL/TP1 ACUAN {plan['sl']:.2f}/{plan['tp1']:.2f}"
+                if self._valid_plan(plan) else " | SL/TP1 N/A"
+            )
+            lines.append(f"{method} FOCUS: {record['direction']} {record['low']:.2f}-{record['high']:.2f} | {status}{levels}")
+        return lines
 
 
 class SmcAlertTracker:
@@ -91,7 +720,8 @@ class SmcAlertTracker:
         critical_warnings = []
 
         # 1. Perubahan keputusan setup SMC
-        if curr_state["signal"] != self.last_state.get("signal"):
+        same_setup = curr_state["primary_setup_id"] == self.last_state.get("primary_setup_id")
+        if curr_state["signal"] != self.last_state.get("signal") or not same_setup:
             if curr_state["signal"] == "BUY":
                 alerts.append("[SMC] BUY SETUP TERKONFIRMASI")
             elif curr_state["signal"] == "SELL":
@@ -100,16 +730,16 @@ class SmcAlertTracker:
                 alerts.append("[SMC] SETUP INVALID")
 
         # 2. Perubahan tahapan konfirmasi M5 SMC
-        if curr_state["zone_touch"] != self.last_state.get("zone_touch") and curr_state["zone_touch"] in ("CONFIRMED", "IN_ZONE", "PASS", "PASSED"):
+        if (not same_setup or curr_state["zone_touch"] != self.last_state.get("zone_touch")) and curr_state["zone_touch"] == "IN_ZONE":
             alerts.append("[SMC] ZONE TOUCH TERKONFIRMASI")
 
-        if curr_state["sweep"] != self.last_state.get("sweep") and curr_state["sweep"] == "CONFIRMED":
+        if (not same_setup or curr_state["sweep"] != self.last_state.get("sweep")) and curr_state["sweep"] == "CONFIRMED":
             alerts.append("[SMC] LIQUIDITY SWEEP TERKONFIRMASI")
 
-        if curr_state["choch_bos"] != self.last_state.get("choch_bos") and curr_state["choch_bos"] == "CONFIRMED":
+        if (not same_setup or curr_state["choch_bos"] != self.last_state.get("choch_bos")) and curr_state["choch_bos"] == "CONFIRMED":
             alerts.append("[SMC] CHoCH / BOS M5 TERKONFIRMASI")
 
-        if curr_state["displacement"] != self.last_state.get("displacement") and curr_state["displacement"] == "CONFIRMED":
+        if (not same_setup or curr_state["displacement"] != self.last_state.get("displacement")) and curr_state["displacement"] == "CONFIRMED":
             alerts.append("[SMC] DISPLACEMENT TERKONFIRMASI")
 
         # 3. Perubahan zona aktif / invalidasi zona SMC
@@ -123,9 +753,9 @@ class SmcAlertTracker:
             alerts.append("[SMC] ZONA TERMITIGASI")
 
         if (
-            self.last_state.get("primary_zone") is not None
-            and curr_state["primary_zone"] != self.last_state.get("primary_zone")
-            and curr_state["primary_zone"] not in ("NONE", "-", "")
+            self.last_state.get("primary_zone_id") is not None
+            and curr_state["primary_zone_id"] != self.last_state.get("primary_zone_id")
+            and curr_state["primary_zone_id"] not in ("NONE", "-", "")
         ):
             z_short = curr_state.get("primary_zone", "").split(" (")[0].strip()
             alerts.append(f"[SMC] PERUBAHAN ZONA FOKUS -> {z_short}")
@@ -187,22 +817,31 @@ def extract_smc_monitor_summary(scan_result, decision):
         m5_bias = "WAIT"
 
     stages = dec.get("m5_stages") or dec.get("stages") or {}
-    zt = (stages.get("zone_touch") or {}).get("status", "CONFIRMED" if decision_signal in ("BUY", "SELL") else "WAIT")
-    sw = (stages.get("liquidity_sweep") or {}).get("status", "CONFIRMED" if decision_signal in ("BUY", "SELL") else "WAIT")
-    tr = (stages.get("structure_trigger") or {}).get("status", "CONFIRMED" if decision_signal in ("BUY", "SELL") else "WAIT")
-    dp = (stages.get("displacement") or {}).get("status", "CONFIRMED" if decision_signal in ("BUY", "SELL") else "WAIT")
-    rr_st = (stages.get("risk_reward") or {}).get("status", "CONFIRMED" if decision_signal in ("BUY", "SELL") else "WAIT")
+    zt = (stages.get("zone_touch") or {}).get("status", "NOT_CHECKED")
+    sw = (stages.get("liquidity_sweep") or {}).get("status", "NOT_CHECKED")
+    tr = (stages.get("structure_trigger") or {}).get("status", "NOT_CHECKED")
+    dp = (stages.get("displacement") or {}).get("status", "NOT_CHECKED")
+    rr_st = (stages.get("risk_reward") or {}).get("status", "NOT_CHECKED")
+    m5_bias = tr
 
     active_mon_zone = dec.get("zone")
     r_prio = dec.get("radar_priority") or scan.get("radar_priority") or {}
-    pz = active_mon_zone or r_prio.get("primary_directional_zone") or r_prio.get("primary_zone")
-    nz = r_prio.get("nearest_radar_zone")
+    pz = active_mon_zone
+    primary = dec.get("primary_zone") or r_prio.get("primary_directional_zone") or r_prio.get("primary_zone")
+    nz = dec.get("nearest_valid_zone")
+    current_price = safe_float(dec.get("current_price") or scan.get("current_price"), 0.0)
+    if isinstance(pz, dict) and current_price > 0 and scan.get("data_ok") is not False and str(dec.get("data_freshness") or "").upper() not in ("STALE", "INVALID", "NO DATA"):
+        lo, hi = safe_float(pz.get("price_low")), safe_float(pz.get("price_high"))
+        if lo <= current_price <= hi:
+            zt = "IN_ZONE"
+        elif str(zt).upper() in ("CONFIRMED", "PASS", "PASSED"):
+            zt = "TOUCHED_PREVIOUSLY"
 
     if isinstance(pz, dict) and pz.get("price_low") is not None:
         pz_label = (
             f"{pz.get('timeframe', 'H1')} {pz.get('zone_type', 'ZONE')} "
             f"{safe_float(pz.get('price_low')):.2f}-{safe_float(pz.get('price_high')):.2f} "
-            f"(Grade {pz.get('grade', '-')}, Dist: {safe_float(pz.get('distance')):.2f} pts)"
+            f"(Grade {pz.get('grade', '-')}, Score {safe_float(pz.get('score')):.2f}, Dist: {max(safe_float(pz.get('price_low')) - current_price, current_price - safe_float(pz.get('price_high')), 0.0):.2f} pts)"
         )
         pz_id = str(pz.get("zone_id") or "NONE")
     else:
@@ -213,7 +852,7 @@ def extract_smc_monitor_summary(scan_result, decision):
         nz_label = (
             f"{nz.get('timeframe', 'H1')} {nz.get('zone_type', 'ZONE')} "
             f"{safe_float(nz.get('price_low')):.2f}-{safe_float(nz.get('price_high')):.2f} "
-            f"(Grade {nz.get('grade', '-')}, Dist: {safe_float(nz.get('distance')):.2f} pts)"
+            f"(Grade {nz.get('grade', '-')}, Score {safe_float(nz.get('score')):.2f}, Dist: {max(safe_float(nz.get('price_low')) - current_price, current_price - safe_float(nz.get('price_high')), 0.0):.2f} pts)"
         )
     else:
         nz_label = "NONE"
@@ -240,10 +879,7 @@ def extract_smc_monitor_summary(scan_result, decision):
     if decision_signal in ("BUY", "SELL"):
         main_reason = "; ".join(str(r) for r in reasons_list if r) or f"Setup {decision_signal} SMC terkonfirmasi."
     else:
-        dyn_wait = r_prio.get("dynamic_wait_reason")
-        if dyn_wait:
-            main_reason = str(dyn_wait)
-        elif reasons_list:
+        if reasons_list:
             main_reason = str(reasons_list[0]).replace("[SCANNER] Rejection Reason: ", "")
         else:
             main_reason = scan.get("empty_reason") or "Menunggu konfirmasi struktur & trigger M5 SMC."
@@ -260,8 +896,17 @@ def extract_smc_monitor_summary(scan_result, decision):
         "structure_status": struct_status,
         "primary_zone_label": pz_label,
         "primary_zone_id": pz_id,
-        "primary_setup_id": f"{pz_id}:{direction}:{dec.get('setup_type', 'TREND_PULLBACK')}" if pz_id != "NONE" else "NONE",
+        "primary_setup_id": (dec.get("active_setup") or {}).get("setup_id") or "NONE",
+        "scored_primary_zone": primary,
+        "scored_primary_zone_label": (
+            f"{primary.get('timeframe', 'N/A')} {primary.get('zone_type', 'ZONE')} "
+            f"{safe_float(primary.get('price_low')):.2f}-{safe_float(primary.get('price_high')):.2f} "
+            f"(Grade {primary.get('grade', '-')}, Score {safe_float(primary.get('score')):.2f})"
+            if isinstance(primary, dict) else "NONE"
+        ),
         "nearest_zone_label": nz_label,
+        "next_radar_zone": dec.get("next_radar_zone"),
+        "focus_change_reason": dec.get("focus_change_reason"),
         "fresh_count": fresh_cnt,
         "tested_count": tested_cnt,
         "mitigated_count": mit_cnt,
@@ -314,25 +959,29 @@ def format_smc_monitor_section(smc_cycle_result, detailed=False):
 
     lines = [
         "### A. SMC MONITOR",
-        f"STATUS          : OK ({s.get('structure_status', 'ACTIVE')})",
         f"MARKET BIAS     : H4={s.get('h4_bias', 'N/A')} | H1={s.get('h1_bias', 'N/A')} | M30={s.get('m30_bias', 'N/A')} | M5={s.get('m5_bias', 'WAIT')}",
-        f"MARKET STRUCT.  : {s.get('structure_status', 'N/A')}",
-        f"ACTIVE SMC ZONE : Primary={s.get('primary_zone_label', 'NONE')}",
+        f"PRIMARY ZONE    : {s.get('scored_primary_zone_label', 'NONE')}",
+        f"ACTIVE SMC ZONE : {s.get('primary_zone_label', 'NONE')}",
         f"NEAREST ZONE    : {s.get('nearest_zone_label', 'NONE')}",
-        f"MITIGATION/INV. : Fresh={s.get('fresh_count', 0)} | Tested={s.get('tested_count', 0)} | Mitigated={s.get('mitigated_count', 0)} | Invalidated={s.get('invalidated_count', 0)}",
         f"SMC TRIGGERS    : Sweep={s.get('liquidity_sweep', 'WAIT')} | BOS/CHoCH={s.get('choch_bos', 'WAIT')} | Displacement={s.get('displacement', 'WAIT')}",
         f"ENTRY CONFIRM.  : Touch={s.get('zone_touch', 'WAIT')} | RR_Check={s.get('rr_stage', 'WAIT')}",
         f"SMC DECISION    : {s.get('decision_signal', 'WAIT')} (Direction: {s.get('direction', 'NONE')} | Setup: {s.get('setup_type', 'NONE')} | Status: {s.get('signal_status', 'NO SETUP')})",
     ]
+    if s.get("focus_change_reason"):
+        lines.append(f"FOCUS CHANGE    : {s['focus_change_reason']}")
+    next_zone = s.get("next_radar_zone")
+    if next_zone:
+        lines.append(f"NEXT RADAR ZONE : {safe_float(next_zone.get('price_low')):.2f}-{safe_float(next_zone.get('price_high')):.2f}")
 
-    if s.get("decision_signal") in ("BUY", "SELL") and s.get("entry") is not None:
-        lines.append(
-            f"ENTRY / SL / TP : Entry {safe_float(s.get('entry')):.2f} | SL {safe_float(s.get('sl')):.2f} "
-            f"| TP1 {safe_float(s.get('tp1')):.2f} | TP2 {safe_float(s.get('tp2', s.get('tp1'))):.2f} "
-            f"| RR 1:{safe_float(s.get('rr')):.2f}"
-        )
+    decision = smc_cycle_result.get("decision") or {}
+    focus = decision.get("zone") or decision.get("primary_zone") or {}
+    if focus:
+        allow_plan = (decision.get("stages", {}).get("DATA") or {}).get("ok") is not False
+        lines.extend(format_smc_zone_lines(
+            focus, decision, allow_plan=allow_plan, role="SMC ACTIVE" if decision.get("zone") else "SMC PRIMARY",
+        ))
     else:
-        lines.append("ENTRY / SL / TP : N/A (Setup belum terkonfirmasi)")
+        lines.append("ENTRY / SL / TP : N/A (Tidak ada zona SMC)")
 
     lines.append(f"MAIN REASON     : {s.get('main_reason', 'N/A')}")
 
@@ -575,7 +1224,9 @@ def _as_monitor_zone(zone):
 def _calc_zone_touch(z, p, stages_dict, trk_rec, life_st):
     z_lo = safe_float(z.get("price_low"), 0.0)
     z_hi = safe_float(z.get("price_high"), 0.0)
-    if not z or z.get("is_valid") is False or life_st in ("INVALIDATED", "BROKEN") or z.get("status") == "INVALIDATED":
+    if not z:
+        return "NO_ZONE", "NO SMC SETUP"
+    if z.get("is_valid") is False or life_st in ("INVALIDATED", "BROKEN") or z.get("status") == "INVALIDATED":
         return "INVALIDATED", "INVALIDATED"
     inv_p = safe_float(z.get("invalidation_price"), 0.0)
     z_t = str(z.get("zone_type", "")).upper()
@@ -617,13 +1268,7 @@ def _smart_monitor_context(cycle_result):
     snr_scan = snr.get("scan_result") if isinstance(snr.get("scan_result"), dict) else {}
     snr_decision = snr.get("decision") if isinstance(snr.get("decision"), dict) else {}
 
-    priority = decision.get("radar_priority") or scan.get("radar_priority") or {}
-    zone = _as_monitor_zone(
-        decision.get("zone")
-        or priority.get("primary_directional_zone")
-        or priority.get("primary_zone")
-        or priority.get("nearest_radar_zone")
-    )
+    zone = _as_monitor_zone(decision.get("zone"))
     pending = decision.get("early_setup") or {}
     if not isinstance(pending, dict):
         pending = {}
@@ -646,8 +1291,9 @@ def _smart_monitor_context(cycle_result):
     z_id = str(zone.get("zone_id") or "N/A")
     setup_type = str(decision.get("setup_type") or zone.get("setup_type") or "TREND_PULLBACK")
     now_str = format_wib_timestamp(default_now=True)
-    active_setup = {
-        "setup_id": f"{z_id}:{direction}:{setup_type}" if z_id != "N/A" else "N/A",
+    active_setup = dict(decision.get("active_setup") or {})
+    active_setup.update({
+        "setup_id": active_setup.get("setup_id") or (f"{z_id}:{direction}:{setup_type}" if z_id != "N/A" else "N/A"),
         "zone_id": z_id,
         "direction": direction,
         "zone_range": (lo, hi),
@@ -658,17 +1304,21 @@ def _smart_monitor_context(cycle_result):
         "created_at": zone.get("created_at") or zone.get("first_detected") or now_str,
         "last_updated": zone.get("last_updated") or now_str,
         "lifecycle_status": str(zone.get("lifecycle_status") or zone.get("status") or "RADAR").upper(),
-    }
+    })
 
     snr_bias = str((snr_scan.get("market_bias") or {}).get("overall_bias") or "").upper()
     snr_zones = snr_scan.get("ranked_zones") or {}
-    snr_zone = {}
-    snr_zone_direction = "NONE"
-    if snr_bias == "BEARISH":
+    snr_zone = snr_decision.get("target_zone") or {}
+    snr_zone_direction = (
+        str(snr_decision.get("signal")).upper() if snr_decision.get("signal") in ("BUY", "SELL")
+        else "SELL" if snr_zone.get("zone_type") == "RESISTANCE"
+        else "BUY" if snr_zone.get("zone_type") == "SUPPORT" else "NONE"
+    )
+    if not snr_zone and snr_bias == "BEARISH":
         choices = snr_zones.get("active_resistances") or []
         if choices:
             snr_zone, snr_zone_direction = choices[0], "SELL"
-    elif snr_bias == "BULLISH":
+    elif not snr_zone and snr_bias == "BULLISH":
         choices = snr_zones.get("active_supports") or []
         if choices:
             snr_zone, snr_zone_direction = choices[0], "BUY"
@@ -741,11 +1391,19 @@ def _smart_monitor_context(cycle_result):
         snapshot_status in ("DATA_INCOMPLETE", "INVALID", "ERROR", "MARKET_CLOSED")
         or freshness in ("STALE", "INVALID", "NO DATA")
         or snapshot.get("data_ok") is False
+        or price <= 0
+        or smc.get("status") == "ERROR"
     )
+    validation_price = safe_float(decision.get("snapshot_price") or decision.get("current_price"), 0.0)
+    needs_revalidation = validation_price > 0 and abs(validation_price - price) > 1e-8
+    if needs_revalidation:
+        data_invalid = True
 
     # 1. Pending Plan evaluation (Section 6)
     p_status_raw = str(plan.get("status") or "WAIT").upper()
-    if p_status_raw in ("NONE", "NOT ACTIVE"):
+    if data_invalid:
+        p_status = "WAIT"
+    elif p_status_raw in ("NONE", "NOT ACTIVE"):
         p_status = "WAIT"
     elif p_status_raw == "READY":
         p_status = "READY (NOT PLACED)"
@@ -781,40 +1439,15 @@ def _smart_monitor_context(cycle_result):
         dec_status == "VALID"
         and dec_dir in ("BUY", "SELL")
         and not data_invalid
-        and touch_status in ("IN_ZONE", "TOUCHED_PREVIOUSLY")
-        and trigger in ("CONFIRMED", "PASS", "PASSED")
         and bool(conf_plan)
+        and bool(zone.get("zone_id"))
+        and (not conf_plan.get("zone_id") or conf_plan.get("zone_id") == zone.get("zone_id"))
         and lifecycle not in ("INVALIDATED", "EXPIRED")
         and zone.get("is_valid") is not False
     )
 
     c_entry = safe_float(conf_plan.get("entry_acuan", conf_plan.get("entry")), 0.0)
-    c_sl = safe_float(conf_plan.get("sl"), 0.0)
-    c_tp1 = safe_float(conf_plan.get("tp1"), 0.0)
-    c_rr = safe_float(conf_plan.get("rr"), 0.0)
-    if is_valid_confirmed:
-        if dec_dir == "BUY" and not (c_sl < c_entry < c_tp1):
-            is_valid_confirmed = False
-        elif dec_dir == "SELL" and not (c_tp1 < c_entry < c_sl):
-            is_valid_confirmed = False
-        elif c_rr < 1.49:
-            is_valid_confirmed = False
-
     is_entry_stale = False
-    if is_valid_confirmed and c_entry > 0 and price > 0:
-        atr_diag = scan.get("atr_diagnostics") or {}
-        ref_atr = safe_float(atr_diag.get("atr_value"), 2.0)
-        stale_dist = max(3.0, 1.5 * ref_atr)
-        if dec_dir == "SELL":
-            if c_tp1 > 0 and price <= c_tp1:
-                is_entry_stale = True
-            elif (c_entry - price) >= stale_dist:
-                is_entry_stale = True
-        elif dec_dir == "BUY":
-            if c_tp1 > 0 and price >= c_tp1:
-                is_entry_stale = True
-            elif (price - c_entry) >= stale_dist:
-                is_entry_stale = True
 
     conf_zid = str(conf_plan.get("zone_id") or (decision.get("zone") or {}).get("zone_id") or "")
     conf_lo = safe_float((decision.get("zone") or {}).get("price_low"), 0.0)
@@ -831,8 +1464,12 @@ def _smart_monitor_context(cycle_result):
     }
 
     snr_sig = str(snr_decision.get("signal", "WAIT")).upper()
+    snr_confirmed = (
+        snr.get("status") == "OK" and snr_sig in ("BUY", "SELL")
+        and snr_decision.get("entry") is not None and not data_invalid
+    )
     if not is_valid_confirmed:
-        if snr_sig in ("BUY", "SELL") and not data_invalid:
+        if snr_confirmed:
             confirmed_status = f"{snr_sig} [SNR]"
         else:
             confirmed_status = "WAIT"
@@ -851,14 +1488,18 @@ def _smart_monitor_context(cycle_result):
 
     if is_valid_confirmed and not is_entry_stale:
         monitor_state = "CONFIRMED"
-    elif summary.get("decision_signal") in ("BUY", "SELL") and not data_invalid:
-        monitor_state = "CONFIRMED"
+    elif monitor_state == "CONFIRMED":
+        monitor_state = "AWAITING_CONFIRMATION"
 
     # State, Reason, Next Action, and Final Signal
     if data_invalid:
-        reason, next_action, final_signal = "DATA STALE / UNAVAILABLE", "WAIT FRESH DATA", "WAIT"
+        reason = "PRICE CHANGED; VALIDATION SNAPSHOT EXPIRED" if needs_revalidation else "DATA STALE / UNAVAILABLE"
+        next_action, final_signal = "WAIT FRESH VALIDATION", "WAIT"
     elif is_valid_confirmed and not is_entry_stale:
         reason, next_action, final_signal = "M5 TRIGGER VALID", "CHECK ENTRY VALIDITY", confirmed_status
+    elif snr_confirmed:
+        reason = str(snr_decision.get("reason") or "SNR ENTRY VALID")
+        next_action, final_signal = "CHECK ENTRY VALIDITY", confirmed_status
     elif is_entry_stale:
         reason = f"Entry stale: harga ({price:.2f}) telah bergerak melewati entry {c_entry:.2f}"
         next_action, final_signal = "WAIT PULLBACK", "WAIT (ENTRY STALE)"
@@ -867,13 +1508,57 @@ def _smart_monitor_context(cycle_result):
     elif monitor_state == "EXPIRED":
         reason, next_action, final_signal = "SETUP EXPIRED", "WAIT NEW SETUP", "WAIT"
     elif touch_status in ("IN_ZONE", "TOUCHED_PREVIOUSLY") or monitor_state == "AWAITING_CONFIRMATION":
-        reason, next_action, final_signal = "ZONE TOUCHED; M5 TRIGGER PENDING", "CHECK M5", "WAIT"
+        reason = str((decision.get("reasons") or ["ZONE TOUCHED; M5 TRIGGER PENDING"])[0])
+        next_action, final_signal = "CHECK VALIDATION", "WAIT"
     elif monitor_state == "APPROACHING":
         reason, next_action, final_signal = "APPROACHING ENTRY ZONE", "WAIT ZONE TOUCH", "WAIT"
     elif not zone:
-        reason, next_action, final_signal = "NO VALID SETUP", "WAIT SETUP", "WAIT"
+        reason, next_action, final_signal = "NO SMC SETUP", "WAIT SETUP", "WAIT"
     else:
         reason, next_action, final_signal = "WAITING FOR ZONE PULLBACK", "WAIT APPROACH", "WAIT"
+    focus_status = cycle.get("focus_status") or {}
+    if "RUNNING" in focus_status.values() and not is_valid_confirmed and not snr_confirmed:
+        monitor_state = "RUNNING"
+        touch_status = "TOUCHED_PREVIOUSLY"
+        touch_display = "ZONA TERAMBIL (POSISI COCOK)"
+        focus_detail = cycle.get("focus_detail") or {}
+        running_uncertain = any(
+            item.get("account_status") == "RUNNING" and item.get("uncertain")
+            for item in focus_detail.values()
+        )
+        running_with_plan = any(
+            item.get("account_status") == "RUNNING" and item.get("plan_valid")
+            for item in focus_detail.values()
+        )
+        reason = "POSISI COCOK; RIWAYAT BELUM PASTI" if running_uncertain else "POSISI COCOK OTOMATIS; PERIKSA MT5"
+        next_action = "PANTAU SL/TP1 ACUAN" if running_with_plan else "PERIKSA SL/TP POSISI MT5"
+        final_signal = "WAIT (MONITORING)"
+    elif not is_valid_confirmed and not snr_confirmed:
+        focus_detail = cycle.get("focus_detail") or {}
+        touched = next(((method, item) for method, item in focus_detail.items() if item.get("touched")), None)
+        historical = next(((method, item) for method, item in focus_detail.items() if item.get("historical_touch")), None)
+        uncertain = next(((method, item) for method, item in focus_detail.items() if item.get("uncertain")), None)
+        if touched:
+            method, item = touched
+            monitor_state = "ZONE_TOUCHED"
+            touch_status = "TOUCHED_PREVIOUSLY"
+            touch_display = f"{method} ZONE TOUCHED"
+            reason = f"{method} ZONE TOUCHED; ENTRY BELUM DIKONFIRMASI"
+            next_action = "PERIKSA RIWAYAT DAN MT5" if item.get("uncertain") else "PANTAU KONFIRMASI M5"
+            final_signal = "WAIT"
+        elif historical:
+            method, item = historical
+            monitor_state = "HISTORICAL_TOUCH"
+            touch_status = "TOUCHED_PREVIOUSLY"
+            touch_display = f"{method} TOUCHED (HISTORICAL)"
+            reason = f"{method} PERNAH DISENTUH; ENTRY BELUM TERBUKTI"
+            next_action = "PERIKSA RIWAYAT DAN MT5" if item.get("uncertain") else "PANTAU KUNJUNGAN BARU"
+            final_signal = "WAIT"
+        elif uncertain:
+            monitor_state = "HISTORY_UNCERTAIN"
+            touch_status = "NO_ZONE"
+            touch_display = "SENTUHAN BELUM TERBUKTI"
+            reason, next_action, final_signal = "FOKUS TERKUNCI: RIWAYAT BELUM PASTI", "PERIKSA RIWAYAT DAN MT5", "WAIT"
 
     account = cycle.get("account") if isinstance(cycle.get("account"), dict) else {}
     warnings = list(account.get("risk_warnings") or [])
@@ -902,7 +1587,7 @@ def _smart_monitor_context(cycle_result):
             elif any(k in al_str for k in ("FOCUS CHANGED", "PERUBAHAN ZONA")):
                 best_al = al_str
                 break
-            elif any(k in al_str for k in ("TOUCH", "MENYENTUH", "APPROACHING")):
+            elif any(k in al_str for k in ("TOUCH", "MENYENTUH", "DISENTUH", "HARGA DEKAT", "APPROACHING")):
                 best_al = al_str
                 break
         if best_al == "NONE" and alerts:
@@ -918,7 +1603,6 @@ def _smart_monitor_context(cycle_result):
         if "PERUBAHAN ZONA FOKUS -> " in best_al:
             best_al = "FOCUS CHANGED [" + best_al.replace("PERUBAHAN ZONA FOKUS -> ", "").strip() + "]"
         alert_display = best_al if best_al else "NONE"
-
     return {
         "snapshot": snapshot,
         "smc": smc,
@@ -966,13 +1650,19 @@ def format_smart_monitor_report(cycle_result):
     zone = data["zone"]
     summary = data["summary"]
     snapshot = data["snapshot"]
-    price_txt = f"{data['price']:.2f}" if data["price"] > 0 and not data["data_invalid"] else "N/A"
+    quote_fresh = (
+        snapshot.get("data_ok") is not False and snapshot.get("live") is True
+        and str(snapshot.get("data_freshness") or "").upper() not in ("STALE", "INVALID", "NO DATA")
+    )
+    price_txt = f"{data['price']:.2f}" if data["price"] > 0 and (not data["data_invalid"] or quote_fresh) else "N/A"
     h4 = str(summary.get("h4_bias") or "N/A").upper()
     h1 = str(summary.get("h1_bias") or "N/A").upper()
+    snr_h1 = str((data["snr_scan"].get("market_bias") or {}).get("h1") or "N/A").upper()
+    htf_alignment = "ALIGNED" if h1 in ("BULLISH", "BEARISH") and h1 == snr_h1 else "PARTIAL"
     m30 = str(summary.get("m30_bias") or "N/A").upper()
-    m5 = "CONFIRMED" if data["confirmed"] != "WAIT" else "WAIT"
+    m5 = data["trigger"]
     if not zone:
-        zone_lines = ["DIRECTION   : N/A", "ZONE        : NO VALID SETUP", "GRADE       : N/A"]
+        zone_lines = ["DIRECTION   : N/A", "ZONE        : NO ACTIVE SMC SETUP", "GRADE       : N/A"]
     else:
         lo = safe_float(zone.get("price_low"), 0.0)
         hi = safe_float(zone.get("price_high"), 0.0)
@@ -987,7 +1677,8 @@ def format_smart_monitor_report(cycle_result):
     confirmed_disp = data.get("confirmed_display", data.get("confirmed", "WAIT"))
     touch_disp = data.get("touch_display", "NOT TOUCHED")
     trigger_disp = data.get("trigger", "WAIT")
-    status_text = "WAIT" if data["data_invalid"] else data["monitor_state"]
+    focused_states = ("RUNNING", "ZONE_TOUCHED", "HISTORICAL_TOUCH", "HISTORY_UNCERTAIN")
+    status_text = "WAIT" if data["data_invalid"] and data["monitor_state"] not in focused_states else data["monitor_state"]
     alert_text = data.get("alert_display", "NONE")
     alert_text = str(alert_text).replace("\n", " ").strip()
     if len(alert_text) > 60:
@@ -999,20 +1690,28 @@ def format_smart_monitor_report(cycle_result):
     if len(main_reason) > 60:
         main_reason = main_reason[:57].rstrip() + "..."
 
+    smc_focus = zone or data["decision"].get("primary_zone") or {}
+    smc_block = format_smc_zone_lines(
+        smc_focus, data["decision"], allow_plan=not data["data_invalid"],
+        role="SMC ACTIVE" if zone else "SMC PRIMARY",
+    ) if smc_focus else []
+    if zone:
+        smc_block = smc_block[1:]
+
     lines = [
         "==========================================",
         "       XAUUSD SMART MONITOR v2.5",
         "==========================================",
         f"PRICE       : {price_txt}",
-        f"TREND       : {h4}",
-        f"H4 / H1     : {h4} / {h1}",
+        f"SMC H4 / H1 : {h4} / {h1}",
+        f"SNR H1      : {snr_h1} | HTF: {htf_alignment}",
         f"M30 / M5    : {m30} / {m5}",
         "------------------------------------------",
         "ACTIVE SETUP",
         "------------------------------------------",
         *zone_lines,
+        *smc_block,
         f"CONFLUENCE  : {data['confluence']}",
-        f"SMC + SNR   : {data['confluence']}",
         "ENTRY STATUS",
         f"PENDING     : {pending_disp}",
         f"CONFIRMED   : {confirmed_disp}",
@@ -1027,6 +1726,26 @@ def format_smart_monitor_report(cycle_result):
         f"REASON      : {main_reason}",
         "==========================================",
     ]
+    overlaps = (data["snr_scan"].get("ranked_zones") or {}).get("overlaps") or []
+    snr_decision = data.get("snr_decision") or {}
+    if snr_decision:
+        visible_snr = {**snr_decision, "signal": "WAIT"} if data["data_invalid"] else snr_decision
+        snr_entry = dict(data["snr_scan"].get("entry_validation") or {})
+        if data["data_invalid"]:
+            snr_entry["provisional_plan"] = {"status": "N/A", "note": "DATA NOT FRESH"}
+            snr_entry["rr_calculation"] = {"checked": False, "valid": False, "rr_display": "NOT CHECKED"}
+        lines.insert(lines.index("ENTRY STATUS"), format_snr_focus_plan(
+            visible_snr, snr_entry, market_bias=data["snr_scan"].get("market_bias"),
+        ))
+        focus_validation_reason = data["snr"].get("focus_validation_reason")
+        if focus_validation_reason and cycle_result.get("focus_validation_fresh"):
+            lines.insert(lines.index("ENTRY STATUS"), f"SNR CHECK   : {focus_validation_reason}")
+    for focus_line in cycle_result.get("focus_tracking") or []:
+        lines.insert(lines.index("ENTRY STATUS"), focus_line)
+    if overlaps:
+        overlap = next((item for item in overlaps if item.get("entry_conflict")), overlaps[0])
+        overlap_state = "CONFLICT" if overlap.get("entry_conflict") else "GEOMETRIC"
+        lines.insert(lines.index("ENTRY STATUS"), f"SNR OVERLAP : {overlap['support_label']} / {overlap['resistance_label']} {overlap_state}")
     if not snapshot.get("snapshot_status") and data["price"] <= 0:
         lines[3] = "PRICE       : N/A"
     return "\n".join(lines)
@@ -1182,6 +1901,9 @@ def _refresh_tick_snapshot(snapshot, symbol):
         "snapshot_price": mid,
         "current_price": mid,
         "tick_time": tick_time or None,
+        "tick_time_msc": int(safe_float(getattr(tick, "time_msc", None))),
+        "tick_bid_raw": bid,
+        "tick_ask_raw": ask,
         "server_time": tick_time or updated.get("server_time"),
         "snapshot_time": format_wib_timestamp(tick_time, default_now=True, source_tz="UTC"),
         "snapshot_status": "OK",
@@ -1199,7 +1921,7 @@ class UnifiedMonitor:
     independensi sinyal penuh, dan isolasi kegagalan (error isolation).
     """
 
-    def __init__(self, symbol=None, smc_runner=None, snr_runner=None, snapshot_provider=None):
+    def __init__(self, symbol=None, smc_runner=None, snr_runner=None, snapshot_provider=None, focus_tracking=False):
         self.symbol = symbol or DEFAULT_APP_SYMBOL
         self.smc_runner = smc_runner
         self.snr_runner = snr_runner
@@ -1212,6 +1934,8 @@ class UnifiedMonitor:
         self.last_cycle_result = None
         self.last_connection_state = None
         self.last_spread_state = None
+        self.last_snr_focus_touch = None
+        self.focus_tracker = PantauFocusTracker(self.symbol) if focus_tracking else None
 
     def _run_smc_isolated(self, shared_snapshot, detailed=False):
         """Menjalankan SMC Scanner dalam blok terisolasi agar error SMC tidak menghentikan SNR."""
@@ -1376,6 +2100,63 @@ class UnifiedMonitor:
                 smc_res["alerts"] = []
             if isinstance(snr_res, dict):
                 snr_res["alerts"] = []
+            previous_snapshot = self.last_cycle_result.get("snapshot") or {}
+            new_price = safe_float((shared_snap or {}).get("snapshot_price"), 0.0)
+            quote_changed = any(
+                previous_snapshot.get(key) != (shared_snap or {}).get(key)
+                for key in ("snapshot_price", "bid", "ask", "spread")
+            )
+            if quote_changed or (shared_snap or {}).get("data_ok") is False:
+                reason = (
+                    str((shared_snap or {}).get("error_reason") or "Data tick tidak tersedia.")
+                    if (shared_snap or {}).get("data_ok") is False
+                    else "Harga atau spread berubah; menunggu validasi ulang snapshot."
+                )
+                if isinstance(smc_res, dict) and isinstance(smc_res.get("decision"), dict):
+                    dec = dict(smc_res["decision"])
+                    dec.update(status="WAIT", plan=None, signal_status="WAITING CONFIRMATION", reasons=[reason], current_price=new_price)
+                    dec["early_setup"] = {"best_setup": None, "all_setups": [], "empty_reason": reason}
+                    dec["zone_plans"] = {}
+                    dec["stages"] = {
+                        "DATA": {"ok": False, "msg": reason},
+                        **{key: {"status": "NOT_CHECKED", "msg": reason} for key in (
+                            "zone_validation", "zone_touch", "liquidity_sweep", "structure_trigger",
+                            "displacement", "entry_validation", "risk_reward",
+                        )},
+                    }
+                    active_setup = dict(dec.get("active_setup") or {})
+                    active_setup.update(
+                        zone_status="NOT_CHECKED", touch_status="NOT_CHECKED",
+                        trigger_status="NOT_CHECKED", entry_status="NOT_CHECKED",
+                        final_decision="WAIT", blocker=reason,
+                    )
+                    dec["active_setup"] = active_setup
+                    smc_res["decision"] = dec
+                    smc_res["summary"] = extract_smc_monitor_summary(smc_res.get("scan_result"), dec)
+                    smc_res["formatted_section"] = format_smc_monitor_section(smc_res, detailed=detailed)
+                if isinstance(snr_res, dict) and isinstance(snr_res.get("decision"), dict):
+                    dec = dict(snr_res["decision"])
+                    dec.update(signal="WAIT", direction="NONE", live_entry="WAIT", reason=reason,
+                               entry=None, effective_entry=None, sl=None, tp1=None, tp2=None, rr_tp1=None, rr_tp2=None,
+                               rr_display="NOT CHECKED")
+                    snr_res["decision"] = dec
+                    if isinstance(snr_res.get("scan_result"), dict):
+                        snr_scan = dict(snr_res["scan_result"])
+                        entry = dict(snr_scan.get("entry_validation") or {})
+                        entry.update(
+                            final_status="WAIT", buy_status="WAIT", sell_status="WAIT", trigger_status="NOT CHECKED",
+                            reason=reason, rr_status="NOT CHECKED",
+                            rr_calculation={"checked": False, "valid": False, "rr_display": "NOT CHECKED", "reason": reason},
+                            provisional_plan={"status": "N/A", "note": "REVALIDATING"},
+                        )
+                        snr_scan["entry_validation"] = entry
+                        snr_scan["decision"] = dec
+                        snr_scan["live_entry"] = "WAIT"
+                        action = dict(snr_scan.get("price_action") or {})
+                        action.update(rejection_summary="CACHED", breakout_summary="CACHED", retest_summary="CACHED")
+                        snr_scan["price_action"] = action
+                        snr_res["scan_result"] = snr_scan
+                    snr_res["formatted_section"] = format_snr_monitor_section(snr_res, detailed=detailed)
         elif mode_norm == "unified" and not callable(self.snr_runner):
             # Jalankan SNR sekali pada shared_snap lebih dulu agar hasil scan valid bisa di-share ke konteks SMC pada snapshot yang sama
             snr_res = self._run_snr_isolated(shared_snap, detailed=detailed)
@@ -1395,6 +2176,10 @@ class UnifiedMonitor:
                         smc_snap = dict(shared_snap)
                         smc_snap["_shared_snr_scan"] = snr_scan_obj
                         smc_snap["_shared_snr_sig"] = _snr_frames_signature(shared_snap.get("frames"))
+                        smc_snap["_shared_snr_quote"] = tuple(shared_snap.get(key) for key in (
+                            "snapshot_price", "bid", "ask", "spread", "tick_time", "server_time",
+                            "snapshot_time", "market_status", "data_freshness",
+                        ))
                     except Exception:
                         smc_snap = shared_snap
             smc_res = self._run_smc_isolated(smc_snap, detailed=detailed)
@@ -1405,16 +2190,69 @@ class UnifiedMonitor:
             if mode_norm in ("unified", "snr"):
                 snr_res = self._run_snr_isolated(shared_snap, detailed=detailed)
 
+        if self.focus_tracker is None and isinstance(snr_res, dict) and snr_res.get("status") == "OK" and isinstance(shared_snap, dict):
+            snr_decision = snr_res.get("decision") or {}
+            snr_zone = snr_decision.get("target_zone") or {}
+            zone_id = snr_zone.get("zone_id")
+            low = safe_float(snr_zone.get("low"), 0.0)
+            high = safe_float(snr_zone.get("high"), 0.0)
+            price = safe_float(shared_snap.get("snapshot_price"), 0.0)
+            freshness = str(shared_snap.get("data_freshness") or "").upper()
+            market_status = str(shared_snap.get("market_status") or "").upper()
+            lifecycle = str(snr_zone.get("lifecycle_status") or snr_zone.get("status") or "").upper()
+            valid_observation = (
+                zone_id and 0 < low <= high and price > 0
+                and shared_snap.get("data_ok") is not False
+                and freshness not in ("STALE", "INVALID", "NO DATA")
+                and market_status == "OPEN"
+                and lifecycle in ("ACTIVE", "TOUCHED", "SWEEP")
+            )
+            if valid_observation:
+                inside = low <= price <= high
+                previous = self.last_snr_focus_touch
+                if tick_only and inside and (
+                    previous is None or previous["zone_id"] != zone_id or not previous["inside"]
+                ):
+                    label = snr_zone.get("rank_label") or snr_zone.get("zone_type") or "ZONE"
+                    snr_res["alerts"] = list(snr_res.get("alerts") or []) + [
+                        f"[SNR] HARGA DI ZONA {label} ({low:.2f}-{high:.2f}); KONFIRMASI ENTRY MENUNGGU"
+                    ]
+                self.last_snr_focus_touch = {"zone_id": zone_id, "inside": inside}
+            else:
+                self.last_snr_focus_touch = None
+
+        focus_alerts = []
+        if self.focus_tracker is not None:
+            positions = pos_list
+            if positions is None and mt5 is not None and isinstance(shared_snap, dict) and shared_snap.get("live") is True:
+                try:
+                    positions = mt5.positions_get(symbol=self.symbol)
+                    if positions is None:
+                        from modules.utils import _catat_error
+                        _catat_error("pantau_focus_positions", RuntimeError(f"MT5 positions_get gagal: {mt5.last_error()}"))
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    from modules.utils import _catat_error
+                    _catat_error("pantau_focus_positions", exc)
+                    positions = None
+            focus_alerts = self.focus_tracker.update(
+                {"SMC": smc_res, "SNR": snr_res}, shared_snap, positions, full_refresh=not tick_only,
+            )
+            smc_res = self.focus_tracker.gate("SMC", smc_res, detailed=detailed)
+            snr_res = self.focus_tracker.gate("SNR", snr_res, detailed=detailed)
+            smc_res = self.focus_tracker.scoped_alerts("SMC", smc_res, detailed=detailed)
+            snr_res = self.focus_tracker.scoped_alerts("SNR", snr_res, detailed=detailed)
+
         acc_res = collect_account_monitor_data(
             symbol=self.symbol,
             snapshot=shared_snap,
-            pos_list=pos_list,
+            pos_list=positions if self.focus_tracker is not None else pos_list,
             orders_list=orders_list,
             risk_data=risk_data,
         )
         acc_section = format_account_monitor_section(acc_res)
 
         combined_alerts = []
+        combined_alerts.extend(focus_alerts)
         if smc_res and smc_res.get("alerts"):
             combined_alerts.extend(smc_res["alerts"])
         if snr_res and snr_res.get("alerts"):
@@ -1430,6 +2268,9 @@ class UnifiedMonitor:
             elif isinstance(shared_snap, dict):
                 zone_transitions = self.zone_monitor.update(zones, shared_snap)
             for transition in zone_transitions:
+                focus = self.focus_tracker.focus["SMC"] if self.focus_tracker is not None else None
+                if self.focus_tracker is not None and (not focus or transition.get("zone_id") != focus["zone_id"]):
+                    continue
                 combined_alerts.append(
                     f"[ZONE:{transition['zone_id']}] {transition['prev_status']} -> {transition['new_status']}"
                 )
@@ -1452,11 +2293,15 @@ class UnifiedMonitor:
                             htf_bias=ctx.get("H4") if isinstance(ctx, dict) else None,
                             m30_status=(dec.get("stages") or {}).get("M30", {}).get("status"),
                             server_time=shared_snap.get("server_time"),
-                            conservative_dec=dec,
+                            conservative_dec=None,
                         )
                         combined_alerts.extend(
                             f"[{str(alert.get('type') or 'ZONE')}:{alert.get('zone_id', 'N/A')}] {alert.get('msg', '')}"
                             for alert in tracker_alerts
+                            if self.focus_tracker is None or (
+                                self.focus_tracker.focus["SMC"]
+                                and alert.get("zone_id") == self.focus_tracker.focus["SMC"]["zone_id"]
+                            )
                         )
                     except (AttributeError, TypeError, ValueError, KeyError) as tracker_exc:
                         from modules.utils import _catat_error
@@ -1559,10 +2404,14 @@ class UnifiedMonitor:
         if mode_norm == "unified":
             report_lines.append(f"INDEPENDENT SIGNALS : SMC = {smc_sig} | SNR = {snr_sig}")
             report_lines.append(
-                f"SIGNAL COMPARISON   : Bias={comparison.get('smc_bias', 'N/A')} vs {comparison.get('snr_bias', 'N/A')} ({bias_agree_disp}) | "
+                f"SIGNAL COMPARISON   : Overall Bias={comparison.get('smc_bias', 'N/A')} vs {comparison.get('snr_bias', 'N/A')} ({bias_agree_disp}) | "
                 f"Signal={smc_sig} vs {snr_sig} ({sig_agree_disp})"
             )
-            if mkt_ctx:
+            report_lines.append(
+                f"H1 STRUCTURE        : SMC={comparison.get('smc_h1', 'N/A')} | "
+                f"SNR={comparison.get('snr_h1', 'N/A')} ({comparison.get('h1_agreement', 'UNCONFIRMED')})"
+            )
+            if mkt_ctx and detailed:
                 report_lines.extend([
                     f"MARKET CONTEXT      : {mkt_ctx.get('classification', 'N/A')}",
                     f"  PRIMARY TREND     : {mkt_ctx.get('primary_trend', 'UNCONFIRMED')} (H1={mkt_ctx.get('trend_confirmation', 'UNCONFIRMED')})",
@@ -1582,6 +2431,8 @@ class UnifiedMonitor:
             report_lines.append(snr_res["formatted_section"])
             report_lines.append("----------------------------------------------------")
 
+        if self.focus_tracker is not None:
+            report_lines.extend(self.focus_tracker.lines())
         report_lines.append(acc_section)
 
         if combined_alerts:
@@ -1611,6 +2462,24 @@ class UnifiedMonitor:
             "risk_warnings": acc_res.get("risk_warnings") or [],
             "state_changed": state_changed,
             "formatted_report": formatted_report,
+            "focus_tracking": self.focus_tracker.lines() if self.focus_tracker is not None else [],
+            "focus_status": {
+                method: record["account_status"]
+                for method, record in self.focus_tracker.focus.items()
+                if record and method in self.focus_tracker.active_methods
+            } if self.focus_tracker is not None else {},
+            "focus_detail": {
+                method: {
+                    "touched": record["touched"],
+                    "historical_touch": bool(record.get("historical_touch")),
+                    "account_status": record["account_status"],
+                    "uncertain": record["uncertain"],
+                    "plan_valid": self.focus_tracker._valid_plan(record.get("plan")),
+                }
+                for method, record in self.focus_tracker.focus.items()
+                if record and method in self.focus_tracker.active_methods
+            } if self.focus_tracker is not None else {},
+            "focus_validation_fresh": not tick_only,
         }
         cycle_result["compact_report"] = format_smart_monitor_report(cycle_result)
         cycle_result["detail_report"] = format_smart_monitor_detail(cycle_result)
@@ -1644,6 +2513,13 @@ def compare_scanner_snapshots(smc_scan, smc_dec, snr_scan, shared_snap=None, snr
     ).upper()
     snr_mb = s_snr.get("market_bias") or {}
     snr_bias = str(snr_mb.get("overall_bias") or "UNCONFIRMED").upper()
+    smc_h1 = str((s_smc.get("htf_context") or {}).get("H1") or "UNCONFIRMED").upper().replace("NETRAL", "NEUTRAL")
+    snr_h1 = str(snr_mb.get("h1") or "UNCONFIRMED").upper().replace("NETRAL", "NEUTRAL")
+    h1_agreement = (
+        "ALIGNED" if smc_h1 == snr_h1 and smc_h1 in ("BULLISH", "BEARISH")
+        else "DIVERGENT" if smc_h1 in ("BULLISH", "BEARISH", "NEUTRAL") and snr_h1 in ("BULLISH", "BEARISH", "NEUTRAL") and smc_h1 != snr_h1
+        else "UNCONFIRMED"
+    )
 
     smc_raw_st = str(d_smc.get("status") or "WAIT").upper()
     smc_dir = str(d_smc.get("direction") or "").upper()
@@ -1719,6 +2595,9 @@ def compare_scanner_snapshots(smc_scan, smc_dec, snr_scan, shared_snap=None, snr
         "smc_bias": smc_bias,
         "snr_bias": snr_bias,
         "bias_agreement": "SAME" if bias_same else "DIFFERENT",
+        "smc_h1": smc_h1,
+        "snr_h1": snr_h1,
+        "h1_agreement": h1_agreement,
         "smc_signal": smc_sig,
         "snr_signal": snr_sig,
         "signal_agreement": "SAME" if sig_same else "DIFFERENT",
@@ -1798,6 +2677,7 @@ def run_unified_pantau(
         symbol=DEFAULT_APP_SYMBOL,
         smc_runner=smc_runner,
         snr_runner=snr_runner,
+        focus_tracking=True,
     )
 
     cycles_done = 0
@@ -1832,6 +2712,8 @@ def run_unified_pantau(
             if not tick_only:
                 last_full_refresh = now_mono
                 last_m5_bucket = _get_m5_tick_bucket(cycle_out.get("snapshot"))
+            if monitor.focus_tracker is not None and monitor.focus_tracker.refresh_required:
+                last_full_refresh = 0.0
             last_out = cycle_out
             cycles_done += 1
 
@@ -1840,6 +2722,8 @@ def run_unified_pantau(
                 cycle_out.get("compact_report") if mode == "unified" else cycle_out["formatted_report"]
             )
             if cycles_done == 1:
+                for al in cycle_out.get("alerts") or []:
+                    print(al)
                 print("\n" + output)
                 if cycle_out.get("risk_warnings"):
                     last_risk_signature = tuple(cycle_out["risk_warnings"])

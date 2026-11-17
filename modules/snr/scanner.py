@@ -30,6 +30,7 @@ from modules.snr.radar import evaluate_snr_radar
 from modules.snr.rejection_detection import detect_zone_rejection
 from modules.snr.resistance_detection import detect_resistance_candidates
 from modules.snr.retest_detection import detect_zone_retest
+from modules.snr.risk_reward import calculate_snr_risk_reward, opposing_risk_zones
 from modules.snr.support_detection import detect_support_candidates
 from modules.snr.swing_detection import detect_swings
 from modules.snr.touch_analysis import analyze_zone_touches
@@ -43,13 +44,19 @@ def _snr_lifecycle_key(zone):
     formation = zone.get("formation_time") or zone.get("confirmed_time")
     if not formation:
         formation = zone.get("formation_index", zone.get("zone_id", "UNKNOWN"))
+    anchor = zone.get("anchor_price")
+    # Batas zona ikut bergeser bersama ATR; pivot anchor adalah identitas stabil bila tersedia.
+    bounds = (
+        (f"{safe_float(anchor, 0.0):.2f}",)
+        if anchor is not None
+        else (f"{safe_float(zone.get('low'), 0.0):.2f}", f"{safe_float(zone.get('high'), 0.0):.2f}")
+    )
     return "|".join((
         str(zone.get("symbol", "")),
         str(zone.get("timeframe", "")).upper(),
         str(zone.get("zone_type", "")).upper(),
         str(formation),
-        f"{safe_float(zone.get('low'), 0.0):.2f}",
-        f"{safe_float(zone.get('high'), 0.0):.2f}",
+        *bounds,
     ))
 
 
@@ -91,12 +98,138 @@ def _save_snr_lifecycle_state(zones):
         raise RuntimeError("Lifecycle SNR state tidak dapat disimpan; scan dihentikan demi fail-safe.") from exc
 
 
+SNR_FOCUS_STATE_KEY = "snr_focus_state"
+
+
+def _zone_brief(zone):
+    label = zone.get("rank_label") or str(zone.get("zone_type", "ZONE"))[:1]
+    return f"{label} {zone.get('timeframe', '')} {safe_float(zone.get('low')):.2f}-{safe_float(zone.get('high')):.2f}".strip()
+
+
+def _track_snr_focus(focus_zone, ranked_zones):
+    """Persist the focused SNR zone and explain a focus change; non-critical, never blocks a scan."""
+    if not isinstance(focus_zone, dict) or not focus_zone.get("zone_id"):
+        return None
+    try:
+        data = {}
+        if os.path.exists(FILE_STATE_SNR_LIFECYCLE):
+            with open(FILE_STATE_SNR_LIFECYCLE, "r", encoding="utf-8") as state_file:
+                data = json.load(state_file)
+        if not isinstance(data, dict):
+            return None
+        saved = data.get(SNR_FOCUS_STATE_KEY) if isinstance(data.get(SNR_FOCUS_STATE_KEY), dict) else {}
+        current_id = focus_zone["zone_id"]
+        if saved.get("zone_id") == current_id:
+            return saved.get("change")
+        change = None
+        if saved.get("zone_id"):
+            by_id = {z.get("zone_id"): z for z in (ranked_zones or {}).get("all_zones") or [] if z.get("zone_id")}
+            previous = by_id.get(saved["zone_id"])
+            if previous is not None:
+                status = str(previous.get("lifecycle_status", previous.get("status", "ACTIVE"))).upper()
+                active_ids = {
+                    z.get("zone_id") for z in
+                    ((ranked_zones or {}).get("active_supports") or []) + ((ranked_zones or {}).get("active_resistances") or [])
+                }
+                if status not in ("ACTIVE", "TOUCHED", "SWEEP"):
+                    reason = f"PREVIOUS ZONE {status}"
+                elif saved["zone_id"] in active_ids:
+                    reason = "FOCUS RANKING OR SETUP CHANGED"
+                else:
+                    reason = "PREVIOUS ZONE NOT IN ACTIVE RANKING"
+            else:
+                rebuilt = next((
+                    z for z in by_id.values()
+                    if z.get("timeframe") == saved.get("timeframe") and z.get("zone_type") == saved.get("zone_type")
+                    and min(safe_float(z.get("high")), safe_float(saved.get("high"))) >= max(safe_float(z.get("low")), safe_float(saved.get("low")))
+                ), None)
+                reason = "PREVIOUS ZONE REBUILT" if rebuilt is not None else "PREVIOUS ZONE NOT DETECTED"
+            change = {"previous": saved.get("label", "N/A"), "reason": reason, "to": _zone_brief(focus_zone)}
+        data[SNR_FOCUS_STATE_KEY] = {
+            "zone_id": current_id, "label": _zone_brief(focus_zone), "timeframe": focus_zone.get("timeframe"),
+            "zone_type": focus_zone.get("zone_type"), "low": focus_zone.get("low"), "high": focus_zone.get("high"),
+            "change": change,
+        }
+        temporary_path = FILE_STATE_SNR_LIFECYCLE + ".snr.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as state_file:
+            json.dump(data, state_file, indent=2, ensure_ascii=True)
+        os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
+        return change
+    except (OSError, TypeError, ValueError) as exc:
+        log_snr_error("snr_focus_state", exc)
+        return None
+
+
+def _build_snr_provisional_plan(entry_validation, ranked_zones, market_bias, current_price, symbol_spec, cfg, blocked=None):
+    """Provisional SL/TP for the focused zone using the existing SNR risk module; never a signal."""
+    zone = entry_validation.get("target_zone")
+    plan = {"status": "N/A", "direction": "NONE", "note": "NO FOCUS ZONE"}
+    if not isinstance(zone, dict):
+        return plan
+    z_type = str(zone.get("zone_type", "")).upper()
+    direction = "SELL" if z_type == "RESISTANCE" else "BUY" if z_type == "SUPPORT" else "NONE"
+    plan["direction"] = direction
+    lifecycle = str(zone.get("lifecycle_status", zone.get("status", "ACTIVE"))).upper()
+    h4 = str((market_bias or {}).get("h4", "")).upper()
+    if entry_validation.get("final_status") in ("BUY", "SELL"):
+        plan["note"] = "CONFIRMED PLAN"
+        return plan
+    if blocked:
+        plan["note"] = blocked
+    elif direction == "NONE":
+        plan["note"] = "ZONE TYPE UNKNOWN"
+    elif lifecycle not in ("ACTIVE", "TOUCHED", "SWEEP"):
+        plan["note"] = f"ZONE {lifecycle}"
+    elif (direction == "SELL" and h4 == "BULLISH") or (direction == "BUY" and h4 == "BEARISH"):
+        plan["note"] = "COUNTER-TREND (H4 FILTER)"
+    elif (market_bias or {}).get("has_conflict") or (market_bias or {}).get("m30_conflict") or str((market_bias or {}).get("overall_bias", "")).upper() in ("CONFLICT", "UNCONFIRMED", "DATA UNAVAILABLE"):
+        plan["note"] = "BIAS CONFLICT OR UNCONFIRMED"
+    elif safe_float((symbol_spec or {}).get("spread_points"), 0.0) > safe_float(cfg.get("risk", {}).get("max_spread_points"), 1.0):
+        plan["note"] = "SPREAD TOO HIGH"
+    else:
+        low = safe_float(zone.get("low"), 0.0)
+        high = safe_float(zone.get("high"), 0.0)
+        edge = low if direction == "SELL" else high
+        price = safe_float(current_price, 0.0)
+        inside = low > 0 and low <= price <= high
+        if price <= 0 or edge <= 0 or high < low:
+            plan["note"] = "PRICE UNAVAILABLE"
+        elif not inside and ((direction == "SELL" and price > high) or (direction == "BUY" and price < low)):
+            plan["note"] = "PRICE PASSED ZONE"
+        elif inside and str(entry_validation.get("final_status", "")).upper() == "INVALID":
+            plan["note"] = "SETUP INVALID"
+        elif inside and (entry_validation.get("rr_calculation") or {}).get("checked") and not (entry_validation.get("rr_calculation") or {}).get("valid"):
+            plan["note"] = (entry_validation.get("rr_calculation") or {}).get("reason") or "ENTRY RISK INVALID"
+        elif inside and not (symbol_spec or {}).get("quote_valid"):
+            plan["note"] = "BID/ASK UNAVAILABLE"
+        elif inside and ((symbol_spec or {}).get("stops_level") is None or not (symbol_spec or {}).get("tick_size_verified")):
+            plan["note"] = "BROKER STOP LEVEL OR TICK SIZE UNAVAILABLE"
+        else:
+            entry_ref = price if inside else edge
+            opposing = opposing_risk_zones(ranked_zones, direction)
+            rr = calculate_snr_risk_reward(
+                direction=direction, entry_price=entry_ref, active_zone=zone, opposing_zones=opposing,
+                trigger_candle=None, symbol_spec=symbol_spec, config=cfg,
+            )
+            plan.update(
+                entry=rr.get("effective_entry"), distance=round(abs(entry_ref - price), 2),
+                reference="CURRENT PRICE" if inside else "ZONE EDGE", rr_calculation=rr,
+            )
+            if rr.get("valid"):
+                plan.update(status="PROVISIONAL", note="PROVISIONAL ONLY", sl=rr["sl"], tp1=rr["tp1"], tp2=rr["tp2"], rr=rr["rr_tp1"])
+            else:
+                plan["note"] = rr.get("reason") or rr.get("rr_display") or "PLAN UNAVAILABLE"
+    return plan
+
+
 def _apply_saved_lifecycle(zone, saved):
     saved_status = str((saved or {}).get("lifecycle_status", "")).upper()
     broken_states = ("BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED")
     if saved_status not in broken_states + ("INVALIDATED", "BREAKDOWN_PENDING", "UNCONFIRMED"):
         return
     current_status = str(zone.get("lifecycle_status", "")).upper()
+    if saved_status == "UNCONFIRMED" and current_status != "UNCONFIRMED":
+        return
     if current_status == "INVALIDATED" and saved_status != "INVALIDATED":
         return
 
@@ -211,19 +344,7 @@ def _evaluate_post_break_state(zone, df, breakout_info, config, fallback_status=
 def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, momentum_by_tf, cfg):
     """Menyusun ringkasan PRICE ACTION (BREAKOUT, RETEST, REJECTION, MOMENTUM) untuk output utama."""
     eval_df = m5_df if (m5_df is not None and not getattr(m5_df, "empty", True)) else None
-    if eval_df is None:
-        for tf_fallback in ("M30", "H1", "H4"):
-            cand_df = frames_dict.get(tf_fallback)
-            if cand_df is not None and not getattr(cand_df, "empty", True):
-                eval_df = cand_df
-                break
-
     m5_mom = momentum_by_tf.get("M5") or {}
-    if not m5_mom.get("available"):
-        for tf_fallback in ("M30", "H1", "H4"):
-            if (momentum_by_tf.get(tf_fallback) or {}).get("available"):
-                m5_mom = momentum_by_tf[tf_fallback]
-                break
 
     if focus_zone is not None and eval_df is not None:
         bo_res = detect_zone_breakout(focus_zone, eval_df, momentum_result=m5_mom, config=cfg)
@@ -277,11 +398,11 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
     rt_zone_label = focus_label
     rej_zone_label = focus_label
     broken_zones = (ranked_zones or {}).get("broken_zones") or []
-    if bo_res.get("status") == "NO_BREAKOUT" and broken_zones and eval_df is not None:
+    if focus_zone is None and bo_res.get("status") == "NO_BREAKOUT" and broken_zones and eval_df is not None:
         bz0 = broken_zones[0]
         bz_label = f"{bz0.get('rank_label', bz0.get('zone_type', 'BROKEN'))} ({bz0.get('low', 0):.2f}-{bz0.get('high', 0):.2f})"
-        bo_bz = bz0.get("breakout_info") or detect_zone_breakout(bz0, eval_df, momentum_result=m5_mom, config=cfg)
-        rt_bz = bz0.get("retest_info") or detect_zone_retest(bz0, eval_df, breakout_result=bo_bz, config=cfg)
+        bo_bz = detect_zone_breakout(bz0, eval_df, momentum_result=m5_mom, config=cfg)
+        rt_bz = detect_zone_retest(bz0, eval_df, breakout_result=bo_bz, config=cfg)
         if bo_bz.get("status") in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION"):
             bo_res = bo_bz
             bo_zone_label = bz_label
@@ -312,6 +433,11 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
     rt_detail["bars_ago"] = rt_bars_ago
     rt_detail["is_historical"] = rt_is_historical
     rt_detail["zone_label"] = rt_zone_label
+    rej_detail = dict(rej_res)
+    rej_bar_idx = rej_detail.get("bar_index")
+    rej_bars_ago = (n_bars - 1 - int(rej_bar_idx)) if (rej_bar_idx is not None and n_bars > 0) else 999
+    rej_detail["is_historical"] = rej_bars_ago > 2
+    rej_detail["zone_label"] = rej_zone_label
 
     return {
         "focus_zone_label": focus_label,
@@ -331,7 +457,7 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
         "rejection_code": rej_res.get("status", "NONE"),
         "rejection_direction": rej_res.get("direction", "NONE"),
         "rejection_summary": rej_res.get("summary_status", "NOT CONFIRMED"),
-        "rejection_detail": rej_res,
+        "rejection_detail": rej_detail,
         "momentum_code": m5_mom.get("direction", "NEUTRAL"),
         "momentum_strength": m5_mom.get("strength", "WEAK"),
         "momentum_summary": m5_mom.get("summary_label", "NEUTRAL"),
@@ -401,6 +527,7 @@ def run_snr_scan(
 
         val_tf_list = []
         for cz in all_clust_tf:
+            cz["time_tz"] = str((getattr(df_tf, "attrs", {}) or {}).get("time_tz", "WIB"))
             touched = analyze_zone_touches(cz, df_tf, config=cfg, has_unclosed_last_bar=False)
             validated = validate_single_zone(
                 touched,
@@ -607,13 +734,8 @@ def run_snr_scan(
         market_bias["overall_bias"] = "DATA UNAVAILABLE"
         market_bias["snr_status"] = "DATA UNAVAILABLE"
 
-    # Entry Validation pada M5 (atau fallback timeframe terendah yang tersedia jika M5 kosong pada test)
+    # Entry Validation hanya menggunakan M5.
     entry_df = prepared_frames.get("M5")
-    if entry_df is None or getattr(entry_df, "empty", True):
-        for tf_fb in ("M30", "H1", "H4"):
-            if prepared_frames.get(tf_fb) is not None and not getattr(prepared_frames.get(tf_fb), "empty", True):
-                entry_df = prepared_frames[tf_fb]
-                break
 
     entry_validation = validate_snr_entry(
         ranked_zones=ranked_zones,
@@ -625,6 +747,48 @@ def run_snr_scan(
         has_unclosed_last_bar=False,
         data_freshness=market_data.get("data_freshness", "FRESH"),
     )
+    target_id = (entry_validation.get("target_zone") or {}).get("zone_id")
+    entry_price = safe_float((entry_validation.get("rr_calculation") or {}).get("effective_entry"), 0.0)
+    ranked_by_id = {
+        zone.get("zone_id"): zone for zone in (
+            (ranked_zones.get("active_supports") or []) + (ranked_zones.get("active_resistances") or [])
+        ) if zone.get("zone_id")
+    }
+    conflicting = [
+        overlap for overlap in ranked_zones.get("overlaps", [])
+        if target_id and target_id in (overlap["support_id"], overlap["resistance_id"])
+        and entry_price > 0
+        and safe_float(
+            (ranked_by_id.get(overlap["resistance_id"] if target_id == overlap["support_id"] else overlap["support_id"]) or {}).get("low")
+        ) <= entry_price <= safe_float(
+            (ranked_by_id.get(overlap["resistance_id"] if target_id == overlap["support_id"] else overlap["support_id"]) or {}).get("high")
+        )
+    ]
+    if (
+        conflicting
+        and entry_validation.get("final_status") in ("BUY", "SELL")
+        and entry_validation.get("setup_type") not in ("RESISTANCE_BREAKOUT_RETEST", "SUPPORT_BREAKDOWN_RETEST")
+    ):
+        overlap = conflicting[0]
+        overlap["entry_conflict"] = True
+        reason = f"BLOCKED_ZONE_CONFLICT: Entry berada di zona lawan {overlap['support_label']} / {overlap['resistance_label']}."
+        entry_validation.update(
+            final_status="WAIT", buy_status="WAIT", sell_status="WAIT", direction="NONE",
+            reason=reason, wait_reasons=[reason], overlap_conflict=overlap,
+        )
+
+    data_state = str(market_data.get("data_freshness", "FRESH")).upper()
+    blocked_plan = (
+        "MARKET CLOSED" if mkt_status == "CLOSED"
+        else "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE"
+        else f"DATA {data_state}" if data_state in ("STALE", "INVALID", "NO DATA")
+        else None
+    )
+    entry_validation["provisional_plan"] = _build_snr_provisional_plan(
+        entry_validation, ranked_zones, market_bias, current_price, symbol_spec, cfg, blocked=blocked_plan,
+    )
+    if live and mkt_status == "OPEN":
+        entry_validation["focus_change"] = _track_snr_focus(entry_validation.get("target_zone"), ranked_zones)
 
     # Perbarui label M5 pada market_bias hanya ketika market OPEN dan entry_validation mengonfirmasi arah BUY/SELL
     if mkt_status == "OPEN":
@@ -650,10 +814,18 @@ def run_snr_scan(
         momentum_by_tf=momentum_by_tf,
         cfg=cfg,
     )
+    if (
+        entry_validation.get("recent_closed_touch")
+        and data_state == "FRESH"
+        and isinstance(focus_zone, dict)
+        and focus_zone.get("zone_id")
+    ):
+        price_action["recent_touch_zone_id"] = focus_zone["zone_id"]
 
     # Sinkronkan summary price action jika entry_validation sudah mengonfirmasi rejection/retest
     if entry_validation.get("setup_type") in ("SUPPORT_REJECTION", "RESISTANCE_REJECTION"):
-        rej_det = entry_validation.get("rejection_detail") or price_action.get("rejection_detail") or {}
+        rej_det = dict(price_action.get("rejection_detail") or {})
+        rej_det.update(entry_validation.get("rejection_detail") or {})
         price_action["rejection_code"] = rej_det.get("status", price_action["rejection_code"])
         price_action["rejection_summary"] = rej_det.get("summary_status", "CONFIRMED")
         price_action["rejection_detail"] = rej_det

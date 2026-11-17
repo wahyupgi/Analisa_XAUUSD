@@ -79,6 +79,14 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
     strong_zones = list(by_cat.get("STRONG SUPPORT", [])) + list(by_cat.get("STRONG RESISTANCE", []))
 
     pa = price_action or {}
+    recent_touch_id = pa.get("recent_touch_zone_id")
+    if recent_touch_id and cp > 0:
+        if s1 and s1.get("zone_id") == recent_touch_id and s1_state in ("TOUCH", "APPROACHING", "DISTANT"):
+            if not safe_float(s1.get("low")) <= cp <= safe_float(s1.get("high")):
+                s1_state = "RECENT_TOUCH"
+        if r1 and r1.get("zone_id") == recent_touch_id and r1_state in ("TOUCH", "APPROACHING", "DISTANT"):
+            if not safe_float(r1.get("low")) <= cp <= safe_float(r1.get("high")):
+                r1_state = "RECENT_TOUCH"
     bo_state = str(pa.get("breakout_code", "NO_BREAKOUT")).upper()
     rt_state = str(pa.get("retest_code", "NO_RETEST")).upper()
     rej_state = str(pa.get("rejection_code", "NONE")).upper()
@@ -102,6 +110,8 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
         radar_status = "BREAKOUT_CONFIRMED"
     elif s1_state == "TOUCH" or r1_state == "TOUCH":
         radar_status = "ZONE_TOUCH"
+    elif s1_state == "RECENT_TOUCH" or r1_state == "RECENT_TOUCH":
+        radar_status = "ZONE_RECENT_TOUCH"
     elif s1_state == "APPROACHING" or r1_state == "APPROACHING":
         radar_status = "ZONE_APPROACHING"
     elif sig == "INVALID":
@@ -114,6 +124,7 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
         "radar_status": radar_status,
         "market_status": mkt_status,
         "nearest_support": {
+            "zone_id": s1.get("zone_id") if s1 else None,
             "label": s1.get("rank_label", "S1") if s1 else "N/A",
             "low": s1.get("low") if s1 else None,
             "high": s1.get("high") if s1 else None,
@@ -122,8 +133,10 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
             "strength": s1.get("strength_short") if s1 else "N/A",
             "distance_points": s1.get("distance_points") if s1 else None,
             "state": s1_state,
+            "price_inside": bool(s1 and cp > 0 and safe_float(s1.get("low")) <= cp <= safe_float(s1.get("high"))),
         },
         "nearest_resistance": {
+            "zone_id": r1.get("zone_id") if r1 else None,
             "label": r1.get("rank_label", "R1") if r1 else "N/A",
             "low": r1.get("low") if r1 else None,
             "high": r1.get("high") if r1 else None,
@@ -132,13 +145,24 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
             "strength": r1.get("strength_short") if r1 else "N/A",
             "distance_points": r1.get("distance_points") if r1 else None,
             "state": r1_state,
+            "price_inside": bool(r1 and cp > 0 and safe_float(r1.get("low")) <= cp <= safe_float(r1.get("high"))),
         },
         "strong_zone_count": len(strong_zones),
         "broken_zone_count": len(broken_zones),
         "invalidated_zone_count": len(invalid_zones),
+        "broken_zone_ids": [
+            z.get("zone_id") for z in broken_zones
+            if z.get("zone_id") and str(z.get("lifecycle_status", z.get("status", ""))).upper() == "BROKEN"
+        ],
+        "invalidated_zone_ids": [
+            z.get("zone_id") for z in invalid_zones
+            if z.get("zone_id") and str(z.get("lifecycle_status", z.get("status", ""))).upper() == "INVALIDATED"
+        ],
+        "observed_zone_ids": [z.get("zone_id") for z in ((ranked_zones or {}).get("all_zones") or []) if z.get("zone_id")],
         "events": {
             "zone_approaching": s1_state == "APPROACHING" or r1_state == "APPROACHING",
             "zone_touch": s1_state == "TOUCH" or r1_state == "TOUCH",
+            "zone_recent_touch": s1_state == "RECENT_TOUCH" or r1_state == "RECENT_TOUCH",
             "zone_rejection": is_live_open and (rej_state in ("BULLISH_REJECTION", "BEARISH_REJECTION")),
             "breakout_alert": is_live_open and (bo_state == "VALID_BREAKOUT"),
             "retest_alert": is_live_open and (rt_state in ("RETEST_IN_PROGRESS", "RETEST_CONFIRMED")),
@@ -196,26 +220,38 @@ class SnrAlertTracker:
             or (pa.get("retest_detail") or {}).get("is_historical")
         )
         rej_zone = str(pa.get("rejection_zone_label") or "").strip()
+        rej_detail = pa.get("rejection_detail") or {}
 
         curr_state = {
             "market_status": mkt_status,
             "signal": str(dec.get("signal", "WAIT")).upper(),
             "setup_type": str(dec.get("setup_type", "NONE")).upper(),
+            "setup_zone_id": (dec.get("target_zone") or {}).get("zone_id"),
+            "s1_id": s1.get("zone_id"),
             "s1_band": (s1.get("low"), s1.get("high")),
             "s1_state": str(s1.get("state", "NONE")).upper(),
+            "s1_inside": bool(s1.get("price_inside")),
             "r1_band": (r1.get("low"), r1.get("high")),
+            "r1_id": r1.get("zone_id"),
             "r1_state": str(r1.get("state", "NONE")).upper(),
+            "r1_inside": bool(r1.get("price_inside")),
             "breakout_code": str(pa.get("breakout_code", "NO_BREAKOUT")).upper(),
             "breakout_dir": str(pa.get("breakout_direction", "NONE")).upper(),
             "breakout_zone": bo_zone,
+            "breakout_zone_id": (pa.get("breakout_detail") or {}).get("zone_id"),
             "breakout_is_hist": bo_is_hist,
             "retest_code": str(pa.get("retest_code", "NO_RETEST")).upper(),
             "retest_zone": rt_zone,
+            "retest_zone_id": (pa.get("retest_detail") or {}).get("zone_id"),
             "retest_is_hist": rt_is_hist,
             "rejection_code": str(pa.get("rejection_code", "NONE")).upper(),
             "rejection_zone": rej_zone,
+            "rejection_zone_id": rej_detail.get("zone_id"),
             "broken_count": int(radar.get("broken_zone_count", 0)),
             "invalid_count": int(radar.get("invalidated_zone_count", 0)),
+            "broken_ids": radar.get("broken_zone_ids") or [],
+            "invalid_ids": radar.get("invalidated_zone_ids") or [],
+            "observed_ids": radar.get("observed_zone_ids") or [],
         }
 
         alerts = []
@@ -244,7 +280,9 @@ class SnrAlertTracker:
             }
 
         # 1. Alert Perubahan Keputusan Setup (BUY / SELL / INVALID)
-        if curr_state["signal"] != self.last_state.get("signal"):
+        if (curr_state["signal"], curr_state["setup_zone_id"]) != (
+            self.last_state.get("signal"), self.last_state.get("setup_zone_id")
+        ):
             if curr_state["signal"] == "BUY":
                 alerts.append("[SNR] BUY SETUP TERKONFIRMASI")
             elif curr_state["signal"] == "SELL":
@@ -253,9 +291,9 @@ class SnrAlertTracker:
                 alerts.append("[SNR] SETUP / ZONA INVALID")
 
         # 2. Alert Perubahan Rejection (dengan identitas zona)
-        if (
+        if rej_detail.get("confirmed") and not rej_detail.get("is_historical") and (
             curr_state["rejection_code"] != self.last_state.get("rejection_code")
-            or curr_state["rejection_zone"] != self.last_state.get("rejection_zone")
+            or curr_state["rejection_zone_id"] != self.last_state.get("rejection_zone_id")
         ):
             rej_suffix = f" ({rej_zone})" if rej_zone and rej_zone != "NONE" else ""
             if curr_state["rejection_code"] == "BULLISH_REJECTION":
@@ -267,7 +305,7 @@ class SnrAlertTracker:
         if not bo_is_hist and (
             curr_state["breakout_code"] != self.last_state.get("breakout_code")
             or curr_state["breakout_dir"] != self.last_state.get("breakout_dir")
-            or curr_state["breakout_zone"] != self.last_state.get("breakout_zone")
+            or curr_state["breakout_zone_id"] != self.last_state.get("breakout_zone_id")
         ):
             bo_suffix = f" ({bo_zone})" if bo_zone and bo_zone != "NONE" else ""
             if curr_state["breakout_code"] == "VALID_BREAKOUT":
@@ -281,7 +319,7 @@ class SnrAlertTracker:
         # 4. Alert Perubahan Retest (hanya jika aktif fresh, sertakan identitas zona)
         if not rt_is_hist and (
             curr_state["retest_code"] != self.last_state.get("retest_code")
-            or curr_state["retest_zone"] != self.last_state.get("retest_zone")
+            or curr_state["retest_zone_id"] != self.last_state.get("retest_zone_id")
         ):
             rt_suffix = f" ({rt_zone})" if rt_zone and rt_zone != "NONE" else ""
             if curr_state["retest_code"] == "RETEST_CONFIRMED":
@@ -292,26 +330,38 @@ class SnrAlertTracker:
                 alerts.append(f"[SNR] RETEST GAGAL{rt_suffix}")
 
         # 5. Alert Interaksi S1 & R1 (Approaching / Touch)
-        if curr_state["s1_state"] != self.last_state.get("s1_state") or curr_state["s1_band"] != self.last_state.get("s1_band"):
+        if (curr_state["s1_state"], curr_state["s1_id"], curr_state["s1_inside"]) != (
+            self.last_state.get("s1_state"), self.last_state.get("s1_id"), self.last_state.get("s1_inside")
+        ):
             if curr_state["s1_state"] == "TOUCH" and s1.get("low") is not None:
-                alerts.append(f"[SNR] SUPPORT S1 DISENTUH ({s1['low']:.2f}-{s1['high']:.2f})")
+                label = "HARGA DI SUPPORT S1" if s1.get("price_inside") else "HARGA DEKAT SUPPORT S1"
+                alerts.append(f"[SNR] {label} ({s1['low']:.2f}-{s1['high']:.2f})")
+            elif curr_state["s1_state"] == "RECENT_TOUCH" and s1.get("low") is not None:
+                alerts.append(f"[SNR] SUPPORT S1 DISENTUH M5; HARGA DI LUAR ZONA ({s1['low']:.2f}-{s1['high']:.2f})")
             elif curr_state["s1_state"] == "APPROACHING" and s1.get("low") is not None:
-                alerts.append(f"[SNR] HARGA MENDEKATI SUPPORT S1 ({s1['low']:.2f}-{s1['high']:.2f})")
+                alerts.append(f"[SNR] HARGA DEKAT SUPPORT S1 ({s1['low']:.2f}-{s1['high']:.2f})")
 
-        if curr_state["r1_state"] != self.last_state.get("r1_state") or curr_state["r1_band"] != self.last_state.get("r1_band"):
+        if (curr_state["r1_state"], curr_state["r1_id"], curr_state["r1_inside"]) != (
+            self.last_state.get("r1_state"), self.last_state.get("r1_id"), self.last_state.get("r1_inside")
+        ):
             if curr_state["r1_state"] == "TOUCH" and r1.get("low") is not None:
-                alerts.append(f"[SNR] RESISTANCE R1 DISENTUH ({r1['low']:.2f}-{r1['high']:.2f})")
+                label = "HARGA DI RESISTANCE R1" if r1.get("price_inside") else "HARGA DEKAT RESISTANCE R1"
+                alerts.append(f"[SNR] {label} ({r1['low']:.2f}-{r1['high']:.2f})")
+            elif curr_state["r1_state"] == "RECENT_TOUCH" and r1.get("low") is not None:
+                alerts.append(f"[SNR] RESISTANCE R1 DISENTUH M5; HARGA DI LUAR ZONA ({r1['low']:.2f}-{r1['high']:.2f})")
             elif curr_state["r1_state"] == "APPROACHING" and r1.get("low") is not None:
-                alerts.append(f"[SNR] HARGA MENDEKATI RESISTANCE R1 ({r1['low']:.2f}-{r1['high']:.2f})")
+                alerts.append(f"[SNR] HARGA DEKAT RESISTANCE R1 ({r1['low']:.2f}-{r1['high']:.2f})")
 
         # 6. Alert Zona Broken / Invalidated Baru
-        prev_broken = self.last_state.get("broken_count")
-        if prev_broken is not None and curr_state["broken_count"] > prev_broken:
-            alerts.append("[SNR] ZONA SNR DITEMBUS (BROKEN)")
+        if "broken_ids" in self.last_state:
+            new_broken = set(curr_state["broken_ids"]) - set(self.last_state["broken_ids"])
+            for zone_id in sorted(new_broken & set(self.last_state.get("observed_ids") or [])):
+                alerts.append(f"[SNR] ZONA {zone_id} DITEMBUS (BROKEN)")
 
-        prev_invalid = self.last_state.get("invalid_count")
-        if prev_invalid is not None and curr_state["invalid_count"] > prev_invalid:
-            alerts.append("[SNR] ZONA SNR INVALID")
+        if "invalid_ids" in self.last_state:
+            new_invalid = set(curr_state["invalid_ids"]) - set(self.last_state["invalid_ids"])
+            for zone_id in sorted(new_invalid & set(self.last_state.get("observed_ids") or [])):
+                alerts.append(f"[SNR] ZONA {zone_id} INVALID")
 
         # Peringatan kritis yang wajib tetap muncul
         if curr_state["signal"] == "INVALID":

@@ -18,7 +18,7 @@ Mempertimbangkan:
 """
 import numpy as np
 from modules.snr.config import get_snr_config
-from modules.snr.data_provider import prepare_snr_frame, safe_float
+from modules.snr.data_provider import prepare_snr_frame, safe_float, zone_confirmation_start
 from modules.snr.momentum_analysis import analyze_momentum
 
 
@@ -108,10 +108,7 @@ def detect_zone_breakout(
     times = clean_df["Time"].tolist()
     n_bars = len(clean_df)
 
-    conf_idx = int(zone.get("confirmed_index", zone.get("formation_index", 0)))
-    start_idx = max(conf_idx + 1, n_bars - lookback_bars)
-    if start_idx >= n_bars:
-        start_idx = max(0, n_bars - min(lookback_bars, n_bars))
+    start_idx = max(zone_confirmation_start(zone, clean_df), n_bars - lookback_bars)
 
     has_vol = bool(clean_df["HasTickVolume"].iloc[-1]) if "HasTickVolume" in clean_df.columns else False
     vols = clean_df["TickVolume"].to_numpy(dtype=float) if has_vol else None

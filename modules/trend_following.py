@@ -19,6 +19,7 @@ Prinsip:
 
 from __future__ import annotations
 
+import hashlib
 import math
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -45,7 +46,7 @@ from modules.config import (
     TF_PULLBACK_MIN_RETRACE,
 )
 from modules.mt5_conn import tambah_indikator
-from modules.utils import format_wib_timestamp
+from modules.utils import format_wib_timestamp, to_wib_datetime
 
 _SWING_N = 5
 _M5_EVENT_MAX_AGE = 12
@@ -784,25 +785,22 @@ def _strip_unclosed_for_snr(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _snr_frames_signature(frames: Optional[Dict[str, Any]]) -> Tuple:
-    """Sidik jari ringkas timeframe OHLC untuk validasi kecocokan shared snapshot (anti-stale cache)."""
+    """Fingerprint all candle inputs used by the shared SNR snapshot."""
     if not isinstance(frames, dict):
         return ()
     parts = []
-    for tf in ("H4", "H1", "M30", "M5"):
+    for tf in ("H4", "H1", "M30", "M15", "M5"):
         df = frames.get(tf)
         if not isinstance(df, pd.DataFrame) or df.empty:
             parts.append((tf, 0, "", 0.0, bool(getattr(df, "attrs", {}).get("is_closed", True)) if isinstance(df, pd.DataFrame) else True))
             continue
-        last_ts = ""
-        if isinstance(df.index, pd.DatetimeIndex):
-            last_ts = str(df.index[-1])
-        elif "Time" in df.columns:
-            last_ts = str(df["Time"].iloc[-1])
-        elif "time" in df.columns:
-            last_ts = str(df["time"].iloc[-1])
-        last_c = _safe_float(df["Close"].iloc[-1], 0.0) if "Close" in df.columns else 0.0
-        is_cl = bool((getattr(df, "attrs", {}) or {}).get("is_closed", True))
-        parts.append((tf, int(len(df)), last_ts, round(last_c, 4), is_cl))
+        columns = tuple(c for c in (
+            "Time", "time", "Open", "High", "Low", "Close", "ATR14",
+            "Volume", "TickVolume", "tick_volume", "is_closed", "is_forming",
+        ) if c in df.columns)
+        digest = hashlib.sha256(pd.util.hash_pandas_object(df.loc[:, list(columns)], index=True).values.tobytes()).hexdigest()
+        attrs = getattr(df, "attrs", {}) or {}
+        parts.append((tf, len(df), columns, digest, attrs.get("is_closed"), attrs.get("has_unclosed_last_bar"), attrs.get("time_tz")))
     return tuple(parts)
 
 
@@ -1047,6 +1045,12 @@ def extract_snr_supporting_context(
                 and snap_id
                 and cand_shared.get("snapshot_id") == snap_id
                 and snapshot.get("_shared_snr_sig") == _snr_frames_signature(frames)
+                and snapshot.get("_shared_snr_quote") == tuple(
+                    snapshot.get(key) for key in (
+                        "snapshot_price", "bid", "ask", "spread", "tick_time", "server_time",
+                        "snapshot_time", "market_status", "data_freshness",
+                    )
+                )
             ):
                 snr_res = cand_shared
 
@@ -1057,7 +1061,7 @@ def extract_snr_supporting_context(
                 snap_ro = {
                     k: v
                     for k, v in snapshot.items()
-                    if k not in ("frames", "_shared_snr_scan", "_shared_snr_sig")
+                    if k not in ("frames", "_shared_snr_scan", "_shared_snr_sig", "_shared_snr_quote")
                 }
                 snap_ro["frames"] = frames_copy
                 snap_ro["live"] = False
@@ -1153,7 +1157,10 @@ def extract_snr_supporting_context(
             has_hist_zones = bool(supports or resistances or broken_zones)
             status_str = "PARTIAL" if has_hist_zones else "UNAVAILABLE"
             reason_str = f"Data SNR berstatus STALE ({stale_reason}); hanya berlaku sebagai konteks historis."
-            summary = f"[STALE - HISTORIS SAJA] Breakout={bo_code} | Retest={rt_code} | Rejection={rej_code}"
+            summary = (
+                f"[STALE - HISTORIS SAJA] Breakout={pa.get('breakout_summary', 'NOT CONFIRMED')} | "
+                f"Retest={pa.get('retest_summary', 'NOT CONFIRMED')} | Rejection={pa.get('rejection_summary', 'NOT CONFIRMED')}"
+            )
             return {
                 "status": status_str,
                 "available": False,
@@ -1202,7 +1209,10 @@ def extract_snr_supporting_context(
         else:
             prefix = "[AVAILABLE]"
             reason_str = "Konteks SNR lengkap dan segar."
-        summary = f"{prefix} Breakout={bo_code} | Retest={rt_code} | Rejection={rej_code}"
+        summary = (
+            f"{prefix} Breakout={pa.get('breakout_summary', 'NOT CONFIRMED')} | "
+            f"Retest={pa.get('retest_summary', 'NOT CONFIRMED')} | Rejection={pa.get('rejection_summary', 'NOT CONFIRMED')}"
+        )
 
         return {
             "status": status_str,
@@ -1290,10 +1300,12 @@ def build_trend_following_candidates(
         if str(azd.get("zone_type", "")).upper() != ztype or not azd.get("is_valid", True):
             continue
         _dedup_push_candidate(cands, {
-            "zone_id": azd.get("zone_id") or f"TF_PB_OB_{direction}",
+            "zone_id": azd.get("zone_id") or f"TF_PB_OB_{direction}_{float(azd['price_low']):.2f}_{float(azd['price_high']):.2f}",
             "setup_type": "TREND_PULLBACK",
             "source_kind": "SMC_OB_FVG",
             "timeframe": azd.get("timeframe", "H1"),
+            "formation_time": azd.get("bos_candle_time"),
+            "formation_timeframe": azd.get("bos_timeframe") or azd.get("timeframe", "H1"),
             "zone_type": ztype,
             "direction": direction,
             "price_low": float(azd["price_low"]),
@@ -1314,10 +1326,11 @@ def build_trend_following_candidates(
             if dist_f <= max(18.0, 4.0 * atr_h1):
                 base_sc = 80.0 if tf_fvg == "H4" else (76.0 if tf_fvg == "H1" else 70.0)
                 _dedup_push_candidate(cands, {
-                    "zone_id": f"TF_PB_FVG_{tf_fvg}_{fv['k']}",
+                    "zone_id": f"TF_PB_FVG_{tf_fvg}_{direction}_{fv['time']}",
                     "setup_type": "TREND_PULLBACK",
                     "source_kind": f"FVG_{tf_fvg}",
                     "timeframe": tf_fvg,
+                    "formation_time": fv["time"],
                     "zone_type": ztype,
                     "direction": direction,
                     "price_low": float(fv["low"]),
@@ -1340,10 +1353,13 @@ def build_trend_following_candidates(
         if dist_s <= max(15.0, 3.5 * atr_h1):
             inv = round(s_lo - max(0.8, 0.45 * atr_m30), 2) if direction == "BUY" else round(s_hi + max(0.8, 0.45 * atr_m30), 2)
             _dedup_push_candidate(cands, {
-                "zone_id": sz.get("zone_id") or f"TF_PB_SNR_{s_lo:.0f}",
+                "zone_id": f"TF_PB_{sz['zone_id']}" if sz.get("zone_id") else f"TF_PB_SNR_{direction}_{s_lo:.2f}_{s_hi:.2f}",
+                "source_zone_id": sz.get("zone_id"),
                 "setup_type": "TREND_PULLBACK",
                 "source_kind": "SNR_ZONE",
                 "timeframe": sz.get("timeframe", "H1"),
+                "formation_time": sz.get("confirmed_time"),
+                "formation_time_tz": sz.get("time_tz"),
                 "zone_type": ztype,
                 "direction": direction,
                 "price_low": round(s_lo, 2),
@@ -1378,7 +1394,7 @@ def build_trend_following_candidates(
         dist_p = 0.0 if lo_p <= current_price <= hi_p else min(abs(current_price - lo_p), abs(current_price - hi_p))
         if dist_p <= max(6.0, 2.5 * atr_m30):
             _dedup_push_candidate(cands, {
-                "zone_id": f"TF_PB_DYNAMIC_{direction}_{lo_p:.0f}",
+                "zone_id": f"TF_PB_DYNAMIC_{direction}_{lo_p:.2f}_{hi_p:.2f}",
                 "setup_type": "TREND_PULLBACK",
                 "source_kind": "DYNAMIC_OTE_EMA",
                 "timeframe": "M30",
@@ -1405,7 +1421,7 @@ def build_trend_following_candidates(
             if 0 < b_lo <= b_hi:
                 inv = round(b_lo - max(1.0, 0.6 * atr_m5), 2) if direction == "BUY" else round(b_hi + max(1.0, 0.6 * atr_m5), 2)
                 _dedup_push_candidate(cands, {
-                    "zone_id": f"TF_BR_{bz.get('zone_id', 'SNR')}",
+                    "zone_id": f"TF_BR_{bz.get('zone_id') or f'{direction}_{b_lo:.2f}_{b_hi:.2f}'}",
                     "setup_type": "BREAKOUT_RETEST",
                     "source_kind": "SNR_BREAKOUT_RETEST",
                     "timeframe": bz.get("timeframe", "H1"),
@@ -1448,10 +1464,11 @@ def build_trend_following_candidates(
             if dist_lvl <= max(4.5, 1.8 * atr_br):
                 inv = round(z_lo - max(1.0, 0.6 * atr_m30), 2) if direction == "BUY" else round(z_hi + max(1.0, 0.6 * atr_m30), 2)
                 _dedup_push_candidate(cands, {
-                    "zone_id": f"TF_BR_{tf_br}_{k_ev}",
+                    "zone_id": f"TF_BR_{tf_br}_{direction}_{df_br.index[k_ev]}",
                     "setup_type": "BREAKOUT_RETEST",
                     "source_kind": f"SWING_BREAKOUT_RETEST_{tf_br}",
                     "timeframe": tf_br,
+                    "formation_time": str(df_br.index[k_ev]),
                     "zone_type": ztype,
                     "direction": direction,
                     "price_low": z_lo,
@@ -1500,7 +1517,7 @@ def build_trend_following_candidates(
                     anchor_sl = recent_highs[-1] if recent_highs else float(df_m5["High"].iloc[-8:].max())
                     inv_c = round(max(c_hi, anchor_sl) + max(0.5, 0.4 * atr_m5), 2)
                 _dedup_push_candidate(cands, {
-                    "zone_id": f"TF_CONT_{direction}_{int(round(c_lo))}",
+                    "zone_id": f"TF_CONT_{direction}_{c_lo:.2f}_{c_hi:.2f}",
                     "setup_type": "TREND_CONTINUATION",
                     "source_kind": "M30_M5_CONTINUATION",
                     "timeframe": "M30",
@@ -1598,16 +1615,12 @@ def _compute_targets_and_rr(
     """
     Hitung TP1 & TP2 berdasarkan struktur H1/H4/M30 dan S&R aktif:
       - Memastikan tidak ada obstacle mayor S&R/swing H1/H4 yang menghalangi TP1 dengan R:R < 1.5.
-      - Untuk Trend Continuation / Breakout Retest saat harga mencetak swing baru tanpa swing historis di depan,
-        gunakan proyeksi tren terukur (measured move / ATR extension).
+      - Jika target struktural tidak tersedia, tunggu tanpa membuat target proyeksi.
     """
     risk = round(abs(entry - sl), 2)
     if risk <= 0 or risk > SL_JARAK_MAKS:
         return {"ok": False, "rr": 0.0, "tp1": None, "tp2": None,
                 "reason": f"Jarak SL {risk:.2f} pt di luar batas aman (maks {SL_JARAK_MAKS:g} pt)"}
-
-    df_h1 = frames.get("H1")
-    atr_h1 = max(1.0, _safe_float(df_h1["ATR14"].iloc[-1] if df_h1 is not None and "ATR14" in df_h1.columns else 3.0, 3.0))
 
     raw_targets: List[Tuple[float, str]] = []
     for tf_name in ("H4", "H1", "M30"):
@@ -1648,6 +1661,12 @@ def _compute_targets_and_rr(
             return {"ok": False, "rr": round(obs_rr, 2), "tp1": round(nearest_obs, 2), "tp2": None,
                     "reason": f"Terhalang zona S&R mayor di {nearest_obs:.2f} (R:R aktual 1:{obs_rr:.2f} < 1:{RR_MIN:g})"}
 
+    if raw_targets:
+        nearest_reward = (raw_targets[0][0] - entry) if direction == "BUY" else (entry - raw_targets[0][0])
+        if nearest_reward / risk < RR_MIN - 1e-9:
+            return {"ok": False, "rr": round(nearest_reward / risk, 2), "tp1": raw_targets[0][0], "tp2": None,
+                    "reason": f"R:R aktual ke target terdekat {raw_targets[0][0]:.2f} hanya 1:{nearest_reward / risk:.2f} (< 1:{RR_MIN:g})"}
+
     valid_tps = [
         (t, src) for (t, src) in raw_targets
         if (((t - entry) if direction == "BUY" else (entry - t)) / risk) >= RR_MIN - 1e-9
@@ -1655,9 +1674,7 @@ def _compute_targets_and_rr(
 
     if valid_tps:
         tp1, tp1_src = valid_tps[0]
-        tp2 = valid_tps[1][0] if len(valid_tps) > 1 else round(
-            entry + (2.5 * risk if direction == "BUY" else -2.5 * risk), 2
-        )
+        tp2 = valid_tps[1][0] if len(valid_tps) > 1 else tp1
     elif raw_targets:
         # Hanya ada target struktural lebih dekat dan tidak memenuhi R:R minimum -> tolak!
         first_t = raw_targets[0][0]
@@ -1665,13 +1682,6 @@ def _compute_targets_and_rr(
         rr_0 = round(rew_0 / risk, 2)
         return {"ok": False, "rr": rr_0, "tp1": first_t, "tp2": None,
                 "reason": f"R:R aktual ke target terdekat {first_t:.2f} hanya 1:{rr_0:.2f} (< 1:{RR_MIN:g})"}
-    elif setup_type in ("TREND_CONTINUATION", "BREAKOUT_RETEST", "TREND_PULLBACK"):
-        # Saat harga melanjutkan tren menembus area high/low baru tanpa swing lawan historis di depan:
-        step1 = max(1.8 * risk, 1.8 * atr_h1)
-        step2 = max(3.0 * risk, 3.0 * atr_h1)
-        tp1 = round(entry + step1 if direction == "BUY" else entry - step1, 2)
-        tp2 = round(entry + step2 if direction == "BUY" else entry - step2, 2)
-        tp1_src = "Projected Trend Extension"
     else:
         return {"ok": False, "rr": 0.0, "tp1": None, "tp2": None,
                 "reason": "Tidak ada target likuiditas struktural searah"}
@@ -1782,10 +1792,27 @@ def validate_m5_entry_confirmation(
 
     # 2. Pengecekan Sentuhan Area Setup & Anti-Late-Entry
     touched = False
+    touch_indices = []
+    formation_time = candidate.get("formation_time")
+    formation_close = None
+    if formation_time:
+        formation_tf = str(candidate.get("formation_timeframe") or candidate.get("timeframe", "")).upper()
+        formation_df = frames.get(formation_tf)
+        formation_tz = candidate.get("formation_time_tz") or (getattr(formation_df, "attrs", {}) or {}).get("time_tz", "WIB")
+        formation_dt = to_wib_datetime(formation_time, source_tz=formation_tz)
+        duration = {"M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240}.get(formation_tf)
+        if formation_dt is None or duration is None:
+            stages["zone_validation"] = {"status": "DATA_INCOMPLETE", "msg": "Waktu konfirmasi zona tidak valid."}
+            W.append(stages["zone_validation"]["msg"])
+            return res
+        formation_close = pd.Timestamp(formation_dt) + pd.Timedelta(minutes=duration)
     for x in range(max(0, n5 - _M5_TOUCH_LOOKBACK), n5):
+        m5_time = to_wib_datetime(df_m5.index[x], source_tz=str((getattr(df_m5, "attrs", {}) or {}).get("time_tz", "WIB")))
+        if formation_close is not None and (m5_time is None or pd.Timestamp(m5_time) < formation_close):
+            continue
         if L[x] <= hi and H[x] >= lo:
             touched = True
-            break
+            touch_indices.append(x)
     if not touched and (lo <= price <= hi):
         touched = True
 
@@ -1802,7 +1829,20 @@ def validate_m5_entry_confirmation(
         W.append(stages["zone_touch"]["msg"])
         return res
 
-    stages["zone_touch"] = {"status": "CONFIRMED", "msg": f"Harga berada di area {setup_type} (jarak {dist:.2f} pt)"}
+    if touched and lo <= price <= hi and (not touch_indices or touch_indices[-1] != n5 - 1):
+        first_touch_k = n5
+    elif touch_indices:
+        first_touch_k = touch_indices[-1]
+        for previous, current in zip(reversed(touch_indices[:-1]), reversed(touch_indices[1:])):
+            if current - previous != 1:
+                break
+            first_touch_k = previous
+    else:
+        first_touch_k = 0
+    stages["zone_touch"] = {
+        "status": "CONFIRMED" if touched else "NOT_REQUIRED",
+        "msg": f"Harga berada di area {setup_type} (jarak {dist:.2f} pt)" if touched else "Touch tidak diwajibkan untuk trend continuation",
+    }
 
     # 3. Analisis M5 Structure (BOS/CHoCH), CISD, Liquidity Sweep, Rejection, Displacement
     events, _, swings = _detect_structure(df_m5, n=_SWING_N)
@@ -1813,7 +1853,7 @@ def validate_m5_entry_confirmation(
     tol_sw = max(2.5, 1.6 * atr5)
     rel_sweeps = [
         s for s in sweeps
-        if s["type"] == want_sw and n5 - 1 - s["k"] <= 35
+        if s["type"] == want_sw and first_touch_k <= s["k"] and n5 - 1 - s["k"] <= 35
         and (lo - tol_sw <= s["wick_extreme"] <= hi + tol_sw)
         and (lo - tol_sw <= s["level"] <= hi + tol_sw)
     ]
@@ -1829,15 +1869,17 @@ def validate_m5_entry_confirmation(
 
     match_evs = [
         e for e in reversed(events)
-        if e["arah"] == want_ev and n5 - 1 - e["k"] <= _M5_EVENT_MAX_AGE and (k_sweep < 0 or e["k"] >= k_sweep)
+        if e["arah"] == want_ev and n5 - 1 - e["k"] <= _M5_EVENT_MAX_AGE and e["k"] >= max(first_touch_k, k_sweep)
     ]
     match_cisd = [
         c for c in reversed(cisd_list)
         if c.get("arah") == ("BULLISH" if direction == "BUY" else "BEARISH")
         and n5 - 1 - int(c.get("k", 0)) <= _M5_EVENT_MAX_AGE
-        and (k_sweep < 0 or int(c.get("k", 0)) >= k_sweep)
+        and int(c.get("k", 0)) >= max(first_touch_k, k_sweep)
     ]
     rej = _detect_rejection_candle(df_m5, direction, lo, hi, atr5, lookback=6)
+    if rej and int(rej["k"]) < first_touch_k:
+        rej = None
 
     # Set stage sweep
     if best_sweep:
@@ -1897,7 +1939,7 @@ def validate_m5_entry_confirmation(
     stages["structure_trigger"] = {"status": "CONFIRMED", "msg": trig_msg, "k": k_ref}
 
     # 4. Displacement M5
-    k0 = max(0, k_ref - 3)
+    k0 = max(first_touch_k, k_ref - 3)
     if direction == "BUY":
         bodies = [C[x] - O[x] for x in range(k0, min(n5, k_ref + 3)) if C[x] > O[x]]
     else:
@@ -2002,6 +2044,7 @@ def evaluate_trend_following_setup(
     news_blackout: Any = False,
     explicit_h1_conflict: bool = False,
     explicit_m30_conflict: bool = False,
+    preferred_zone_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Orkestrator utama Multi-Timeframe Trend Following + SMC Confirmation.
@@ -2164,6 +2207,8 @@ def evaluate_trend_following_setup(
             "reasons": [stale_rsn],
         }
     cands = build_trend_following_candidates(frames, h4_info, h1_info, m30_info, current_price, scan=scan, snr_context=snr_ctx)
+    if preferred_zone_id:
+        cands.sort(key=lambda candidate: candidate.get("zone_id") != preferred_zone_id)
     if not cands:
         return {
             "status": "WAIT",
@@ -2372,6 +2417,8 @@ def build_unified_market_context(
     )
     if primary_trend == "CONFLICT" or smc_h1_conf == "CONFLICT" or h1_opposes:
         trend_confirmation = f"CONFLICT (SMC H1={smc_h1_raw}, SNR H1={snr_h1_raw})"
+    elif smc_h1_raw.replace("NETRAL", "NEUTRAL") != snr_h1_raw.replace("NETRAL", "NEUTRAL"):
+        trend_confirmation = f"PARTIAL (SMC H1={smc_h1_raw}, SNR H1={snr_h1_raw})"
     elif h1_confirmed:
         trend_confirmation = "PULLBACK" if smc_h1_conf == "PULLBACK" else "ALIGNED"
     else:
@@ -2484,7 +2531,7 @@ def build_unified_market_context(
                 "masih bertentangan dengan arah entry."
             )
         else:
-            classification = "TREND ALIGNED"
+            classification = "TREND ALIGNED" if trend_confirmation == "ALIGNED" else "TREND PARTIAL"
             short_term_label = f"{primary_trend} ALIGNED" if st_mom_dir in (primary_trend, "NEUTRAL") else f"{st_mom_dir} PULLBACK"
             trade_bias = "SELL PRIORITY" if primary_trend == "BEARISH" else "BUY PRIORITY"
             reason = f"Struktur multi-timeframe selaras dengan tren utama {primary_trend}."

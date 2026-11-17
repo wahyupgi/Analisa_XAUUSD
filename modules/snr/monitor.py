@@ -9,6 +9,7 @@ from modules.snr.config import get_snr_config
 from modules.snr.data_provider import log_snr_error, safe_float
 from modules.snr.formatter import (
     format_snr_detail,
+    format_snr_focus_plan,
     format_snr_lifecycle_status,
     format_snr_summary,
 )
@@ -61,6 +62,26 @@ def format_snr_monitor_section(cycle_result, detailed=False):
     last_price_str = f"{last_price:.2f}" if (last_price > 0 and mkt_status != "DATA UNAVAILABLE") else "DATA UNAVAILABLE"
     last_candle = str(sr.get("last_candle", "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "N/A"))
 
+    if not detailed:
+        def _zone_label(zones):
+            if not zones:
+                return "NONE"
+            z = zones[0]
+            return f"{z.get('rank_label', 'ZONE')} {safe_float(z.get('low')):.2f}-{safe_float(z.get('high')):.2f}"
+
+        lines = [
+            "### B. SNR MONITOR",
+            f"BIAS            : H4={mb.get('h4', 'N/A')} | H1={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')}",
+            f"SUPPORT         : {_zone_label(active_sups)}",
+            f"RESISTANCE      : {_zone_label(active_ress)}",
+            *format_snr_lifecycle_status(sr, dec)[:3 if (sr.get("ranked_zones") or {}).get("overlaps") else 2],
+            f"PRICE ACTION    : Rejection={pa.get('rejection_summary', 'NOT CONFIRMED')} | Breakout={pa.get('breakout_summary', 'NOT CONFIRMED')} | Retest={pa.get('retest_summary', 'NOT CONFIRMED')}",
+            f"ENTRY           : {dec.get('signal', 'WAIT')} | Trigger={ev.get('trigger_status', 'NOT CONFIRMED')}",
+            format_snr_focus_plan(dec, ev, market_bias=mb),
+            f"REASON          : {dec.get('reason', 'N/A')}",
+        ]
+        return "\n".join(lines)
+
     lines = [
         "### B. SNR MONITOR",
         f"STATUS          : OK ({sr.get('snr_status', mb.get('snr_status', 'ACTIVE'))})",
@@ -82,7 +103,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
             dist = safe_float(sz.get("distance_points"), 0.0)
             lines.append(
                 f"  • {lbl} : {safe_float(sz.get('low')):.2f} - {safe_float(sz.get('high')):.2f} "
-                f"| Grade {sz.get('grade', 'D')} (Score {int(round(safe_float(sz.get('score'))))} - {sz.get('strength_short', 'MODERATE')}) "
+                f"| Grade {sz.get('grade', 'D')} (Score {safe_float(sz.get('score')):.2f} - {sz.get('strength_short', 'MODERATE')}) "
                 f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {dist:.2f} pts"
             )
     else:
@@ -99,7 +120,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
             dist = safe_float(rz.get("distance_points"), 0.0)
             lines.append(
                 f"  • {lbl} : {safe_float(rz.get('low')):.2f} - {safe_float(rz.get('high')):.2f} "
-                f"| Grade {rz.get('grade', 'D')} (Score {int(round(safe_float(rz.get('score'))))} - {rz.get('strength_short', 'MODERATE')}) "
+                f"| Grade {rz.get('grade', 'D')} (Score {safe_float(rz.get('score')):.2f} - {rz.get('strength_short', 'MODERATE')}) "
                 f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {dist:.2f} pts"
             )
     else:
@@ -126,14 +147,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
         f"SNR DECISION    : {dec.get('signal', 'WAIT')} (Direction: {dec.get('direction', 'NONE')})",
     ])
 
-    if dec.get("signal") in ("BUY", "SELL") and dec.get("entry") is not None:
-        lines.append(
-            f"ENTRY / SL / TP : Entry {safe_float(dec.get('entry')):.2f} | SL {safe_float(dec.get('sl')):.2f} "
-            f"| TP1 {safe_float(dec.get('tp1')):.2f} | TP2 {safe_float(dec.get('tp2', dec.get('tp1'))):.2f} "
-            f"| RR {dec.get('rr_display', 'N/A')}"
-        )
-    else:
-        lines.append(f"ENTRY / SL / TP : N/A (RR: {dec.get('rr_display', 'NOT CHECKED')})")
+    lines.append(format_snr_focus_plan(dec, ev, market_bias=mb))
 
     lines.append(f"MAIN REASON     : {dec.get('reason', 'N/A')}")
 

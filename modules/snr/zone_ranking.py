@@ -208,20 +208,38 @@ def rank_zones(zones, current_price=None):
         enriched_all.append(item)
 
     # Urutkan kandidat aktif berdasarkan ranking_priority tertinggi, lalu deduplikasi overlap lintas TF
-    active_sup_candidates.sort(key=lambda x: (-x["ranking_priority"], x["distance_points"], -x.get("score", 0.0)))
-    active_res_candidates.sort(key=lambda x: (-x["ranking_priority"], x["distance_points"], -x.get("score", 0.0)))
+    active_sup_candidates.sort(key=lambda x: (-x["ranking_priority"], x["distance_points"], -x.get("score", 0.0), str(x.get("zone_id") or "")))
+    active_res_candidates.sort(key=lambda x: (-x["ranking_priority"], x["distance_points"], -x.get("score", 0.0), str(x.get("zone_id") or "")))
 
     dedup_sup = _deduplicate_overlapping_ranked_zones(active_sup_candidates)
     dedup_res = _deduplicate_overlapping_ranked_zones(active_res_candidates)
 
     # Untuk penyajian S1, S2 (terdekat ke bawah dari harga saat ini di antara zona relevan teratas)
-    top_supports = sorted(dedup_sup[:6], key=lambda x: (x["distance_points"], -x["ranking_priority"]))
-    top_resistances = sorted(dedup_res[:6], key=lambda x: (x["distance_points"], -x["ranking_priority"]))
+    top_supports = sorted(dedup_sup[:6], key=lambda x: (x["distance_points"], -x["ranking_priority"], str(x.get("zone_id") or "")))
+    top_resistances = sorted(dedup_res[:6], key=lambda x: (x["distance_points"], -x["ranking_priority"], str(x.get("zone_id") or "")))
 
     for idx_s, sz in enumerate(top_supports):
         sz["rank_label"] = f"S{idx_s + 1}"
     for idx_r, rz in enumerate(top_resistances):
         rz["rank_label"] = f"R{idx_r + 1}"
+
+    overlaps = []
+    for support in top_supports:
+        for resistance in top_resistances:
+            low = max(safe_float(support.get("low")), safe_float(resistance.get("low")))
+            high = min(safe_float(support.get("high")), safe_float(resistance.get("high")))
+            if low <= high:
+                overlaps.append({
+                    "support_id": support.get("zone_id"),
+                    "resistance_id": resistance.get("zone_id"),
+                    "support_label": support["rank_label"],
+                    "resistance_label": resistance["rank_label"],
+                    "support_timeframe": support.get("timeframe"),
+                    "resistance_timeframe": resistance.get("timeframe"),
+                    "low": low,
+                    "high": high,
+                    "entry_conflict": False,
+                })
 
     broken_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
     unconfirmed_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
@@ -235,6 +253,7 @@ def rank_zones(zones, current_price=None):
         "all_zones": enriched_all,
         "active_supports": top_supports,
         "active_resistances": top_resistances,
+        "overlaps": overlaps,
         "major_zones": major_zones,
         "historical_zones": historical_zones,
         "broken_zones": broken_zones,

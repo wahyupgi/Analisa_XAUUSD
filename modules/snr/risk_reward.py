@@ -12,7 +12,6 @@ Ketentuan Wajib (Section R):
 7. Jika SL struktural tidak tersedia, entry harus WAIT.
 8. Jika TP tidak memberikan RR yang memenuhi syarat, entry harus WAIT.
 """
-import math
 from modules.snr.config import get_snr_config
 from modules.snr.data_provider import safe_float
 
@@ -22,6 +21,19 @@ def round_to_tick(price, tick_size=0.01, digits=2):
     ts = max(1e-6, safe_float(tick_size, 0.01))
     steps = round(float(price) / ts)
     return round(steps * ts, int(digits))
+
+
+def opposing_risk_zones(ranked_zones, direction):
+    ranked = ranked_zones or {}
+    zone_type = "RESISTANCE" if direction == "BUY" else "SUPPORT"
+    fallback = ranked.get("active_resistances" if direction == "BUY" else "active_supports") or []
+    return [
+        zone for zone in (ranked.get("all_zones") or fallback)
+        if str(zone.get("zone_type", "")).upper() == zone_type
+        and str(zone.get("lifecycle_status", zone.get("status", "ACTIVE"))).upper() in ("ACTIVE", "TOUCHED", "SWEEP")
+        and zone.get("is_active") is not False
+        and zone.get("is_structurally_valid") is not False
+    ]
 
 
 def calculate_snr_risk_reward(
@@ -133,6 +145,21 @@ def calculate_snr_risk_reward(
 
     vol_buffer = max(min_buf_pts, ref_atr * buf_atr_mult)
 
+    effective_entry = round_to_tick(entry_ref + spread_pts if dir_up == "BUY" else entry_ref, tick_size, digits)
+    if any(
+        safe_float(oz.get("low"), 0.0) <= effective_entry <= safe_float(oz.get("high"), 0.0)
+        for oz in opposing_zones or []
+        if safe_float(oz.get("low"), 0.0) > 0
+    ):
+        return {
+            "checked": True, "valid": False, "status": "WAIT", "direction": dir_up,
+            "entry": round_to_tick(entry_ref, tick_size, digits), "effective_entry": effective_entry,
+            "sl": None, "tp1": None, "tp2": None, "rr_tp1": None, "rr_tp2": None,
+            "rr_display": "TP N/A", "structural_sl_available": False, "structural_tp_available": False,
+            "min_rr_required": min_rr, "spread_points": spread_pts, "tick_size": tick_size,
+            "tick_value": tick_value, "reason": "Entry berada di dalam zona struktural lawan.",
+        }
+
     if dir_up == "BUY":
         # Entry BUY dieksekusi pada Ask (entry_ref + spread)
         eff_entry = round_to_tick(entry_ref + spread_pts, tick_size, digits)
@@ -197,7 +224,7 @@ def calculate_snr_risk_reward(
         for oz in opposing_zones or []:
             oz_low = safe_float(oz.get("low"), 0.0)
             oz_high = safe_float(oz.get("high"), oz_low)
-            if oz_low > (eff_entry + spread_pts):
+            if oz_low > eff_entry:
                 opp_candidates.append((oz_low, oz_high, oz))
         opp_candidates.sort(key=lambda x: x[0])
 
@@ -225,15 +252,15 @@ def calculate_snr_risk_reward(
             }
 
         # TP1 adalah batas bawah Resistance relevan terdekat di atas entry
-        first_res_low, first_res_high, first_res_obj = opp_candidates[0]
+        first_res_low = opp_candidates[0][0]
         tp1_price = round_to_tick(first_res_low - spread_pts, tick_size, digits)
         if len(opp_candidates) >= 2:
             tp2_price = round_to_tick(opp_candidates[1][0] - spread_pts, tick_size, digits)
         else:
-            tp2_price = round_to_tick(first_res_high, tick_size, digits)
+            tp2_price = tp1_price
 
-        reward_tp1 = max(0.0, tp1_price - eff_entry)
-        reward_tp2 = max(reward_tp1, tp2_price - eff_entry)
+        reward_tp1 = tp1_price - eff_entry
+        reward_tp2 = tp2_price - eff_entry
 
     else:  # SELL
         # Entry SELL dieksekusi pada Bid (entry_ref), namun penutupan SL/TP menggunakan Ask (+ spread)
@@ -299,7 +326,7 @@ def calculate_snr_risk_reward(
         for oz in opposing_zones or []:
             oz_low = safe_float(oz.get("low"), 0.0)
             oz_high = safe_float(oz.get("high"), oz_low)
-            if oz_high < (eff_entry - spread_pts):
+            if 0 < oz_high < eff_entry:
                 opp_candidates.append((oz_high, oz_low, oz))
         opp_candidates.sort(key=lambda x: x[0], reverse=True)
 
@@ -326,15 +353,38 @@ def calculate_snr_risk_reward(
                 "reason": "Zona Support struktural berikutnya untuk Take Profit SELL tidak tersedia.",
             }
 
-        first_sup_high, first_sup_low, first_sup_obj = opp_candidates[0]
+        first_sup_high = opp_candidates[0][0]
         tp1_price = round_to_tick(first_sup_high + spread_pts, tick_size, digits)
         if len(opp_candidates) >= 2:
             tp2_price = round_to_tick(opp_candidates[1][0] + spread_pts, tick_size, digits)
         else:
-            tp2_price = round_to_tick(first_sup_low, tick_size, digits)
+            tp2_price = tp1_price
 
-        reward_tp1 = max(0.0, eff_entry - tp1_price)
-        reward_tp2 = max(reward_tp1, eff_entry - tp2_price)
+        reward_tp1 = eff_entry - tp1_price
+        reward_tp2 = eff_entry - tp2_price
+
+    stops_level = spec.get("stops_level")
+    min_stop = max(0.0, safe_float(stops_level, 0.0))
+    exit_quote = eff_entry - spread_pts if dir_up == "BUY" else eff_entry + spread_pts
+    stop_distance = exit_quote - sl_price if dir_up == "BUY" else sl_price - exit_quote
+    target_distance = tp1_price - exit_quote if dir_up == "BUY" else exit_quote - tp1_price
+    if reward_tp1 <= 0 or tp1_price <= 0 or tp2_price <= 0 or stop_distance < min_stop or target_distance < min_stop:
+        reason = (
+            "Target struktural tidak searah atau tidak valid setelah pembulatan."
+            if reward_tp1 <= 0 or tp1_price <= 0 or tp2_price <= 0
+            else "Jarak SL atau TP kurang dari batas stop broker."
+        )
+        return {
+            "checked": True, "valid": False, "status": "WAIT", "direction": dir_up,
+            "entry": round_to_tick(entry_ref, tick_size, digits), "effective_entry": eff_entry,
+            "sl": sl_price, "tp1": tp1_price, "tp2": tp2_price,
+            "rr_tp1": None, "rr_tp2": None, "rr_display": "LEVELS INVALID",
+            "structural_sl_available": stop_distance >= min_stop,
+            "structural_tp_available": reward_tp1 > 0 and tp1_price > 0 and target_distance >= min_stop,
+            "min_rr_required": min_rr, "spread_points": spread_pts,
+            "tick_size": tick_size, "tick_value": tick_value,
+            "reason": reason,
+        }
 
     rr_tp1 = round(reward_tp1 / max(1e-6, risk_pts), 2)
     rr_tp2 = round(reward_tp2 / max(1e-6, risk_pts), 2)
@@ -344,7 +394,7 @@ def calculate_snr_risk_reward(
     risk_usd_1lot = round(risk_ticks * tick_value, 2)
     reward_usd_1lot = round(reward_ticks_tp1 * tick_value, 2)
 
-    rr_ok = rr_tp1 >= min_rr
+    rr_ok = reward_tp1 / risk_pts >= min_rr
     status_rr = "VALID" if rr_ok else "WAIT"
     reason_rr = (
         f"RR memenuhi syarat (1:{rr_tp1:.2f} >= 1:{min_rr:.2f}, SL={sl_price:.2f}, TP1={tp1_price:.2f})."
@@ -355,6 +405,7 @@ def calculate_snr_risk_reward(
     return {
         "checked": True,
         "valid": bool(rr_ok),
+        "rr_failed": not rr_ok,
         "status": status_rr,
         "direction": dir_up,
         "entry": round_to_tick(entry_ref, tick_size, digits),

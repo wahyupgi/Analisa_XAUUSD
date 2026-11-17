@@ -61,6 +61,26 @@ def safe_float(val, default=0.0):
         return float(default)
 
 
+def zone_confirmation_start(zone, frame):
+    """First candle opening after the zone's structural confirmation candle closed."""
+    confirmed_time = zone.get("confirmed_time")
+    tf = str(zone.get("timeframe", "")).upper()
+    minutes = {"M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240}.get(tf)
+    if not confirmed_time or minutes is None:
+        return len(frame)
+    confirmed = pd.to_datetime(confirmed_time, errors="coerce", utc=True)
+    times = pd.to_datetime(frame["Time"], errors="coerce", utc=True)
+    if pd.isna(confirmed) or times.isna().any():
+        return len(frame)
+    zone_tz = str(zone.get("time_tz") or frame.attrs.get("time_tz", "WIB")).upper()
+    frame_tz = str(frame.attrs.get("time_tz", "WIB")).upper()
+    if pd.Timestamp(confirmed_time).tzinfo is None and zone_tz != "UTC":
+        confirmed -= pd.Timedelta(hours=7)
+    if len(frame) and pd.Timestamp(frame["Time"].iloc[0]).tzinfo is None and frame_tz != "UTC":
+        times = times - pd.Timedelta(hours=7)
+    return int(times.searchsorted(confirmed + pd.Timedelta(minutes=minutes), side="left"))
+
+
 def compute_atr14_series(df, period=14):
     """Menghitung seri ATR(14) secara independen tanpa bergantung pada modul SMC."""
     high = pd.to_numeric(df["High"], errors="coerce")
@@ -204,9 +224,7 @@ def prepare_snr_frame(df, has_unclosed_last_bar=False):
     else:
         work["ATR14"] = pd.to_numeric(work["ATR14"], errors="coerce")
         if work["ATR14"].isna().any():
-            work["ATR14"] = work["ATR14"].bfill().ffill()
-            if work["ATR14"].isna().any():
-                work["ATR14"] = compute_atr14_series(work, period=14)
+            work["ATR14"] = compute_atr14_series(work, period=14)
 
     # Identifikasi ketersediaan Tick Volume secara jujur (jangan mengarang volume)
     vol_col = None
@@ -245,6 +263,8 @@ def get_symbol_spec(symbol=None, tick=None, config=None):
     tick_value = safe_float(risk_cfg.get("default_tick_value", 1.0), 1.0)
     contract_size = safe_float(risk_cfg.get("default_contract_size", 100.0), 100.0)
     spread_points = safe_float(risk_cfg.get("default_spread_points", 0.25), 0.25)
+    stops_level = None
+    tick_size_verified = False
     source = "CONFIG_DEFAULT"
 
     if mt5 is not None:
@@ -257,9 +277,13 @@ def get_symbol_spec(symbol=None, tick=None, config=None):
                 p_val = safe_float(getattr(info, "point", 0.0), 0.0)
                 if p_val > 0:
                     point = p_val
+                raw_stops = getattr(info, "trade_stops_level", None)
+                if p_val > 0 and raw_stops is not None and safe_float(raw_stops, -1.0) >= 0:
+                    stops_level = safe_float(raw_stops) * point
                 ts_val = safe_float(getattr(info, "trade_tick_size", 0.0), 0.0)
                 if ts_val > 0:
                     tick_size = ts_val
+                    tick_size_verified = True
                 tv_val = safe_float(getattr(info, "trade_tick_value", 0.0), 0.0)
                 if tv_val > 0:
                     tick_value = tv_val
@@ -284,9 +308,11 @@ def get_symbol_spec(symbol=None, tick=None, config=None):
         "digits": digits,
         "point": point,
         "tick_size": tick_size,
+        "tick_size_verified": tick_size_verified,
         "tick_value": tick_value,
         "contract_size": contract_size,
         "spread_points": spread_points,
+        "stops_level": stops_level,
         "source": source,
     }
 
@@ -395,6 +421,7 @@ def _fetch_mt5_historical_candles(symbol, tf_name, bars):
                             "tick_volume": "Volume",
                         }
                     )
+                    df_res.attrs["time_tz"] = "UTC"
                     break
             except Exception:
                 continue
@@ -814,6 +841,10 @@ def validate_snr_data_freshness(
                         stale_tfs.append(tf)
                         tick_stale = True
                         stale_msg = stale_msg or f"Tick lebih lama dari candle {tf} terakhir ({abs(age_min):.0f} menit; stale tick)"
+                    elif mkt_st == "OPEN" and 0 <= age_min < tf_min:
+                        stale_tfs.append(tf)
+                        candle_stale = True
+                        stale_msg = stale_msg or f"Candle {tf} terakhir belum dapat dipastikan tertutup."
                     elif age_min > tf_min * 3 + 5:
                         stale_tfs.append(tf)
                         candle_stale = True
@@ -931,6 +962,7 @@ def fetch_snr_market_data(
     # Ambil informasi harga bid/ask/mid
     bid = 0.0
     ask = 0.0
+    quote_valid = False
     time_label = "SNAPSHOT"
     server_time = None
     snapshot_time_wib = None
@@ -939,6 +971,7 @@ def fetch_snr_market_data(
     if isinstance(snapshot, dict):
         bid = safe_float(snapshot.get("bid"), 0.0)
         ask = safe_float(snapshot.get("ask"), 0.0)
+        quote_valid = bid > 0 and ask >= bid
         snap_price_override = safe_float(snapshot.get("snapshot_price") or snapshot.get("current_price") or snapshot.get("mid"), 0.0)
         if bid <= 0:
             bid = snap_price_override
@@ -950,6 +983,7 @@ def fetch_snr_market_data(
     if tick is not None:
         t_bid = safe_float(getattr(tick, "bid", None) if not isinstance(tick, dict) else tick.get("bid"), 0.0)
         t_ask = safe_float(getattr(tick, "ask", None) if not isinstance(tick, dict) else tick.get("ask"), 0.0)
+        quote_valid = t_bid > 0 and t_ask >= t_bid
         if t_bid > 0:
             bid = t_bid
         if t_ask > 0:
@@ -958,7 +992,7 @@ def fetch_snr_market_data(
         if t_time and t_time > 0:
             snapshot_time_wib = snapshot_time_wib or format_wib_timestamp(t_time, default_now=True)
             if server_time is None:
-                server_time = pd.Timestamp(int(t_time), unit="s")
+                server_time = pd.Timestamp(int(t_time), unit="s", tz="UTC")
         time_label = "MT5 LIVE"
     elif bid <= 0 and live and mt5_ready and mt5 is not None and not has_snapshot:
         for sym_tick in (sym, DEFAULT_APP_SYMBOL, "XAUUSDc", "XAUUSD"):
@@ -969,12 +1003,13 @@ def fetch_snr_market_data(
                 if live_tick is not None and safe_float(getattr(live_tick, "bid", 0.0), 0.0) > 0:
                     bid = safe_float(getattr(live_tick, "bid", 0.0), 0.0)
                     ask = safe_float(getattr(live_tick, "ask", 0.0), 0.0)
+                    quote_valid = bid > 0 and ask >= bid
                     tick = live_tick
                     t_time = getattr(live_tick, "time", 0)
                     if t_time and t_time > 0:
                         snapshot_time_wib = snapshot_time_wib or format_wib_timestamp(t_time, default_now=True)
                         if server_time is None:
-                            server_time = pd.Timestamp(int(t_time), unit="s")
+                            server_time = pd.Timestamp(int(t_time), unit="s", tz="UTC")
                     time_label = "MT5 LIVE"
                     break
             except Exception:
@@ -1021,6 +1056,7 @@ def fetch_snr_market_data(
                 server_time = last_candle
 
     spec = get_symbol_spec(symbol=sym, tick=tick if mkt_status == "OPEN" else None, config=cfg)
+    spec["quote_valid"] = quote_valid and mkt_status == "OPEN"
     if ask <= 0 and bid > 0:
         ask = round(bid + spec["spread_points"], spec["digits"])
     spread = round(max(0.0, ask - bid), max(2, spec["digits"])) if (bid > 0 and ask > 0) else spec["spread_points"]
@@ -1032,6 +1068,8 @@ def fetch_snr_market_data(
         if snap_sp >= 0 and (tick is None):
             spread = round(snap_sp, max(2, spec["digits"]))
             spec["spread_points"] = spread
+            if quote_valid and abs(snap_sp - (ask - bid)) > 0.5 * (10 ** -spec["digits"]) + 1e-9:
+                spec["quote_valid"] = False
 
     conn_status = (
         str(snapshot.get("connection_status")).upper()

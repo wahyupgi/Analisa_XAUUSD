@@ -163,8 +163,16 @@ def _build_zone_from_cluster(cluster_items, timeframe, zone_type, zone_cfg):
 
     formation_index = min(int(x.get("formation_index", 0)) for x in cluster_items)
     confirmed_index = max(int(x.get("confirmed_index", formation_index)) for x in cluster_items)
-    formation_time = cluster_items[0].get("formation_time")
-    confirmed_time = cluster_items[-1].get("confirmed_time")
+    confirmed_item = max(cluster_items, key=lambda x: int(x.get("confirmed_index", 0)))
+    # Identitas mengikuti pivot tertua; batas zona bergeser tiap siklus karena seed ATR window rolling.
+    anchor_item = min(cluster_items, key=lambda x: (int(x.get("formation_index", 0)), float(x.get("low", 0.0))))
+    anchor_swing = (anchor_item.get("source_swings") or [{}])[0]
+    anchor_price = round(safe_float(
+        anchor_swing.get("price"),
+        anchor_item["high"] if z_type == "RESISTANCE" else anchor_item["low"],
+    ), 2)
+    formation_time = anchor_item.get("formation_time")
+    confirmed_time = confirmed_item.get("confirmed_time")
 
     has_major = any(x.get("swing_class") == "MAJOR" for x in cluster_items)
     swing_class = "MAJOR" if (has_major or len(source_swings) >= 2) else "MINOR"
@@ -190,9 +198,9 @@ def _build_zone_from_cluster(cluster_items, timeframe, zone_type, zone_cfg):
     is_broken = str(breakout_history).startswith("BROKEN")
 
     # Identitas zona stabil selama struktur pembentuknya tetap
-    low_tag = int(round(z_low * 100))
-    high_tag = int(round(z_high * 100))
-    zone_id = f"SNR_{tf}_{z_type[:3]}_{formation_index}_{low_tag}_{high_tag}"
+    anchor_tag = int(round(anchor_price * 100))
+    formation_identity = str(formation_time).replace(" ", "T") if formation_time else str(formation_index)
+    zone_id = f"SNR_{tf}_{z_type[:3]}_{formation_identity}_{anchor_tag}"
 
     return {
         "zone_id": zone_id,
@@ -209,6 +217,7 @@ def _build_zone_from_cluster(cluster_items, timeframe, zone_type, zone_cfg):
         "clustered_candidate_count": len(cluster_items),
         "formation_index": int(formation_index),
         "formation_time": formation_time,
+        "anchor_price": anchor_price,
         "confirmed_index": int(confirmed_index),
         "confirmed_time": confirmed_time,
         "swing_class": swing_class,

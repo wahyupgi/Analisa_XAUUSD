@@ -40,6 +40,7 @@ from modules.config import (
 from modules.utils import _catat_error, WIB_TZ, get_current_wib, to_wib_datetime, format_wib_timestamp
 from modules.mt5_conn import ambil_data, pastikan_mt5_aktif, tambah_indikator
 from modules.trend_following import (
+    _snr_frames_signature,
     assess_m30_condition,
     evaluate_h1_trend_confirmation,
     evaluate_h4_primary_trend,
@@ -109,6 +110,7 @@ class Zone:
     rejection_reason: str
     ob_candle_time: Any = None
     bos_candle_time: Any = None
+    bos_timeframe: str = ""
     sl_recommended: float = 0.0
     tp1_recommended: float = 0.0         # estimasi kasar; TP struktural dihitung di pipeline keputusan
     tp2_recommended: float = 0.0
@@ -497,7 +499,7 @@ def detect_order_blocks(df, events, fvgs, sweeps, timeframe, max_events: int = 2
             displacement_strength=round(float(disp), 2), freshness=fresh, touch_count=touches,
             liquidity_sweep_status=sweep_status, invalidation_price=round(ob_lo if bull else ob_hi, 2),
             is_valid=not reasons, rejection_reason="; ".join(reasons), ob_candle_time=idx[ob_idx],
-            bos_candle_time=idx[k], sl_recommended=sl, tp1_recommended=tp1, tp2_recommended=tp2,
+            bos_candle_time=idx[k], bos_timeframe=timeframe, sl_recommended=sl, tp1_recommended=tp1, tp2_recommended=tp2,
             audit=(["OB lolos seluruh hard validation"] if not reasons else list(reasons)),
         )
         (ok_list if not reasons else bad_list).append(z)
@@ -774,8 +776,10 @@ def merge_overlapping_zones(zones: List[Zone]) -> List[Zone]:
         mid = round((lo + hi) / 2.0, 2)
         merged_fresh = max(last.freshness, z.freshness, key=lambda f: order.get(f, 9))
         merged_valid = (merged_fresh not in ("MITIGATED", "INVALIDATED")) and bool(last.is_valid or z.is_valid)
+        constituents = sorted({*last.merged_from, *z.merged_from, last.zone_id, z.zone_id})
+        identity = hashlib.sha256("|".join(constituents).encode("utf-8")).hexdigest()[:16]
         out[merged_idx] = Zone(
-            zone_id=f"ZONE_{'+'.join(tfs)}_{last.zone_type}_{int(mid)}", symbol=last.symbol,
+            zone_id=f"ZONE_{'+'.join(tfs)}_{last.zone_type}_{identity}", symbol=last.symbol,
             timeframe="+".join(tfs), zone_type=last.zone_type, price_low=round(lo, 2), price_high=round(hi, 2),
             midpoint=mid, score=best.score, grade=best.grade, origin_bos=best.origin_bos,
             fvg_confirmation=best.fvg_confirmation or last.fvg_confirmation or z.fvg_confirmation,
@@ -787,10 +791,11 @@ def merge_overlapping_zones(zones: List[Zone]) -> List[Zone]:
             is_valid=merged_valid,
             rejection_reason="" if merged_valid else (last.rejection_reason or z.rejection_reason or f"Zona {merged_fresh}"),
             ob_candle_time=best.ob_candle_time, bos_candle_time=best.bos_candle_time,
+            bos_timeframe=best.bos_timeframe or best.timeframe,
             sl_recommended=min(last.sl_recommended, z.sl_recommended) if demand else max(last.sl_recommended, z.sl_recommended),
             tp1_recommended=best.tp1_recommended, tp2_recommended=best.tp2_recommended,
             score_breakdown=best.score_breakdown,
-            merged_from=sorted({*last.merged_from, *z.merged_from, last.zone_id, z.zone_id}),
+            merged_from=constituents,
             htf_alignment=best.htf_alignment, audit=best.audit + [f"Digabung dari {last.zone_id} & {z.zone_id}"],
             status=getattr(best, "status", "RADAR") if merged_valid else "INVALIDATED",
             priority_score=getattr(best, "priority_score", 0.0),
@@ -1216,9 +1221,8 @@ def _align_timestamps_for_diff(ts_a: pd.Timestamp, ts_b: pd.Timestamp, b_tz_hint
         return ts_a, ts_b
     if a_tz and not b_tz:
         try:
-            if str(b_tz_hint or "WIB").upper() == "UTC":
-                return ts_a, ts_b.tz_localize("UTC")
-            return ts_a.tz_localize(None), ts_b
+            tz = "UTC" if str(b_tz_hint or "WIB").upper() == "UTC" else "Asia/Jakarta"
+            return ts_a, ts_b.tz_localize(tz)
         except Exception:
             return ts_a, ts_b
     try:
@@ -1279,7 +1283,7 @@ def _separate_forming_candles(
                 f_df = df[forming_mask]
                 last_f = f_df.iloc[-1]
                 forming_candles[tf] = {
-                    "time": format_wib_timestamp(_get_df_last_timestamp(f_df), default_now=False),
+                    "time": format_wib_timestamp(_get_df_last_timestamp(f_df), default_now=False, source_tz=src_tz),
                     "open": float(last_f["Open"]),
                     "high": float(last_f["High"]),
                     "low": float(last_f["Low"]),
@@ -1297,7 +1301,7 @@ def _separate_forming_candles(
         if attrs.get("is_closed") is False or attrs.get("has_unclosed_last_bar") is True:
             last_f = df.iloc[-1]
             forming_candles[tf] = {
-                "time": format_wib_timestamp(_get_df_last_timestamp(df), default_now=False),
+                "time": format_wib_timestamp(_get_df_last_timestamp(df), default_now=False, source_tz=src_tz),
                 "open": float(last_f["Open"]),
                 "high": float(last_f["High"]),
                 "low": float(last_f["Low"]),
@@ -1312,11 +1316,11 @@ def _separate_forming_candles(
             last_ts = _get_df_last_timestamp(df)
             if last_ts is not None:
                 try:
-                    srv_ts, lts = _align_timestamps_for_diff(pd.Timestamp(server_time), last_ts)
+                    srv_ts, lts = _align_timestamps_for_diff(pd.Timestamp(server_time), last_ts, b_tz_hint=src_tz)
                     age_min = (srv_ts - lts).total_seconds() / 60.0
                     if 0.0 <= age_min < float(TF_MINUTES[tf]):
                         forming_candles[tf] = {
-                            "time": format_wib_timestamp(last_ts, default_now=False),
+                            "time": format_wib_timestamp(last_ts, default_now=False, source_tz=src_tz),
                             "age_minutes": round(age_min, 2),
                             "is_closed": True,
                             "clock_in_bar": True,
@@ -1558,6 +1562,9 @@ def _live_context(symbol: str = SYMBOL, tick: Any = None) -> Dict[str, Any]:
                     "snapshot_price": mid,
                     "snapshot_time": tick_time,
                     "tick_time": tick_time,
+                    "tick_time_msc": int(getattr(tick, "time_msc", 0) or 0),
+                    "tick_bid_raw": b_val,
+                    "tick_ask_raw": a_val,
                     "tick_age": tick_age,
                     "server_time": srv_ts,
                     "price_source": f"MT5 Live Tick (Bid: {bid:.2f} | Ask: {ask:.2f} | Mid: {mid:.2f} | Spread: {spread:.2f} pt)",
@@ -1905,6 +1912,9 @@ def create_market_snapshot(
         "snapshot_price": snap_price,
         "snapshot_time": snap_time,
         "tick_time": tick_time,
+        "tick_time_msc": lc_snap.get("tick_time_msc") if use_live and isinstance(lc_snap, dict) else None,
+        "tick_bid_raw": lc_snap.get("tick_bid_raw") if use_live and isinstance(lc_snap, dict) else None,
+        "tick_ask_raw": lc_snap.get("tick_ask_raw") if use_live and isinstance(lc_snap, dict) else None,
         "tick_age": tick_age,
         "server_time": server_time,
         "price_source": price_source,
@@ -2997,7 +3007,8 @@ def prioritize_radar_zones(
         h_eval = evaluate_zone_hybrid_eligibility(
             zd, current_price, frames=frames, htf_bias=htf_bias,
             h1_struct=h1_structure, m30_status=m30_status,
-            m5_stages=m5_stages, server_time=server_time, atr=atr_val,
+            m5_stages=(m5_stages if m5_stages and m5_stages.get("_zone_id") and m5_stages["_zone_id"] == zd.get("zone_id") else None),
+            server_time=server_time, atr=atr_val,
             bid=bid, ask=ask
         )
         # Jika zona tidak memenuhi kategori High/Medium/Low tetapi memenuhi kriteria pending independen,
@@ -3962,9 +3973,10 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
     out["data_source_mode"] = "LIVE_SNAPSHOT" if isinstance(snapshot, dict) else "LIVE_SCAN"
 
     _ck_snap = snapshot.get("snapshot_id", "") if isinstance(snapshot, dict) else ""
-    ck = _sig([(tf, len(frames[tf]), str(_get_df_last_timestamp(frames[tf]) or frames[tf].index[-1]), float(frames[tf]["Close"].iloc[-1]))
-               for tf in ("H4", "H1", "M30", "M5") if frames.get(tf) is not None and len(frames[tf])],
-              round(float(snapshot_price), 1), _ck_snap, eff_mkt_status, fresh_info["status"])
+    ck = _sig(
+        _snr_frames_signature(frames), float(snapshot_price), bid, ask, spread, tick_time,
+        _ck_snap, eff_mkt_status, fresh_info["status"],
+    )
     if _SCAN_CACHE["key"] == ck and time.time() - _SCAN_CACHE["ts"] < SCAN_CACHE_TTL:
         cached = dict(_SCAN_CACHE["data"])
         cached["is_cached"] = True
@@ -4669,7 +4681,10 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         last_m5_ts = _get_df_last_timestamp(df_m5)
         if last_m5_ts is not None:
             try:
-                srv_al, m5_al = _align_timestamps_for_diff(pd.Timestamp(server_time), last_m5_ts)
+                srv_al, m5_al = _align_timestamps_for_diff(
+                    pd.Timestamp(server_time), last_m5_ts,
+                    b_tz_hint=str(df_m5.attrs.get("time_tz", "WIB")),
+                )
                 diff_sec = (srv_al - m5_al).total_seconds()
                 if diff_sec < 5 * 60 - 1e-6:
                     stages["zone_validation"] = {"status": "WAIT", "msg": "Candle terakhir M5 belum selesai (masih berjalan)"}
@@ -4704,11 +4719,28 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     # 2. Pengecekan apakah harga mencapai atau memasuki zona entry
     touched = False
     touch_indices = []
+    origin_close = None
+    if zone.bos_candle_time:
+        origin_tf = str(zone.bos_timeframe or zone.timeframe).upper()
+        origin_frame = (htf_frames or {}).get(origin_tf)
+        origin_tz = str((getattr(origin_frame, "attrs", {}) or {}).get("time_tz", "WIB"))
+        origin_time = to_wib_datetime(zone.bos_candle_time, source_tz=origin_tz)
+        duration = {"M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240}.get(origin_tf)
+        if origin_time is None or duration is None:
+            stages["zone_validation"] = {"status": "DATA_INCOMPLETE", "msg": "Waktu konfirmasi zona tidak valid."}
+            W.append(stages["zone_validation"]["msg"])
+            return res
+        origin_close = origin_time + timedelta(minutes=duration)
+    m5_tz = str((getattr(d5, "attrs", {}) or {}).get("time_tz", "WIB"))
     for x in range(max(0, n5 - M5_ZONE_TOUCH_LOOKBACK), n5):
+        candle_time = to_wib_datetime(d5.index[x], source_tz=m5_tz)
+        if origin_close is not None and (candle_time is None or candle_time < origin_close):
+            continue
         if (demand and L[x] <= hi and H[x] >= lo) or ((not demand) and H[x] >= lo and L[x] <= hi):
             touched = True
             touch_indices.append(x)
-    if not touched and (lo <= price <= hi):
+    live_touch_only = not touched and lo <= price <= hi
+    if live_touch_only:
         touched = True
         touch_indices.append(n5 - 1)
 
@@ -4717,7 +4749,14 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         W.append(f"Harga belum mencapai atau menyentuh zona entry {lo:.2f}-{hi:.2f}")
         return res
 
-    first_touch_k = touch_indices[0] if touch_indices else 0
+    if live_touch_only or (lo <= price <= hi and touch_indices[-1] != n5 - 1):
+        first_touch_k = n5
+    else:
+        first_touch_k = touch_indices[-1]
+        for previous, current in zip(reversed(touch_indices[:-1]), reversed(touch_indices[1:])):
+            if current - previous != 1:
+                break
+            first_touch_k = previous
     dist = 0.0 if lo <= price <= hi else (lo - price if price < lo else price - hi)
     approach = max(3.0, 1.5 * atr5)
     if dist > approach:
@@ -4746,7 +4785,7 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     need_sweep = True if require_sweep is None else require_sweep
     relevant_sweeps = []
     for s in sweeps:
-        if s["type"] == want_sw and n5 - 1 - s["k"] <= 40:
+        if s["type"] == want_sw and first_touch_k <= s["k"] and n5 - 1 - s["k"] <= 40:
             is_rel, rel_msg = is_sweep_relevant_to_zone(s, zone, atr5)
             if is_rel:
                 relevant_sweeps.append(s)
@@ -4783,8 +4822,8 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     except Exception:
         pass
 
-    matching_events = [e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE and (k_sweep < 0 or e["k"] >= k_sweep)]
-    matching_cisd = [c for c in cl if c["arah"] == ("BULLISH" if demand else "BEARISH") and n5 - 1 - c["k"] <= M5_EVENT_MAX_AGE and (k_sweep < 0 or c["k"] >= k_sweep)]
+    matching_events = [e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE and e["k"] >= max(first_touch_k, k_sweep)]
+    matching_cisd = [c for c in cl if c["arah"] == ("BULLISH" if demand else "BEARISH") and n5 - 1 - c["k"] <= M5_EVENT_MAX_AGE and c["k"] >= max(first_touch_k, k_sweep)]
 
     if not matching_events and not matching_cisd:
         prior_events = [e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE]
@@ -4806,7 +4845,7 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     stages["structure_trigger"] = {"status": "CONFIRMED", "msg": m5["structure_event"], "k": k_ref}
 
     # 5. Displacement yang Mendukung Arah Entry
-    k0 = max(0, k_ref - 3)
+    k0 = max(first_touch_k, k_ref - 3)
     if demand:
         dir_bodies = [C[x] - O[x] for x in range(k0, min(n5, k_ref + 2)) if C[x] > O[x]]
     else:
@@ -4873,7 +4912,7 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     rr = round(reward / risk, 2) if risk > 0 else 0.0
     res["rr"] = rr
 
-    if reward <= 0 or rr < RR_MIN - 1e-9:
+    if reward <= 0 or reward / risk < RR_MIN - 1e-9:
         stages["risk_reward"] = {"status": "WAIT", "msg": f"R:R aktual ke TP1 struktural {rr:.2f} < 1:{RR_MIN:g}", "rr": rr}
         W.append(f"R:R aktual ke TP1 struktural {rr:.2f} < 1:{RR_MIN:g}")
         return res
@@ -5296,30 +5335,25 @@ def plan_pending_order(
 
     # 7. Take Profit Struktural & Risk/Reward
     targets = _structural_targets(frames or {}, getattr(zone, "zone_type", ""), entry) if frames else []
+    if not targets:
+        res["rejection_reason"] = "Tidak ada target likuiditas struktural H1/H4 searah transaksi"
+        return res
     buf = 0.3
     if demand:
-        if targets:
-            tp1 = round(targets[0] - buf, 2)
-            tp2 = round(targets[1] - buf, 2) if len(targets) > 1 else round(entry + 2.5 * risk_points, 2)
-        else:
-            tp1 = round(entry + max(RR_MIN, 2.0) * risk_points, 2)
-            tp2 = round(entry + 3.0 * risk_points, 2)
+        tp1 = round(targets[0] - buf, 2)
+        tp2 = round(targets[1] - buf, 2) if len(targets) > 1 else tp1
         reward_tp1 = round(tp1 - entry, 2)
         reward_tp2 = round(tp2 - entry, 2)
     else:
-        if targets:
-            tp1 = round(targets[0] + buf, 2)
-            tp2 = round(targets[1] + buf, 2) if len(targets) > 1 else round(entry - 2.5 * risk_points, 2)
-        else:
-            tp1 = round(entry - max(RR_MIN, 2.0) * risk_points, 2)
-            tp2 = round(entry - 3.0 * risk_points, 2)
+        tp1 = round(targets[0] + buf, 2)
+        tp2 = round(targets[1] + buf, 2) if len(targets) > 1 else tp1
         reward_tp1 = round(entry - tp1, 2)
         reward_tp2 = round(entry - tp2, 2)
 
     rr_tp1 = round(reward_tp1 / risk_points, 2) if risk_points > 0 else 0.0
     rr_tp2 = round(reward_tp2 / risk_points, 2) if risk_points > 0 else 0.0
 
-    if reward_tp1 <= 0 or rr_tp1 < RR_MIN - 1e-9:
+    if reward_tp1 <= 0 or reward_tp1 / risk_points < RR_MIN - 1e-9:
         res["status"] = "INVALID"
         res["early_pending_status"] = "INVALID"
         res["early_pending_rr"] = "FAILED"
@@ -5463,7 +5497,8 @@ def detect_early_setups(
 
         plan = plan_pending_order(
             z_obj, float(current_price), frames, h4_bias, m30_status, server_time,
-            created_at=prev_created_at, target_time=prev_expires_at
+            created_at=prev_created_at, target_time=prev_expires_at,
+            bid=scan.get("bid"), ask=scan.get("ask"),
         )
         if plan.get("valid"):
             valid_plans.append(plan)
@@ -5526,7 +5561,7 @@ class ZoneTracker:
                 z_hi = float(getattr(z_obj, "price_high", 0.0))
                 z_type_str = str(getattr(z_obj, "zone_type", "")).upper()
                 z_dir_str = "SELL" if z_type_str == "SUPPLY" else ("BUY" if z_type_str == "DEMAND" else "NONE")
-                z_stype_str = str(getattr(z_obj, "setup_type", "TREND_PULLBACK") or "TREND_PULLBACK")
+                z_stype_str = str((z.get("setup_type") if isinstance(z, dict) else getattr(z_obj, "setup_type", None)) or "TREND_PULLBACK")
                 self.tracked_zones[z_id] = {
                     "setup_id": f"{z_id}:{z_dir_str}:{z_stype_str}",
                     "zone_id": z_id,
@@ -5551,9 +5586,13 @@ class ZoneTracker:
                     "pending_plan": None,
                     "history": [{"status": "RADAR", "time": now_str, "reason": "Zona teridentifikasi sebagai RADAR oleh scanner"}],
                     "rejection_reason": "",
+                    "merged_from": list(z.get("merged_from") or []) if isinstance(z, dict) else list(getattr(z, "merged_from", []) or []),
+                    "monitor_only": bool(z.get("monitor_only")) if isinstance(z, dict) else False,
                 }
             else:
                 self.tracked_zones[z_id]["last_updated"] = now_str
+                if isinstance(z, dict) and z.get("merged_from"):
+                    self.tracked_zones[z_id]["merged_from"] = list(z["merged_from"])
                 if "setup_id" not in self.tracked_zones[z_id]:
                     z_type_str = str(self.tracked_zones[z_id].get("zone_type", "")).upper()
                     z_dir_str = "SELL" if z_type_str == "SUPPLY" else ("BUY" if z_type_str == "DEMAND" else "NONE")
@@ -5578,6 +5617,7 @@ class ZoneTracker:
 
             if is_expired and curr_st != "EXPIRED":
                 rec["status"] = "EXPIRED"
+                rec["lifecycle_status"] = "EXPIRED"
                 rec["pending_plan"] = None
                 rec["rejection_reason"] = f"Kedaluwarsa (batas waktu {exp_str})"
                 rec["history"].append({"status": "EXPIRED", "time": now_str, "reason": rec["rejection_reason"]})
@@ -5614,6 +5654,7 @@ class ZoneTracker:
 
             if inv_reason:
                 rec["status"] = "INVALIDATED"
+                rec["lifecycle_status"] = "INVALIDATED"
                 rec["pending_plan"] = None
                 rec["rejection_reason"] = inv_reason
                 rec["history"].append({"status": "INVALIDATED", "time": now_str, "reason": inv_reason})
@@ -5632,9 +5673,13 @@ class ZoneTracker:
             prev_plan = rec.get("pending_plan") or {}
             prev_c_at = prev_plan.get("created_at") or rec.get("first_detected")
             prev_e_at = prev_plan.get("expires_at") or rec.get("expires_at")
-            plan = plan_pending_order(
-                z_mock, current_price, frames, htf_bias, m30_status, server_time,
-                created_at=prev_c_at, target_time=prev_e_at
+            plan = (
+                {"valid": False, "rejection_reason": "Monitoring setup; bukan kandidat pending planner."}
+                if rec.get("monitor_only")
+                else plan_pending_order(
+                    z_mock, current_price, frames, htf_bias, m30_status, server_time,
+                    created_at=prev_c_at, target_time=prev_e_at
+                )
             )
             if plan.get("valid"):
                 rec["pending_plan"] = plan
@@ -5677,16 +5722,21 @@ class ZoneTracker:
                         new_alerts.append({"type": "APPROACHING", "zone_id": z_id, "msg": msg, "time": now_str})
 
             # E. Cek Conservative Confirmation (M5)
-            if conservative_dec and conservative_dec.get("status") == "VALID":
+            if conservative_dec:
                 c_zone = conservative_dec.get("zone") or {}
                 c_zid = c_zone.get("zone_id") if isinstance(c_zone, dict) else getattr(c_zone, "zone_id", None)
-                if c_zid == z_id and rec["status"] != "CONFIRMED":
+                if conservative_dec.get("status") == "VALID" and c_zid == z_id and rec["status"] != "CONFIRMED":
                     rec["status"] = "CONFIRMED"
+                    rec["lifecycle_status"] = "CONFIRMED"
                     rec["signal_status"] = str(conservative_dec.get("signal_status") or SIGNAL_STATUS_SIGNAL_CONFIRMED)
                     rec["setup_type"] = str(conservative_dec.get("setup_type") or "TREND_PULLBACK")
                     rec["history"].append({"status": "CONFIRMED", "time": now_str, "reason": "Konfirmasi M5 terpenuhi (Trend Following + SMC Confirmation)"})
                     msg = f"[ALERT] Setup terkonfirmasi di zona {z_id}! (Trigger M5 terverifikasi)"
                     new_alerts.append({"type": "CONFIRMED", "zone_id": z_id, "msg": msg, "time": now_str})
+                elif rec["status"] == "CONFIRMED" and (conservative_dec.get("status") != "VALID" or c_zid != z_id):
+                    rec["status"] = "ZONE_TOUCHED" if rec.get("touch_status") in ("IN_ZONE", "TOUCHED_PREVIOUSLY") else "RADAR"
+                    rec["lifecycle_status"] = rec["status"]
+                    rec["signal_status"] = SIGNAL_STATUS_WAITING_CONFIRMATION if rec["status"] == "ZONE_TOUCHED" else SIGNAL_STATUS_WAITING_PULLBACK
 
             if "signal_status" not in rec:
                 rec["signal_status"] = (
@@ -5864,11 +5914,33 @@ def _entry_audit(dec: Dict[str, Any]) -> Dict[str, Any]:
             "tp1": plan.get("tp1"), "tp2": plan.get("tp2"), "rr": plan.get("rr"), "alasan": dec["reasons"]}
 
 
+def _provisional_zone_plans(dec, price, frames, h4_bias, m30_status, server_time, bid=None, ask=None):
+    """Run the existing pending-order planner once per displayed zone so every command shows the same levels."""
+    plans: Dict[str, Dict[str, Any]] = {}
+    for zd in (dec.get("zone"), dec.get("primary_zone"), dec.get("nearest_valid_zone"), dec.get("next_radar_zone")):
+        zid = zd.get("zone_id") if isinstance(zd, dict) else None
+        if not zid or zid in plans:
+            continue
+        try:
+            plans[zid] = plan_pending_order(
+                _zone_from_dict(zd), float(price), frames, h4_bias, m30_status, server_time, bid=bid, ask=ask,
+            )
+        except Exception as exc:
+            _catat_error("provisional_zone_plan", exc)
+            plans[zid] = {"valid": False, "status": "WAIT", "rejection_reason": "PLAN ERROR"}
+    return plans
+
+
 def _decide(dec, frames, price, spread, news, server_time, live,
             snapshot: Optional[Dict[str, Any]] = None,
             scan_result: Optional[Dict[str, Any]] = None,
             market_status: Optional[str] = None):
     st = dec["stages"]
+    scan = None
+    ctx = {}
+    best_candidate_dict = None
+    winning_zdict = None
+    directional = []
 
     def _attach_early_and_tracker(dec_obj, scan_obj=None):
         try:
@@ -5881,46 +5953,90 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 return
             dec_obj["early_setup"] = detect_early_setups(frames=frames, current_price=eff_p, server_time=server_time, scan=scan_obj)
             tracker = get_zone_tracker(auto_save=False)
-            h4_b = ctx.get("H4") if ("ctx" in locals() and ctx) else None
-            m30_s = st.get("M30", {}).get("status")
-            zones_to_track = scan_obj.get("active_zones", []) if scan_obj else ([dec_obj["zone"]] if dec_obj.get("zone") else [])
-            tracker.update(zones_to_track, eff_p or 0.0, frames=frames, htf_bias=h4_b, m30_status=m30_s, server_time=server_time, conservative_dec=dec_obj)
+            zones_to_track = list(scan_obj.get("active_zones", [])) if scan_obj else []
+            decision_zone = dec_obj.get("zone") or {}
+            if decision_zone.get("zone_id") and not any(z.get("zone_id") == decision_zone["zone_id"] for z in zones_to_track):
+                zones_to_track.append({**decision_zone, "monitor_only": True})
             dec_obj["zone_tracker"] = tracker
+            if not isinstance(eff_p, (int, float)) or not math.isfinite(eff_p) or eff_p <= 0 or st.get("DATA", {}).get("ok") is False:
+                return
+            old_focus = next((rec for rec in tracker.tracked_zones.values() if rec.get("monitor_focus")), None)
+            tracker.update(zones_to_track, eff_p, frames=frames, htf_bias=None, m30_status=None, server_time=server_time, conservative_dec=dec_obj)
+            focus_id = (dec_obj.get("zone") or {}).get("zone_id")
+            focus_evaluated = bool(dec_obj.get("focus_selection_evaluated")) or bool(focus_id)
+            if old_focus and focus_evaluated and old_focus.get("zone_id") != focus_id:
+                old_status = str(old_focus.get("status", "RADAR")).upper()
+                old_id = old_focus.get("zone_id")
+                detected = next((z for z in zones_to_track if z.get("zone_id") == old_id), None)
+                if old_status in ("EXPIRED", "INVALIDATED"):
+                    reason = f"PREVIOUS ZONE {old_status}"
+                elif detected is None:
+                    new_zone = dec_obj.get("zone") or {}
+                    old_sources = set(old_focus.get("merged_from") or [old_id])
+                    new_sources = set(new_zone.get("merged_from") or [focus_id])
+                    reason = (
+                        "ZONE REBUILT; SETUP REVALIDATED"
+                        if old_sources.intersection(new_sources)
+                        else "PREVIOUS ZONE NOT DETECTED OR FILTERED"
+                    )
+                elif focus_id:
+                    reason = "HIGHER PRIORITY OR VALIDATED SETUP"
+                else:
+                    reason = "NO ACTIVE SETUP"
+                dec_obj["previous_focus"] = {
+                    "zone_id": old_id, "price_low": old_focus.get("price_low"),
+                    "price_high": old_focus.get("price_high"), "status": old_status,
+                    "timeframe": old_focus.get("timeframe"), "zone_type": old_focus.get("zone_type"),
+                    "grade": old_focus.get("grade"), "score": old_focus.get("score", 0.0),
+                }
+                dec_obj["focus_change_reason"] = reason
+            if focus_evaluated:
+                for rec in tracker.tracked_zones.values():
+                    rec["monitor_focus"] = rec.get("zone_id") == focus_id
+            if isinstance(live_snap, dict) and live_snap.get("live") is True:
+                tracker.save()
         except Exception as e_att:
             _catat_error("attach_early_tracker", e_att)
 
     def finish(status, reason):
         dec["status"] = status
+        if directional:
+            focus_id = (dec.get("zone") or {}).get("zone_id")
+            remaining = [z for z in directional if z.get("zone_id") != focus_id]
+            dec["next_radar_zone"] = min(
+                remaining,
+                key=lambda z: max(float(z["price_low"]) - price, price - float(z["price_high"]), 0.0),
+            ) if remaining else None
         if reason:
             dec["reasons"].append(reason)
         if status != "VALID":
             dec["plan"] = None
+            if dec.get("signal_status") == SIGNAL_STATUS_SIGNAL_CONFIRMED:
+                dec["signal_status"] = SIGNAL_STATUS_WAITING_CONFIRMATION
         for comp in ("zone_validation", "zone_touch", "liquidity_sweep", "structure_trigger", "displacement", "entry_validation", "risk_reward"):
             if comp not in st:
                 st[comp] = {"status": "NOT_CHECKED", "msg": "Belum diperiksa"}
 
         # Attach radar priority information
-        if "scan" in locals() and isinstance(scan, dict):
+        if isinstance(scan, dict) and isinstance(frames, dict) and isinstance(price, (int, float)) and math.isfinite(price) and price > 0:
             all_r = scan.get("radar_zones") or scan.get("active_zones", [])
-            h4_bias_val = ctx.get("H4", "NETRAL") if ("ctx" in locals() and ctx) else "NETRAL"
-            h1_struct_val = ctx.get("H1", "NETRAL") if ("ctx" in locals() and ctx) else "NETRAL"
-            atr_diag_dec = scan.get("atr_diagnostics") or extract_atr_diagnostics(frames if "frames" in locals() else None, preferred_tf="H1")
+            h4_bias_val = ctx.get("H4", "NETRAL")
+            h1_struct_val = ctx.get("H1", "NETRAL")
+            atr_diag_dec = scan.get("atr_diagnostics") or extract_atr_diagnostics(frames, preferred_tf="H1")
             ref_atr_val = atr_diag_dec.get("atr_value")
             dec["atr_diagnostics"] = atr_diag_dec
-            winning_cand = winning_zdict if ("winning_zdict" in locals() and status == "VALID") else None
-            cand_override = winning_zdict if ("winning_zdict" in locals() and winning_zdict) else (best_candidate_dict if "best_candidate_dict" in locals() else None)
+            winning_cand = winning_zdict if status == "VALID" else None
             prio = prioritize_radar_zones(
                 radar_zones=all_r,
                 current_price=float(price or 0.0),
                 htf_bias=h4_bias_val,
                 h1_structure=h1_struct_val,
                 atr=ref_atr_val,
-                m5_stages=st,
+                m5_stages={**st, "_zone_id": (dec.get("zone") or {}).get("zone_id")},
                 validated_entry_zone=winning_cand,
                 frames=frames,
                 m30_status=st.get("M30", {}).get("status", "CONFIRMED"),
                 server_time=server_time,
-                primary_target_override=cand_override,
                 bid=scan.get("bid"),
                 ask=scan.get("ask"),
                 snapshot_time=scan.get("snapshot_time"),
@@ -5936,15 +6052,12 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             dec["wait_breakdown"] = prio.get("wait_breakdown", {})
             dec["invalidated_zones"] = prio.get("invalidated_zones", [])
             dec["zone_count_reconciliation"] = prio.get("zone_count_reconciliation", {})
-            if status == "WAIT" and prio.get("dynamic_wait_reason"):
-                dyn_w = prio["dynamic_wait_reason"]
-                if dyn_w not in dec["reasons"]:
-                    dec["reasons"].insert(0, dyn_w)
-
+            dec["zone_plans"] = _provisional_zone_plans(
+                dec, price, frames, h4_bias_val, st.get("M30", {}).get("status", "CONFIRMED"), server_time,
+                bid=scan.get("bid"), ask=scan.get("ask"),
+            )
             # ENTRY VALIDATION SUMMARY (Sinkronkan zona yang dipantau dengan satu sumber data kandidat)
-            monitored_ref = (winning_zdict if ("winning_zdict" in locals() and winning_zdict) else
-                             (best_candidate_dict if "best_candidate_dict" in locals() else 
-                              (prio.get("primary_directional_zone") or (all_r[0] if all_r else None))))
+            monitored_ref = dec.get("zone")
             if monitored_ref:
                 z_lbl = f"{monitored_ref.get('timeframe', 'H1')} {monitored_ref.get('zone_type', '')} ({monitored_ref.get('price_low', 0.0):.2f} - {monitored_ref.get('price_high', 0.0):.2f})"
                 z_lo_val = float(monitored_ref.get("price_low", 0.0))
@@ -5974,17 +6087,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             else:
                 z_lbl = "NONE"
                 dec["monitored_zone_identity"] = None
-
-            if monitored_ref and monitored_ref.get("approach") not in ("TOUCHED", "ZONE_TOUCHED"):
-                if st.get("zone_touch", {}).get("status") in (None, "NOT_CHECKED", "WAIT"):
-                    st["zone_touch"] = {
-                        "status": "FAIL",
-                        "msg": (
-                            f"Harga belum menyentuh zona {monitored_ref.get('zone_type', '')} "
-                            f"({monitored_ref.get('price_low', 0.0):.2f}-{monitored_ref.get('price_high', 0.0):.2f}, "
-                            f"jarak {float(monitored_ref.get('distance') or 0.0):.2f} pt)"
-                        ),
-                    }
 
             conds_pass = []
             conds_fail = []
@@ -6026,7 +6128,25 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 "final_verdict": f"{dec.get('direction', '')} VALID" if status == "VALID" else status,
             }
 
-        _attach_early_and_tracker(dec, scan if ("scan" in locals() and isinstance(scan, dict)) else None)
+        _attach_early_and_tracker(dec, scan if isinstance(scan, dict) else None)
+        zone = dec.get("zone") or {}
+        identity = dec.get("monitored_zone_identity") or {}
+        zone_id = zone.get("zone_id")
+        pending_setup = (dec.get("early_setup") or {}).get("best_setup") or {}
+        dec["active_setup"] = {
+            **identity,
+            "zone_id": zone_id,
+            "snapshot_id": dec.get("snapshot_id"),
+            "validation_time": dec.get("snapshot_time") or dec.get("timestamp"),
+            "last_closed_m5": (dec.get("last_candle_times") or {}).get("M5"),
+            "zone_status": (st.get("zone_validation") or {}).get("status", "NOT_CHECKED"),
+            "touch_status": (st.get("zone_touch") or {}).get("status", "NOT_CHECKED"),
+            "trigger_status": (st.get("structure_trigger") or {}).get("status", "NOT_CHECKED"),
+            "entry_status": (st.get("entry_validation") or {}).get("status", "NOT_CHECKED"),
+            "pending_status": pending_setup.get("status", "WAIT") if zone_id and pending_setup.get("zone_id") == zone_id else "NOT_APPLICABLE",
+            "final_decision": dec.get("direction") if status == "VALID" else status,
+            "blocker": (dec.get("reasons") or [""])[0] if status != "VALID" else "",
+        }
         _audit("entry_decision", _entry_audit(dec), _sig(status, dec["reasons"], dec.get("direction")))
         return dec
 
@@ -6181,7 +6301,10 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 last_ts = _get_df_last_timestamp(df_tf)
                 if last_ts is not None:
                     try:
-                        st_al, last_al = _align_timestamps_for_diff(pd.Timestamp(server_time), last_ts)
+                        st_al, last_al = _align_timestamps_for_diff(
+                            pd.Timestamp(server_time), last_ts,
+                            b_tz_hint=str(df_tf.attrs.get("time_tz", "WIB")),
+                        )
                         diff = (st_al - last_al).total_seconds()
                         if 0 <= diff < tf_sec - 1e-6:
                             st["DATA"] = {"ok": False, "msg": f"Candle terakhir {tf} belum selesai (masih berjalan)"}
@@ -6289,6 +6412,13 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             explicit_h1_conflict=True,
             explicit_m30_conflict=bool(ctx.get("m30_conflict")),
         )
+        rev_id = (tf_rev.get("best_candidate") or {}).get("zone_id")
+        rev_record = (get_zone_tracker(auto_save=False).get_zone(rev_id) or {}) if rev_id else {}
+        rev_expiry = to_wib_datetime(rev_record.get("expires_at")) if rev_record.get("expires_at") else None
+        if rev_record.get("status") in ("INVALIDATED", "EXPIRED") or (
+            rev_expiry is not None and (to_wib_datetime(server_time) or get_current_wib()) > rev_expiry
+        ):
+            tf_rev["status"] = "WAIT"
         if tf_rev.get("status") == "VALID" and tf_rev.get("setup_type") == "REVERSAL" and tf_rev.get("plan"):
             bc = tf_rev["best_candidate"]
             plan_rev = tf_rev["plan"]
@@ -6304,7 +6434,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 "sl_recommended": float(plan_rev["sl"]),
                 "grade": bc.get("grade", "B"),
                 "score": float(bc.get("score", 74.0)),
-                "freshness": "FRESH",
                 "is_valid": True,
                 "setup_type": "REVERSAL",
             }
@@ -6367,6 +6496,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         "msg": m30_cond.get("msg") or m30_val.get("msg"),
     }
 
+    dec["focus_selection_evaluated"] = True
     cands = [z for z in scan["active_zones"] if z["zone_type"] == ztype]
     def _cand_sort(z: Dict[str, Any]) -> Tuple:
         rank = {"A+": 0, "A": 1, "B": 2}
@@ -6384,18 +6514,77 @@ def _decide(dec, frames, price, spread, news, server_time, live,
     best_candidate_dict = None
     best_candidate_zone = None
     if cands:
-        prio_existing = scan.get("radar_priority") or scan.get("prioritized")
-        prio_dir = prio_existing.get("primary_directional_zone") if prio_existing else None
-        target_match = None
-        if prio_dir:
-            target_match = next((z for z in cands if z.get("zone_id") == prio_dir.get("zone_id") or
-                                (abs(float(z.get("price_low", 0.0)) - float(prio_dir.get("price_low", 0.0))) < 1e-4 and
-                                 abs(float(z.get("price_high", 0.0)) - float(prio_dir.get("price_high", 0.0))) < 1e-4)), None)
-        if target_match:
-            best_candidate_dict = target_match
+        cands.sort(key=_cand_sort)
+        dec["primary_zone"] = cands[0]
+        tracker = get_zone_tracker(auto_save=False)
+        now = to_wib_datetime(server_time) or get_current_wib()
+
+        def _focus_eligible(z):
+            rec = tracker.get_zone(z.get("zone_id")) or {}
+            if rec.get("status") in ("INVALIDATED", "EXPIRED"):
+                return False
+            expires = to_wib_datetime(rec.get("expires_at")) if rec.get("expires_at") else None
+            if expires is not None and now > expires:
+                return False
+            inval = float(z.get("invalidation_price") or 0.0)
+            if inval and ((ztype == "DEMAND" and price < inval) or (ztype == "SUPPLY" and price > inval)):
+                return False
+            bos_t = pd.Timestamp(z["bos_candle_time"]) if z.get("bos_candle_time") else None
+            for tf in ("H1", "M30"):
+                df = frames[tf]
+                sub = df[df.index > bos_t] if bos_t is not None else df
+                closes = sub["Close"]
+                if inval and ((closes < inval).any() if ztype == "DEMAND" else (closes > inval).any()):
+                    return False
+            return True
+
+        eligible = [z for z in cands if _focus_eligible(z)]
+        def _distance(z):
+            return max(float(z["price_low"]) - price, price - float(z["price_high"]), 0.0)
+
+        directional = [
+            z for z in eligible
+            if (ztype == "SUPPLY" and float(z["price_high"]) >= price)
+            or (ztype == "DEMAND" and float(z["price_low"]) <= price)
+        ]
+        dec["nearest_valid_zone"] = min(directional, key=_distance) if directional else None
+        inside = [z for z in eligible if _distance(z) == 0]
+        old_focus = next((rec for rec in tracker.tracked_zones.values() if rec.get("monitor_focus")), None)
+        previous = next((z for z in eligible if (tracker.get_zone(z.get("zone_id")) or {}).get("monitor_focus")), None)
+        if not previous and old_focus and old_focus.get("status") not in ("INVALIDATED", "EXPIRED"):
+            expires = to_wib_datetime(old_focus.get("expires_at")) if old_focus.get("expires_at") else None
+            old_sources = set(old_focus.get("merged_from") or [old_focus.get("zone_id")])
+            matches = [
+                z for z in eligible
+                if (expires is None or now <= expires)
+                and old_focus.get("zone_type") == z.get("zone_type")
+                and old_sources.intersection(z.get("merged_from") or [z.get("zone_id")])
+                and min(float(old_focus["price_high"]), float(z["price_high"]))
+                >= max(float(old_focus["price_low"]), float(z["price_low"]))
+            ]
+            if len(matches) == 1:
+                previous = matches[0]
+        nearby = [z for z in eligible if _distance(z) <= ZONE_APPROACH_DISTANCE_POINTS]
+        previous_record = old_focus if previous and old_focus else {}
+        awaiting = bool(
+            previous
+            and previous_record.get("touch_status") in ("IN_ZONE", "TOUCHED_PREVIOUSLY")
+        )
+        if previous and (awaiting or _distance(previous) == 0):
+            best_candidate_dict = previous
+        elif inside:
+            best_candidate_dict = min(inside, key=_distance)
+        elif previous and _distance(previous) <= ZONE_APPROACH_DISTANCE_POINTS:
+            best_candidate_dict = previous
+        elif nearby:
+            best_candidate_dict = min(nearby, key=_distance)
+        remaining = [z for z in directional if z is not best_candidate_dict]
+        dec["next_radar_zone"] = min(remaining, key=_distance) if remaining else None
+        if best_candidate_dict:
+            cands = [best_candidate_dict] + [z for z in eligible if z is not best_candidate_dict]
         else:
-            cands.sort(key=_cand_sort)
-            best_candidate_dict = cands[0]
+            cands = eligible
+    if best_candidate_dict:
         best_candidate_zone = _zone_from_dict(best_candidate_dict)
         dec["zone"] = best_candidate_dict
 
@@ -6453,6 +6642,17 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         return finish("VALID", "")
 
     # Jalur 2: Multi-Timeframe Trend Following (Pullback FVG/SNR/OTE, Trend Continuation, Breakout Retest)
+    tracker_for_focus = get_zone_tracker(auto_save=False)
+    prior_tf_focus = next(
+        (rec for rec in tracker_for_focus.tracked_zones.values() if rec.get("monitor_focus") and rec.get("monitor_only")),
+        None,
+    )
+    prior_tf_expiry = to_wib_datetime(prior_tf_focus.get("expires_at")) if prior_tf_focus and prior_tf_focus.get("expires_at") else None
+    if prior_tf_focus and (
+        prior_tf_focus.get("status") in ("INVALIDATED", "EXPIRED")
+        or (prior_tf_expiry is not None and (to_wib_datetime(server_time) or get_current_wib()) > prior_tf_expiry)
+    ):
+        prior_tf_focus = None
     tf_res = evaluate_trend_following_setup(
         frames,
         float(price),
@@ -6461,13 +6661,27 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         news_blackout=news,
         explicit_h1_conflict=bool(ctx.get("has_conflict")),
         explicit_m30_conflict=bool(ctx.get("m30_conflict")),
+        preferred_zone_id=prior_tf_focus.get("zone_id") if prior_tf_focus else None,
     )
+    tf_candidate = tf_res.get("best_candidate") or {}
+    tf_id = tf_candidate.get("zone_id")
+    tf_record = (get_zone_tracker(auto_save=False).get_zone(tf_id) or {}) if tf_id else {}
+    tf_expiry = to_wib_datetime(tf_record.get("expires_at")) if tf_record.get("expires_at") else None
+    tf_blocked = (
+        tf_record.get("status") in ("INVALIDATED", "EXPIRED")
+        or (tf_expiry is not None and (to_wib_datetime(server_time) or get_current_wib()) > tf_expiry)
+    )
+    if tf_blocked:
+        tf_res["status"] = "WAIT"
+        tf_res["plan"] = None
+        tf_res["signal_status"] = SIGNAL_STATUS_NO_SETUP
+        tf_res["reasons"] = ["Zona trend-following INVALIDATED atau EXPIRED."]
     dec["trend_following"] = tf_res
     dec["snr_context"] = tf_res.get("snr")
-    dec["setup_type"] = tf_res.get("setup_type", "NONE")
-    dec["signal_status"] = tf_res.get("signal_status", SIGNAL_STATUS_NO_SETUP)
 
     if tf_res.get("status") == "VALID" and tf_res.get("plan"):
+        dec["setup_type"] = tf_res.get("setup_type", "NONE")
+        dec["signal_status"] = tf_res.get("signal_status", SIGNAL_STATUS_NO_SETUP)
         bc = tf_res["best_candidate"]
         tf_plan = tf_res["plan"]
         winning_zdict = {
@@ -6486,6 +6700,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             "is_valid": True,
             "setup_type": tf_res["setup_type"],
             "source_kind": bc.get("source_kind"),
+            "source_zone_id": bc.get("source_zone_id"),
         }
         winning_zone = _zone_from_dict(winning_zdict)
         valid_plan = tf_plan
@@ -6502,15 +6717,39 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         return finish("VALID", "")
 
     # Tidak ada setup VALID pada jalur 1 & 2 -> WAIT transparan dengan stage & alasan lengkap
-    if cands and best_candidate_dict and best_candidate_zone:
+    keep_tf_focus = bool(
+        prior_tf_focus and not tf_blocked
+        and tf_candidate.get("zone_id") == prior_tf_focus.get("zone_id")
+        and (
+            prior_tf_focus.get("touch_status") in ("IN_ZONE", "TOUCHED_PREVIOUSLY")
+            or max(float(tf_candidate["price_low"]) - price, price - float(tf_candidate["price_high"]), 0.0) <= ZONE_APPROACH_DISTANCE_POINTS
+        )
+    )
+    if cands and best_candidate_dict and best_candidate_zone and not keep_tf_focus:
         dec["zone"] = best_candidate_dict
+        dec["setup_type"] = "TREND_PULLBACK"
+        dec["signal_status"] = (
+            SIGNAL_STATUS_WAITING_CONFIRMATION
+            if st.get("zone_touch", {}).get("status") == "CONFIRMED"
+            else SIGNAL_STATUS_WAITING_PULLBACK
+        )
         dec["reasons"].extend(first_reasons)
         st["H4"] = {"ok": True, "msg": f"Bias H4 {h4}; zona {best_candidate_zone.grade} {best_candidate_zone.timeframe} {best_candidate_zone.zone_type} {best_candidate_zone.price_low:.2f}-{best_candidate_zone.price_high:.2f}"}
         st["M5"] = {"ok": False, "msg": "; ".join(first_reasons)}
     else:
+        dec["setup_type"] = tf_res.get("setup_type", "NONE")
+        dec["signal_status"] = tf_res.get("signal_status", SIGNAL_STATUS_NO_SETUP)
         tf_reasons = tf_res.get("reasons") or []
         wait_msg = tf_reasons[0] if tf_reasons else (scan.get("empty_reason") or f"Menunggu setup {direction} valid")
-        if tf_res.get("best_candidate"):
+        tf_touch = ((tf_res.get("m5") or {}).get("stages") or {}).get("zone_touch") or {}
+        tf_monitorable = bool(
+            tf_candidate and not tf_blocked and (
+                keep_tf_focus
+                or tf_touch.get("status") == "CONFIRMED"
+                or max(float(tf_candidate["price_low"]) - price, price - float(tf_candidate["price_high"]), 0.0) <= ZONE_APPROACH_DISTANCE_POINTS
+            )
+        )
+        if tf_monitorable:
             bc = tf_res["best_candidate"]
             dec["zone"] = {
                 "zone_id": bc.get("zone_id"),
@@ -6520,12 +6759,22 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 "price_high": float(bc["price_high"]),
                 "grade": bc.get("grade", "B"),
                 "score": float(bc.get("score", 70.0)),
-                "freshness": "FRESH",
                 "invalidation_price": float(bc.get("invalidation_price", bc["price_low"])),
                 "is_valid": True,
                 "setup_type": bc.get("setup_type"),
+                "source_kind": bc.get("source_kind"),
+                "source_zone_id": bc.get("source_zone_id"),
             }
-        tf_m5_st = (tf_res.get("m5") or {}).get("stages") or {}
+        else:
+            dec["zone"] = None
+            dec["setup_type"] = "NONE"
+            dec["signal_status"] = SIGNAL_STATUS_WAITING_PULLBACK
+            if tf_candidate and not tf_blocked and tf_touch.get("status") in ("WAIT", "FAIL"):
+                wait_msg = "WAIT_ZONE_APPROACH: Belum ada zona aktif yang berinteraksi dengan harga."
+                tf_reasons = [wait_msg]
+        tf_m5_st = ((tf_res.get("m5") or {}).get("stages") or {}) if tf_monitorable else {}
+        for component in ("zone_validation", "zone_touch", "liquidity_sweep", "structure_trigger", "displacement", "entry_validation", "risk_reward"):
+            st.pop(component, None)
         for k_st, v_st in tf_m5_st.items():
             st[k_st] = v_st
         dec["reasons"].extend(tf_reasons if tf_reasons else [wait_msg])
@@ -6712,8 +6961,9 @@ def format_diagnostic_report(scan: Optional[Dict[str, Any]] = None) -> str:
         r1_txt = f"{r1_d.get('low', 0.0):.2f}-{r1_d.get('high', 0.0):.2f} (Grade {r1_d.get('grade', '-')})" if isinstance(r1_d, dict) else "NONE"
         lines.append(f"- Support / Resist : S1={s1_txt} | R1={r1_txt}")
         lines.append(
-            f"- Price Action SNR : Breakout={snr_ctx.get('breakout_code', 'NO_BREAKOUT')} | "
-            f"Retest={snr_ctx.get('retest_code', 'NO_RETEST')} | Rejection={snr_ctx.get('rejection_code', 'NONE')}"
+            f"- Price Action SNR : Breakout={(snr_ctx.get('price_action') or {}).get('breakout_summary', 'NOT CONFIRMED')} | "
+            f"Retest={(snr_ctx.get('price_action') or {}).get('retest_summary', 'NOT CONFIRMED')} | "
+            f"Rejection={(snr_ctx.get('price_action') or {}).get('rejection_summary', 'NOT CONFIRMED')}"
         )
     if snr_avail_tf and snr_st_diag == "PARTIAL":
         lines.append(f"- Available TF     : {', '.join(snr_avail_tf)}")
@@ -6844,6 +7094,167 @@ def format_scanner_audit(dec: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_smc_zone_reason(zone: Dict[str, Any], max_words: int = 10) -> str:
+    """Short technical basis for an SMC zone, limited to evidence stored on the zone itself."""
+    if not isinstance(zone, dict):
+        return "N/A"
+    parts = [f"{zone.get('timeframe', '')} {str(zone.get('zone_type', '')).lower()}".strip()]
+    bos = zone.get("origin_bos") or {}
+    if bos.get("tipe") in ("BOS", "CHoCH") and bos.get("arah") in ("bull", "bear"):
+        parts.append(f"{'bullish' if bos['arah'] == 'bull' else 'bearish'} {bos['tipe']}")
+    fvg_status = str((zone.get("fvg_confirmation") or {}).get("status", "")).upper()
+    if fvg_status == "UNTOUCHED":
+        parts.append("FVG untouched")
+    elif fvg_status == "PARTIALLY_MITIGATED":
+        parts.append("FVG partial")
+    if str(zone.get("liquidity_sweep_status", "")).upper().startswith("CONFIRMED"):
+        parts.append("liquidity sweep")
+    freshness = str(zone.get("freshness", "")).upper()
+    if freshness == "FRESH":
+        parts.append("fresh")
+    elif freshness.startswith("TESTED"):
+        parts.append(freshness.lower().replace("_", " "))
+    if zone.get("is_aligned"):
+        parts.append("HTF aligned")
+    reason, words = [], 0
+    for part in parts:
+        count = len(part.split())
+        if reason and words + count > max_words:
+            continue
+        reason.append(part)
+        words += count
+    return ", ".join(reason)
+
+
+_PLAN_NOTES = (
+    ("Risk/Reward", "RR BELOW MINIMUM"), ("Jarak SL", "SL INVALID"), ("sudah di atas/di dalam entry", "PRICE AT/INSIDE ENTRY"),
+    ("sudah di bawah/di dalam entry", "PRICE AT/INSIDE ENTRY"), ("Bias H4", "HTF FILTER"), ("Konflik struktur", "HTF FILTER"),
+    ("M30", "M30 FILTER"), ("Spread", "SPREAD TOO HIGH"), ("Jarak zona", "ZONE TOO FAR"), ("Data MT5", "DATA STALE"),
+    ("invalid", "ZONE INVALID"), ("termitigasi", "ZONE MITIGATED"), ("invalidation", "ZONE INVALID"),
+)
+
+
+def _num(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else 0.0
+
+
+def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan: bool = True) -> Dict[str, Any]:
+    """Single source for SMC zone reason, risk plan and status; levels always come from existing planners."""
+    zone_id = zone.get("zone_id")
+    active = bool(zone_id) and (decision.get("zone") or {}).get("zone_id") == zone_id
+    expected = "BUY" if zone.get("zone_type") == "DEMAND" else "SELL" if zone.get("zone_type") == "SUPPLY" else ""
+    lifecycle = str(zone.get("lifecycle_status") or zone.get("status") or "").upper()
+    terminal = lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED") or zone.get("is_valid") is False
+    stages = decision.get("stages") or {}
+    if terminal:
+        code = lifecycle if lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED") else "INVALID"
+    elif active and decision.get("status") == "INVALID":
+        code = "INVALID"
+    elif active and (stages.get("zone_validation") or {}).get("status") in ("WAIT", "DATA_INCOMPLETE"):
+        code = "WAIT | " + str((stages.get("zone_validation") or {}).get("msg") or "ZONE VALIDATION")
+    elif active and (stages.get("zone_touch") or {}).get("status") not in ("CONFIRMED", "NOT_REQUIRED"):
+        code = "WAIT_ZONE_TOUCH"
+    elif active and (
+        (stages.get("structure_trigger") or {}).get("status") != "CONFIRMED"
+        or (stages.get("displacement") or {}).get("status") != "CONFIRMED"
+    ):
+        code = "WAIT_M5_CONFIRMATION"
+    elif active and (stages.get("risk_reward") or {}).get("rr") is not None and (stages.get("risk_reward") or {}).get("status") != "CONFIRMED" and "R:R" in str((stages.get("risk_reward") or {}).get("msg", "")):
+        code = "RR_FAILED"
+    elif active:
+        code = "WAIT"
+    else:
+        code = "RADAR"
+
+    plan, kind, note = None, "NONE", "PLAN UNAVAILABLE"
+    if allow_plan and not terminal:
+        confirmed = decision.get("plan") or {}
+        if (
+            active and decision.get("status") == "VALID" and confirmed and decision.get("direction") == expected
+            and (not confirmed.get("zone_id") or confirmed.get("zone_id") == zone_id)
+        ):
+            plan, kind = confirmed, "CONFIRMED"
+        else:
+            pending = decision.get("early_setup") or {}
+            qualified = list(pending.get("all_setups") or []) + ([pending["best_setup"]] if pending.get("best_setup") else [])
+            computed = (decision.get("zone_plans") or {}).get(zone_id) or {}
+            plan = next((p for p in qualified if p.get("zone_id") == zone_id and p.get("valid") and p.get("status") == "READY"), None)
+            if plan:
+                kind = "PENDING"
+            elif computed.get("valid") and computed.get("status") == "READY":
+                plan, kind = computed, "PROVISIONAL"
+            else:
+                text = str(computed.get("rejection_reason") or "")
+                note = next((label for key, label in _PLAN_NOTES if key.lower() in text.lower()), text[:40].upper() or "PLAN UNAVAILABLE")
+    elif terminal:
+        note = "ZONE NOT VALID"
+    elif not allow_plan:
+        note = "DATA NOT FRESH"
+
+    entry = _num((plan or {}).get("entry_acuan", (plan or {}).get("entry_price")))
+    sl, tp1, tp2 = _num((plan or {}).get("sl")), _num((plan or {}).get("tp1")), _num((plan or {}).get("tp2"))
+    valid = bool(
+        plan and expected and entry > 0 and sl > 0 and tp1 > 0
+        and (sl < entry < tp1 if expected == "BUY" else tp1 < entry < sl)
+    )
+    if plan and not valid:
+        plan, kind, note = None, "NONE", "LEVELS INVALID"
+    if valid and (tp2 == tp1 or not (tp2 > entry if expected == "BUY" else 0 < tp2 < entry)):
+        tp2 = 0.0
+    status = code
+    if kind == "CONFIRMED":
+        status = "CONFIRMED"
+    elif kind == "PENDING":
+        status = f"{code} | PENDING READY (NOT PLACED)"
+    elif kind == "PROVISIONAL":
+        status = f"{code} (PROVISIONAL ONLY)"
+    return {
+        "label": (
+            f"{zone.get('timeframe', '')} {str(zone.get('zone_type', '')).upper()} "
+            f"{_num(zone.get('price_low')):.2f}-{_num(zone.get('price_high')):.2f}"
+        ),
+        "grade": f"{zone.get('grade', 'N/A')} ({_num(zone.get('score')):.2f})" if zone.get("score") is not None else str(zone.get("grade", "N/A")),
+        "reason": build_smc_zone_reason(zone),
+        "direction": expected, "kind": kind, "note": note, "status": status, "active": active,
+        "entry": entry if valid else 0.0, "sl": sl if valid else 0.0, "tp1": tp1 if valid else 0.0,
+        "tp2": tp2 if valid else 0.0,
+        "rr": abs(tp1 - entry) / abs(entry - sl) if valid else 0.0,
+    }
+
+
+def format_smc_zone_lines(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan: bool = True, role: str = "SMC ZONE") -> List[str]:
+    """Compact multi-line zone block shared by scan, scan gabungan and pantau."""
+    if not isinstance(zone, dict) or not zone:
+        return [f"{role} : NONE", "REASON   : no active SMC zone", "ENTRY    : N/A", "SL       : N/A", "TP1/TP2  : N/A / N/A", "RR       : NOT CHECKED", "STATUS   : WAIT"]
+    s = smc_zone_summary(zone, decision, allow_plan)
+    if s["kind"] == "CONFIRMED":
+        entry_text = f"{s['direction']} {s['entry']:.2f}"
+    elif s["kind"] in ("PENDING", "PROVISIONAL"):
+        entry_text = f"{s['direction']} PLAN {s['entry']:.2f}"
+    else:
+        entry_text = f"N/A ({s['note']})"
+    has_plan = s["entry"] > 0
+    return [
+        f"{role} : {s['label']} | Grade {s['grade']}",
+        f"REASON   : {s['reason']}",
+        f"ENTRY    : {entry_text}",
+        f"SL       : {s['sl']:.2f}" if has_plan else "SL       : N/A",
+        (f"TP1/TP2  : {s['tp1']:.2f} / {s['tp2']:.2f}" if s["tp2"] > 0 else f"TP1/TP2  : {s['tp1']:.2f} / N/A") if has_plan else "TP1/TP2  : N/A / N/A",
+        f"RR       : 1:{s['rr']:.2f}" if has_plan else "RR       : NOT CHECKED",
+        f"STATUS   : {s['status']}",
+    ]
+
+
+def format_smc_zone_plan(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan: bool = True) -> str:
+    """One-line variant for non-focus zones."""
+    s = smc_zone_summary(zone, decision, allow_plan)
+    levels = (
+        f"{s['entry']:.2f} / {s['sl']:.2f} / {s['tp1']:.2f} / {s['tp2']:.2f}".replace("/ 0.00", "/ N/A") + f" | RR 1:{s['rr']:.2f}"
+        if s["entry"] > 0 else f"N/A ({s['note']})"
+    )
+    return f"{s['reason']} | ENTRY/SL/TP1/TP2 {levels} | {s['status']}"
+
+
 def format_scan_presentation(
     scan: Optional[Dict[str, Any]] = None,
     dec: Optional[Dict[str, Any]] = None,
@@ -6879,8 +7290,6 @@ def format_scan_presentation(
     m30_status = m30_val.get("status", "CONFIRMED" if m30_val.get("ok") else "UNCONFIRMED")
 
     zone = dec.get("zone")
-    if not zone and scan.get("active_zones"):
-        zone = scan["active_zones"][0]
     zone_dict = zone.to_dict() if hasattr(zone, "to_dict") else (dict(zone) if isinstance(zone, dict) else {})
 
     stages = dec.get("stages", {})
@@ -6956,6 +7365,7 @@ def format_scan_presentation(
             f"    - Validitas Struktur : {struct_st}",
             f"    - Pending Eligibility: {p_elig}" + (f" ({p_rsn})" if p_rsn else ""),
             f"    - Confirmed M5       : {c_elig}" + (f" ({c_rsn})" if c_rsn else ""),
+            f"    - Rencana Zona       : {format_smc_zone_plan(z, dec)}",
         ]
 
     # Early Setups (Aggressive Pending)
@@ -7057,28 +7467,23 @@ def format_scan_presentation(
 
         # 2. ZONA UTAMA
         out.append("2. ZONA UTAMA")
-        pz_c = (r_prio.get("primary_directional_zone") or r_prio.get("primary_zone")) if r_prio else None
-        nz_c = r_prio.get("nearest_radar_zone") if r_prio else None
+        pz_c = dec.get("primary_zone") or ((r_prio.get("primary_directional_zone") or r_prio.get("primary_zone")) if r_prio else None)
+        nz_c = dec.get("nearest_valid_zone")
         vz_c = r_prio.get("best_validated_entry_zone") if r_prio else None
 
-        if status == "VALID" and vz_c:
-            main_z = vz_c
-            role_label = "Validated Entry Zone (Primary)"
-        elif pz_c:
-            main_z = pz_c
-            role_label = "Primary Directional Zone (Primary Radar Zone)"
-        elif nz_c:
-            main_z = nz_c
-            role_label = "Nearest Radar Zone (Countertrend)" if nz_c.get("is_counter") else "Nearest Radar Zone"
-        elif all_radar:
-            main_z = all_radar[0]
-            role_label = "Radar Zone"
-        else:
-            main_z = None
-            role_label = "NONE"
+        main_z = dec.get("zone")
+        role_label = "Active Monitoring Zone" if main_z else "NONE"
+        out.append(f"- Primary Zone     : {_cand_label(pz_c)}")
+        out.append(f"- Nearest Zone     : {_cand_label(nz_c)}")
+        out.append(f"- Next Radar Zone  : {_cand_label(dec.get('next_radar_zone'))}")
+        described_ids = set()
+        if dec.get("focus_change_reason"):
+            previous_focus = dec.get("previous_focus") or {}
+            out.append(f"- Previous Zone    : {_cand_label(previous_focus)} ({previous_focus.get('status', 'UNKNOWN')})")
+            out.append(f"- Focus Change     : {dec['focus_change_reason']}")
 
         if not main_z:
-            out.append("- Zona Prioritas   : NO RADAR ZONE DETECTED.")
+            out.append("- Zona Prioritas   : NO ACTIVE MONITORING ZONE.")
             out.append("- Tipe Zona        : -")
             out.append("- Rentang Harga    : -")
             out.append("- Grade & Skor     : -")
@@ -7096,7 +7501,7 @@ def format_scan_presentation(
                 else "DATA INCOMPLETE"
             )
             z_fresh = main_z.get("freshness", "FRESH")
-            z_dist = float(main_z.get("distance", 0.0))
+            z_dist = max(z_lo - price, price - z_hi, 0.0) if price > 0 else 0.0
             z_dir = main_z.get("direction_status") or (
                 "ABOVE_PRICE" if z_lo > price else ("BELOW_PRICE" if z_hi < price else "INSIDE_ZONE")
             )
@@ -7114,6 +7519,20 @@ def format_scan_presentation(
             out.append(f"- Grade & Skor     : Grade {z_grd} | Skor: {z_sc_str} ({z_fresh})")
             out.append(f"- Jarak Saat Ini   : {z_dist:.2f} pt ({z_dir})")
             out.append(f"- Status Zona      : {z_st_str}")
+
+        plan_zone = main_z or pz_c
+        if plan_zone:
+            described_ids.add(plan_zone.get("zone_id"))
+            data_ok = (stages.get("DATA") or {}).get("ok") is not False
+            out.extend(
+                f"  {line}" for line in format_smc_zone_lines(
+                    plan_zone, dec, allow_plan=data_ok, role="SMC ACTIVE" if main_z else "SMC PRIMARY",
+                )
+            )
+        for candidate in (nz_c, dec.get("next_radar_zone")):
+            if candidate and candidate.get("zone_id") and candidate["zone_id"] not in described_ids:
+                described_ids.add(candidate["zone_id"])
+                out.append(f"- Rencana {candidate.get('price_low', 0.0):.2f}-{candidate.get('price_high', 0.0):.2f} : {format_smc_zone_plan(candidate, dec)}")
         out.append("")
 
         # 3. ENTRY PLAN
@@ -7146,7 +7565,7 @@ def format_scan_presentation(
             tp2_p = best_p_c.get("tp2")
             tp_p_str = f"TP1 {best_p_c['tp1']:.2f}" + (f" | TP2 {tp2_p:.2f}" if tp2_p else "")
             out.append("- Status Rencana   : READY (Pending Plan) | WAIT (Confirmed Entry)")
-            out.append(f"- Pending Plan     : READY — PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}]")
+            out.append(f"- Pending Plan     : READY — PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}; {best_p_c.get('zone_id', 'N/A')}]")
             out.append("- Confirmed Entry  : WAIT (Bukan sinyal entry terkonfirmasi; menunggu validasi M5 lengkap)")
             out.append(f"- Entry Price    : {best_p_c['entry_price']:.2f} (Rencana {best_p_c['order_type']} — BELUM DIPASANG DI MT5; pasang limit manual hanya jika siap menanggung risiko)")
             out.append(f"- Stop Loss      : {best_p_c['sl']:.2f}")
@@ -7177,7 +7596,13 @@ def format_scan_presentation(
             if (status == "VALID" and plan and plan.get("rr"))
             else str(rr_st)
         )
-        out.append(f"- Zone Touch     : {zt}")
+        touch_display = zt
+        if main_z and price > 0:
+            if float(main_z.get("price_low", 0.0)) <= price <= float(main_z.get("price_high", 0.0)):
+                touch_display = "IN ZONE"
+            elif zt in ("CONFIRMED", "PASS", "PASSED"):
+                touch_display = "TOUCHED PREVIOUSLY"
+        out.append(f"- Zone Touch     : {touch_display}")
         out.append(f"- Liquidity Sweep: {sw_line}")
         out.append(f"- CHoCH/BOS/CISD : {tr_line}")
         out.append(f"- Displacement   : {dp_line}")
@@ -7215,7 +7640,9 @@ def format_scan_presentation(
         else:
             dec_lbl = f"{status if status in ('WAIT', 'INVALID') else 'WAIT'} (NO ENTRY / WAIT — Dilarang Buka Posisi Baru)"
             zt_name_lbl = "Supply" if (main_z and main_z.get("zone_type") == "SUPPLY") else ("Demand" if (main_z and main_z.get("zone_type") == "DEMAND") else "prioritas")
-            if not scan.get("data_ok", True) and not all_radar:
+            if dec.get("reasons"):
+                main_reason = str(dec["reasons"][0])
+            elif not scan.get("data_ok", True) and not all_radar:
                 main_reason = "Data pasar belum lengkap atau koneksi MT5 tidak tersedia. Belum ada setup valid."
             elif ctx.get("has_conflict") or any("konflik" in str(r).lower() for r in dec.get("reasons", [])):
                 main_reason = f"Konflik struktur H4 {h4_bias} vs H1 {h1_struct}. Belum ada setup valid."
@@ -8266,7 +8693,9 @@ def format_scan_summary(
         dir_str = "NONE"
         entry_str = "NONE"
         wb = (r_prio.get("wait_breakdown") if r_prio else None) or dec.get("wait_breakdown") or {}
-        if ctx.get("has_conflict") and m5_status != "CONFIRMED":
+        if dec.get("reasons"):
+            reason_str = sanitize_wait_reason(str(dec["reasons"][0]).replace("[SCANNER] Rejection Reason: ", ""))
+        elif ctx.get("has_conflict") and m5_status != "CONFIRMED":
             reason_str = "HTF CONFLICT + M5 NOT CONFIRMED"
         elif wb.get("primary_blocker"):
             reason_str = sanitize_wait_reason(str(wb["primary_blocker"]))
@@ -8358,6 +8787,8 @@ def format_scan_summary(
 
     out.extend([
         "",
+        f"ACTIVE ZONE : {_short_zone_line(dec.get('zone'))}",
+        f"NEAREST ZONE: {_short_zone_line(dec.get('nearest_valid_zone'))}",
         f"ALTERNATIVE : {_short_zone_line(az)}",
         f"COUNTERTREND: {_short_zone_line(cz)}",
         "",

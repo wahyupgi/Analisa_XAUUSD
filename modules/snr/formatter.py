@@ -16,7 +16,8 @@ def format_snr_lifecycle_status(scan_result, decision=None):
         if str(zone.get("zone_type", "")).upper() == "SUPPORT"
     ]
     supports.sort(key=lambda zone: safe_float(zone.get("distance_points"), float("inf")))
-    zone = supports[0] if supports else None
+    active_supports = ranked.get("active_supports") or []
+    zone = active_supports[0] if active_supports else (supports[0] if supports else None)
     signal = str(dec.get("signal", "WAIT")).upper()
     entry_confirmed = dec.get("entry_confirmed", False) if isinstance(dec, dict) else False
     entry_status = "CONFIRMED" if signal in ("BUY", "SELL") and (entry_confirmed or dec.get("status") == "CONFIRMED") else ("CONFIRMED" if signal in ("BUY", "SELL") else "WAIT")
@@ -29,7 +30,7 @@ def format_snr_lifecycle_status(scan_result, decision=None):
         lifecycle = str(zone.get("lifecycle_status", zone.get("status", "UNCONFIRMED"))).upper()
         event = str(zone.get("lifecycle_event") or lifecycle).upper()
         reclaim = str(zone.get("reclaim_status") or "WAIT").upper()
-        zone_label = str(zone.get("rank_label") or "S1")
+        zone_label = str(zone.get("rank_label") or "NEAREST SUPPORT")
 
         if lifecycle == "RECLAIMED" or (lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING") and reclaim == "CONFIRMED"):
             disp_status = "RECLAIMED"
@@ -49,6 +50,8 @@ def format_snr_lifecycle_status(scan_result, decision=None):
         elif lifecycle in ("ACTIVE", "TOUCHED", "SWEEP"):
             disp_status = "ACTIVE"
             disp_event = event if event in ("SWEEP", "TOUCHED") else ("TOUCHED" if event == "ACTIVE" and zone.get("touch_count", 0) > 0 else "NONE")
+            if disp_event in ("SWEEP", "TOUCHED"):
+                disp_event += " (HISTORICAL)"
         else:
             disp_status = lifecycle
             disp_event = event if event not in ("", "N/A") else "NONE"
@@ -75,7 +78,151 @@ def format_snr_lifecycle_status(scan_result, decision=None):
         f"ENTRY     : {entry_status}",
         f"ALERT     : {alert_text}",
     ]
+    overlaps = ranked.get("overlaps") or []
+    if overlaps:
+        overlap = next((item for item in overlaps if item.get("entry_conflict")), overlaps[0])
+        state = "CONFLICT" if overlap.get("entry_conflict") else "GEOMETRIC"
+        lines.insert(2, f"SNR OVERLAP: {overlap['support_label']} / {overlap['resistance_label']} {state}")
     return lines
+
+
+def build_snr_zone_reason(zone, h4_bias=None, max_words=10):
+    """Short technical basis for an SNR zone, using only evidence stored on the zone."""
+    if not isinstance(zone, dict):
+        return "N/A"
+    tf = str(zone.get("timeframe", "")).upper()
+    kind = str(zone.get("zone_type", "")).lower()
+    parts = [f"{tf} {kind}".strip()]
+    bias = str(h4_bias or "").upper()
+    if bias in ("BULLISH", "BEARISH"):
+        with_trend = (kind == "resistance" and bias == "BEARISH") or (kind == "support" and bias == "BULLISH")
+        parts.append(f"with H4 {bias.lower()}" if with_trend else f"counter H4 {bias.lower()}")
+    if str(zone.get("swing_class", "")).upper() == "MAJOR":
+        parts.append("major swing")
+    reactions = int(safe_float(zone.get("historical_reaction_count"), 0))
+    if reactions >= 2:
+        parts.append(f"{reactions} reactions")
+    confluence = zone.get("confluence_info") or {}
+    if confluence.get("has_confluence"):
+        parts.append(f"{'+'.join(confluence.get('timeframes') or [])} confluence")
+    if str(zone.get("consolidation_structure", "")).upper() == "IMPULSIVE_DEPARTURE":
+        parts.append("impulsive departure")
+    touch = str((zone.get("touch_analysis") or {}).get("classification", "")).upper()
+    if touch == "UNTESTED":
+        parts.append("fresh")
+    elif touch.startswith("TESTED"):
+        parts.append(touch.lower().replace("_", " ").replace("plus", "+"))
+    if str(zone.get("lifecycle_event", "")).upper() == "SWEEP":
+        parts.append("liquidity sweep")
+    reason, words = [], 0
+    for part in parts:
+        count = len(part.split())
+        if reason and words + count > max_words:
+            continue
+        reason.append(part)
+        words += count
+    return ", ".join(reason)
+
+
+def _snr_status_code(*texts):
+    for text in texts:
+        head = str(text or "").split(":", 1)
+        if len(head) == 2 and head[0].isupper() and head[0].replace("_", "").isalnum() and "_" in head[0]:
+            return head[0]
+    return "WAIT"
+
+
+def format_snr_focus_plan(decision, entry_validation=None, zone_override=None, market_bias=None):
+    """Compact zone block: grade, technical reason, risk plan (confirmed or provisional) and honest status."""
+    dec = decision or {}
+    ev = entry_validation or {}
+    focus = dec.get("target_zone") or ev.get("target_zone") or dec.get("trend_entry_zone") or ev.get("trend_entry_zone")
+    zone = zone_override or focus
+    if not isinstance(zone, dict):
+        return "\n".join([
+            "SNR ZONE : NONE", "REASON   : no active SNR zone", "ENTRY    : N/A", "SL       : N/A",
+            "TP1/TP2  : N/A / N/A", "RR       : NOT CHECKED", "STATUS   : WAIT",
+        ])
+    is_focus = bool(zone.get("zone_id")) and zone.get("zone_id") == (focus or {}).get("zone_id")
+    label = (
+        f"{zone.get('rank_label', 'ZONE')} {zone.get('timeframe', 'N/A')} "
+        f"{safe_float(zone.get('low')):.2f}-{safe_float(zone.get('high')):.2f}"
+    )
+    score = f"{safe_float(zone.get('score')):.2f}" if zone.get("score") is not None else "N/A"
+    reason = build_snr_zone_reason(zone, (market_bias or {}).get("h4") if isinstance(market_bias, dict) else market_bias)
+
+    direction = str(dec.get("signal", "WAIT")).upper()
+    plan = ev.get("provisional_plan") if is_focus and isinstance(ev.get("provisional_plan"), dict) else {}
+    entry = sl = tp1 = tp2 = 0.0
+    entry_text, rr_text, suffix = "N/A", "NOT CHECKED", ""
+    candidate_rr = None
+    candidate_detail = ""
+    if is_focus and direction in ("BUY", "SELL"):
+        entry, sl, tp1, tp2 = (safe_float(dec.get(key), 0.0) for key in ("effective_entry", "sl", "tp1", "tp2"))
+        if entry > 0 and sl > 0 and tp1 > 0 and (sl < entry < tp1 if direction == "BUY" else tp1 < entry < sl):
+            entry_text = f"{direction} {entry:.2f}"
+            rr_text = f"1:{abs(tp1 - entry) / abs(entry - sl):.2f}"
+        else:
+            entry = sl = tp1 = tp2 = 0.0
+    elif plan.get("status") == "PROVISIONAL":
+        entry, sl, tp1, tp2 = (safe_float(plan.get(key), 0.0) for key in ("entry", "sl", "tp1", "tp2"))
+        valid = entry > 0 and sl > 0 and tp1 > 0 and (
+            sl < entry < tp1 if plan.get("direction") == "BUY" else tp1 < entry < sl
+        )
+        if valid:
+            reference = "CURRENT PRICE" if plan.get("reference") == "CURRENT PRICE" else f"{safe_float(plan.get('distance')):.1f} pt away"
+            entry_text = f"{plan['direction']} PLAN {entry:.2f} ({reference})"
+            rr_text = f"1:{abs(tp1 - entry) / abs(entry - sl):.2f}"
+            suffix = " (PROVISIONAL ONLY)"
+        else:
+            entry = sl = tp1 = tp2 = 0.0
+            entry_text = "N/A (LEVELS INVALID)"
+    elif plan:
+        candidate = plan.get("rr_calculation") or {}
+        if candidate.get("rr_failed") and candidate.get("rr_tp1") is not None:
+            candidate_rr = safe_float(candidate["rr_tp1"])
+            minimum = candidate.get("min_rr_required")
+            reference = "CURRENT PRICE" if plan.get("reference") == "CURRENT PRICE" else "ZONE EDGE"
+            candidate_detail = f" ({reference}" + (f", MIN 1:{safe_float(minimum):.2f}" if minimum is not None else "") + ")"
+        else:
+            entry_text = f"N/A ({plan.get('note', 'PLAN UNAVAILABLE')})"
+    elif not is_focus:
+        entry_text = "N/A (NOT FOCUS ZONE)"
+
+    entry_rr = ev.get("rr_calculation") or {}
+    entry_rr_text = "NOT CHECKED"
+    if is_focus and entry_rr.get("checked"):
+        entry_rr_text = str(entry_rr.get("rr_display") or "N/A")
+        if entry_rr.get("rr_failed") and entry_rr.get("rr_tp1") is not None:
+            entry_rr_text = f"1:{safe_float(entry_rr['rr_tp1']):.2f} | FAILED"
+
+    lifecycle = str(zone.get("lifecycle_status") or zone.get("status") or "").upper()
+    if is_focus and direction in ("BUY", "SELL"):
+        status = "CONFIRMED" if entry > 0 else f"{direction} (LEVELS N/A)"
+    elif lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN"):
+        status = lifecycle
+    elif is_focus:
+        status = _snr_status_code(dec.get("reason"), ev.get("reason")) + suffix
+        if status == "WAIT" and (ev.get("rr_calculation") or {}).get("rr_failed"):
+            status = "RR_FAILED"
+    else:
+        status = "RADAR"
+    lines = [
+        f"SNR ZONE : {label} | Grade {zone.get('grade', 'N/A')} ({score})",
+        f"REASON   : {reason}",
+        *(["INTERAKSI: ZONA DISENTUH M5 CLOSED (4 CANDLE TERAKHIR)"] if is_focus and ev.get("recent_closed_touch") else []),
+        f"ENTRY    : {entry_text}",
+        f"SL       : {sl:.2f}" if sl > 0 else "SL       : N/A",
+        f"TP1/TP2  : {tp1:.2f} / {tp2:.2f}" if tp1 > 0 and tp2 > 0 and tp2 != tp1 else (f"TP1/TP2  : {tp1:.2f} / N/A" if tp1 > 0 else "TP1/TP2  : N/A / N/A"),
+        *([f"PLAN RR  : 1:{candidate_rr:.2f} | FAILED{candidate_detail}", f"ENTRY RR : {entry_rr_text}"] if candidate_rr is not None else
+          [f"PLAN RR  : {rr_text} | PASSED", f"ENTRY RR : {entry_rr_text}"] if suffix else
+          [f"ENTRY RR : {entry_rr_text}"] if entry_rr.get("rr_failed") else [f"RR       : {rr_text}"]),
+        f"STATUS   : {status}",
+    ]
+    change = ev.get("focus_change") if is_focus else None
+    if isinstance(change, dict):
+        lines.append(f"FOCUS    : {change.get('previous')} -> {change.get('to')} ({change.get('reason')})")
+    return "\n".join(lines)
 
 
 def format_snr_summary(scan_result, decision=None):
@@ -138,7 +285,7 @@ def format_snr_summary(scan_result, decision=None):
             s0 = active_sups[0]
             sup_summary = (
                 f"{s0.get('rank_label', 'S1')} {safe_float(s0.get('low')):.2f} - {safe_float(s0.get('high')):.2f} "
-                f"(Grade {s0.get('grade', 'D')} | Score {int(round(safe_float(s0.get('score'))))} | {s0.get('strength_short', 'MODERATE')})"
+                f"(Grade {s0.get('grade', 'D')} | Score {safe_float(s0.get('score')):.2f} | Strength {s0.get('strength_short', 'MODERATE')})"
             )
         else:
             sup_summary = "NONE"
@@ -147,7 +294,7 @@ def format_snr_summary(scan_result, decision=None):
             r0 = active_ress[0]
             res_summary = (
                 f"{r0.get('rank_label', 'R1')} {safe_float(r0.get('low')):.2f} - {safe_float(r0.get('high')):.2f} "
-                f"(Grade {r0.get('grade', 'D')} | Score {int(round(safe_float(r0.get('score'))))} | {r0.get('strength_short', 'MODERATE')})"
+                f"(Grade {r0.get('grade', 'D')} | Score {safe_float(r0.get('score')):.2f} | Strength {r0.get('strength_short', 'MODERATE')})"
             )
         else:
             res_summary = "NONE"
@@ -219,14 +366,9 @@ def format_snr_summary(scan_result, decision=None):
 
     if active_sups:
         for idx_s, sz in enumerate(active_sups[:2]):
-            lbl = sz.get("rank_label", f"S{idx_s + 1}")
-            s_lo = safe_float(sz.get("low"), 0.0)
-            s_hi = safe_float(sz.get("high"), s_lo)
-            s_gr = sz.get("grade", "D")
-            s_sc = int(round(safe_float(sz.get("score"), 0.0)))
-            s_st = sz.get("strength_short", "MODERATE")
-            lines.append(f"{lbl} : {s_lo:.2f} - {s_hi:.2f}")
-            lines.append(f"     Grade {s_gr} | Score {s_sc} | {s_st}")
+            lines.append(f"{sz.get('rank_label', f'S{idx_s + 1}')} : {safe_float(sz.get('low')):.2f} - {safe_float(sz.get('high')):.2f}")
+            lines.append(f"     Grade {sz.get('grade', 'D')} | Score {safe_float(sz.get('score')):.2f} | Strength {sz.get('strength_short', 'MODERATE')}")
+            lines.append(f"     Reason: {build_snr_zone_reason(sz, mb.get('h4'))}")
             if idx_s == 0 and len(active_sups[:2]) > 1:
                 lines.append("")
     else:
@@ -241,14 +383,9 @@ def format_snr_summary(scan_result, decision=None):
 
     if active_ress:
         for idx_r, rz in enumerate(active_ress[:2]):
-            lbl = rz.get("rank_label", f"R{idx_r + 1}")
-            r_lo = safe_float(rz.get("low"), 0.0)
-            r_hi = safe_float(rz.get("high"), r_lo)
-            r_gr = rz.get("grade", "D")
-            r_sc = int(round(safe_float(rz.get("score"), 0.0)))
-            r_st = rz.get("strength_short", "MODERATE")
-            lines.append(f"{lbl} : {r_lo:.2f} - {r_hi:.2f}")
-            lines.append(f"     Grade {r_gr} | Score {r_sc} | {r_st}")
+            lines.append(f"{rz.get('rank_label', f'R{idx_r + 1}')} : {safe_float(rz.get('low')):.2f} - {safe_float(rz.get('high')):.2f}")
+            lines.append(f"     Grade {rz.get('grade', 'D')} | Score {safe_float(rz.get('score')):.2f} | Strength {rz.get('strength_short', 'MODERATE')}")
+            lines.append(f"     Reason: {build_snr_zone_reason(rz, mb.get('h4'))}")
             if idx_r == 0 and len(active_ress[:2]) > 1:
                 lines.append("")
     else:
@@ -309,6 +446,11 @@ def format_snr_summary(scan_result, decision=None):
     mc = sr.get("market_context") or {}
     role_ctx = ev.get("snr_role_context")
     pb_tgt = ev.get("pullback_target_label")
+    candidate_zone = dec.get("trend_entry_zone") or ev.get("trend_entry_zone") or dec.get("target_zone") or ev.get("target_zone") or {}
+    inside_candidate = bool(
+        candidate_zone and price_val > 0
+        and safe_float(candidate_zone.get("low")) <= price_val <= safe_float(candidate_zone.get("high"))
+    )
     if mc or role_ctx:
         lines.extend([
             "",
@@ -320,11 +462,14 @@ def format_snr_summary(scan_result, decision=None):
             f"SHORT TERM    : {mc.get('short_term', mom_label)}",
             f"SNR CONTEXT   : {role_ctx or mc.get('snr_context', zone_lbl)}",
             f"NEAREST ZONE  : {dec.get('nearest_snr_label') or ev.get('nearest_snr_label', 'N/A')}",
-            f"TREND ENTRY   : {dec.get('trend_entry_label') or ev.get('trend_entry_label', 'N/A')}",
-            f"ENTRY TRIGGER : {dec.get('entry_trigger_label') or ev.get('entry_trigger_label', 'N/A')}",
-            f"PULLBACK AREA : {pb_tgt or 'NONE'}",
+            f"PULLBACK CANDIDATE : {dec.get('trend_entry_label') or ev.get('trend_entry_label', 'N/A')}",
+            f"INTERACTION   : {'PRICE IN CANDIDATE' if inside_candidate else 'NO CURRENT TOUCH'}",
+            f"M5 EVAL ZONE  : {dec.get('entry_trigger_label') or ev.get('entry_trigger_label', 'N/A')}",
+            f"NEXT PULLBACK : {pb_tgt or 'NONE'}",
             f"TRADE BIAS    : {mc.get('trade_bias', 'NEUTRAL / WAIT')}",
         ])
+    lines.extend(["", "----------------------------------------------------", "ZONE PLAN", "----------------------------------------------------"])
+    lines.append(format_snr_focus_plan(dec, ev, market_bias=mb))
 
     lines.extend([
         "",
@@ -336,14 +481,6 @@ def format_snr_summary(scan_result, decision=None):
         f"LIVE ENTRY : {live_entry}",
         f"DIRECTION  : {dir_final}",
     ])
-
-    if mkt_status == "OPEN" and sig_final in ("BUY", "SELL") and dec.get("entry") is not None:
-        lines.append(f"ENTRY      : {safe_float(dec.get('entry')):.2f}")
-        lines.append(f"SL         : {safe_float(dec.get('sl')):.2f}")
-        lines.append(f"TP1        : {safe_float(dec.get('tp1')):.2f}")
-        if dec.get("tp2") is not None:
-            lines.append(f"TP2        : {safe_float(dec.get('tp2')):.2f}")
-        lines.append(f"RR         : {rr_st}")
 
     lines.extend([
         f"REASON     : {reason_final}",
@@ -649,7 +786,9 @@ def format_snr_detail(scan_result, decision=None):
     lines.append("")
     lines.append("[20. RISK / REWARD]")
     if rr_calc.get("checked"):
-        lines.append(f"  • RR Ratio (TP1 / TP2) : {rr_calc.get('rr_display', 'N/A')} (TP2=1:{rr_calc.get('rr_tp2', 0):.2f})")
+        rr2 = rr_calc.get("rr_tp2")
+        rr2_text = f"1:{rr2:.2f}" if isinstance(rr2, (int, float)) else "N/A"
+        lines.append(f"  • RR Ratio (TP1 / TP2) : {rr_calc.get('rr_display', 'N/A')} (TP2={rr2_text})")
         lines.append(f"  • Minimum Required     : 1 : {rr_calc.get('min_rr_required', 1.5):.2f}")
         lines.append(f"  • USD Risk / 1.0 Lot   : ${rr_calc.get('risk_usd_per_lot', 0):.2f} (Reward=${rr_calc.get('reward_usd_per_lot', 0):.2f})")
         lines.append(f"  • Validation Reason    : {rr_calc.get('reason', 'N/A')}")

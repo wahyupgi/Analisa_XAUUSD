@@ -19,7 +19,7 @@ Klasifikasi:
 - NONE (WAIT)
 """
 from modules.snr.config import get_snr_config
-from modules.snr.data_provider import prepare_snr_frame, safe_float
+from modules.snr.data_provider import prepare_snr_frame, safe_float, zone_confirmation_start
 
 
 def detect_zone_rejection(
@@ -82,7 +82,7 @@ def detect_zone_rejection(
     times = clean_df["Time"].tolist()
     n_bars = len(clean_df)
 
-    start_idx = max(0, n_bars - lookback)
+    start_idx = max(zone_confirmation_start(zone, clean_df), n_bars - lookback)
     candidates = []
 
     for k in range(start_idx, n_bars):

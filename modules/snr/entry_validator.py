@@ -12,11 +12,11 @@ Menghasilkan status: BUY, SELL, WAIT, atau INVALID.
 """
 from modules.snr.breakout_detection import detect_zone_breakout
 from modules.snr.config import get_snr_config
-from modules.snr.data_provider import prepare_snr_frame, safe_float
+from modules.snr.data_provider import prepare_snr_frame, safe_float, zone_confirmation_start
 from modules.snr.momentum_analysis import analyze_momentum
 from modules.snr.rejection_detection import detect_zone_rejection
 from modules.snr.retest_detection import detect_zone_retest
-from modules.snr.risk_reward import calculate_snr_risk_reward
+from modules.snr.risk_reward import calculate_snr_risk_reward, opposing_risk_zones
 
 
 def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price):
@@ -134,6 +134,8 @@ def validate_snr_entry(
     active_ress = (ranked_zones or {}).get("active_resistances") or []
     broken_zones = (ranked_zones or {}).get("broken_zones") or []
     invalid_zones = (ranked_zones or {}).get("invalidated_zones") or []
+    risk_resistances = opposing_risk_zones(ranked_zones, "BUY")
+    risk_supports = opposing_risk_zones(ranked_zones, "SELL")
 
     (
         focus_zone,
@@ -238,6 +240,18 @@ def validate_snr_entry(
     wait_reasons = []
     invalid_reasons = []
     snr_role_context = ""
+    def _rejection_touches_zone(rejection, zone):
+        index = rejection.get("bar_index")
+        if not isinstance(index, int) or not 0 <= index < len(clean_m5):
+            return False
+        bar = clean_m5.iloc[index]
+        return safe_float(bar["Low"]) <= safe_float(zone.get("high")) and safe_float(bar["High"]) >= safe_float(zone.get("low"))
+
+    def _closed_touch(zone):
+        start = max(zone_confirmation_start(zone, clean_m5), len(clean_m5) - 4)
+        recent = clean_m5.iloc[start:]
+        return bool(((recent["Low"] <= safe_float(zone.get("high"))) & (recent["High"] >= safe_float(zone.get("low")))).any())
+
     # Context labels describe the live/current price, not historical candle touches.
     def _position_label(zone_kind, zone, low, high):
         inside = low <= cp <= high
@@ -273,7 +287,7 @@ def validate_snr_entry(
 
         rej_s1 = detect_zone_rejection(s1, clean_m5, config=cfg, has_unclosed_last_bar=False)
         bo_s1 = detect_zone_breakout(s1, clean_m5, momentum_result=m5_mom, config=cfg, has_unclosed_last_bar=False)
-        valid_bull_rej = (rej_s1.get("status") == "BULLISH_REJECTION") and bool(rej_s1.get("confirmed", False))
+        valid_bull_rej = (rej_s1.get("status") == "BULLISH_REJECTION") and bool(rej_s1.get("confirmed", False)) and _rejection_touches_zone(rej_s1, s1)
 
         if rej_s1.get("status") == "FALSE_REJECTION" and rej_s1.get("in_zone_context"):
             invalid_reasons.append(f"Support {s1.get('rank_label', 'S1')} mengalami false rejection / ditembus.")
@@ -281,9 +295,9 @@ def validate_snr_entry(
         if h4_bear_counter:
             if s1.get("price_inside_zone") or entered_support:
                 if bo_s1.get("status") == "VALID_BREAKOUT":
-                    zone_hold_state = "BROKEN_DOWN"
-                    snr_role_context = f"SUPPORT {s1.get('rank_label', 'S1')} ({s1_low:.2f}-{s1_high:.2f}) BROKEN DOWN searah tren BEARISH"
-                elif valid_bull_rej or m5_bull_mom or m5_bull_close:
+                    zone_hold_state = "M5_BREAKDOWN"
+                    snr_role_context = f"SUPPORT {s1.get('rank_label', 'S1')} ({s1_low:.2f}-{s1_high:.2f}): M5 BREAKDOWN CONFIRMED; {s1.get('timeframe', 'HTF')} {s1.get('lifecycle_status', 'UNCONFIRMED')}"
+                elif valid_bull_rej and str(s1.get("lifecycle_status", s1.get("status", ""))).upper() not in ("UNCONFIRMED", "BREAKDOWN_PENDING"):
                     zone_hold_state = "HOLDING_PULLBACK"
                     if r1_ref is not None:
                         pullback_target_zone = r1_ref
@@ -317,7 +331,7 @@ def validate_snr_entry(
                 direction="BUY",
                 entry_price=cp,
                 active_zone=s1,
-                opposing_zones=active_ress,
+                opposing_zones=risk_resistances,
                 trigger_candle={"low": recent_min_low, "high": last_m5_high},
                 atr=m5_atr,
                 symbol_spec=symbol_spec,
@@ -399,7 +413,7 @@ def validate_snr_entry(
 
         rej_r1 = detect_zone_rejection(r1, clean_m5, config=cfg, has_unclosed_last_bar=False)
         bo_r1 = detect_zone_breakout(r1, clean_m5, momentum_result=m5_mom, config=cfg, has_unclosed_last_bar=False)
-        valid_bear_rej = (rej_r1.get("status") == "BEARISH_REJECTION") and bool(rej_r1.get("confirmed", False))
+        valid_bear_rej = (rej_r1.get("status") == "BEARISH_REJECTION") and bool(rej_r1.get("confirmed", False)) and _rejection_touches_zone(rej_r1, r1)
 
         if rej_r1.get("status") == "FALSE_REJECTION" and rej_r1.get("in_zone_context"):
             invalid_reasons.append(f"Resistance {r1.get('rank_label', 'R1')} mengalami false rejection / ditembus.")
@@ -407,9 +421,9 @@ def validate_snr_entry(
         if h4_bull_counter:
             if r1.get("price_inside_zone") or entered_resistance:
                 if bo_r1.get("status") == "VALID_BREAKOUT":
-                    zone_hold_state = "BROKEN_UP"
-                    snr_role_context = f"RESISTANCE {r1.get('rank_label', 'R1')} ({r1_low:.2f}-{r1_high:.2f}) BROKEN UP searah tren BULLISH"
-                elif valid_bear_rej or m5_bear_mom or m5_bear_close:
+                    zone_hold_state = "M5_BREAKOUT"
+                    snr_role_context = f"RESISTANCE {r1.get('rank_label', 'R1')} ({r1_low:.2f}-{r1_high:.2f}): M5 BREAKOUT CONFIRMED; {r1.get('timeframe', 'HTF')} {r1.get('lifecycle_status', 'UNCONFIRMED')}"
+                elif valid_bear_rej and str(r1.get("lifecycle_status", r1.get("status", ""))).upper() not in ("UNCONFIRMED", "BREAKDOWN_PENDING"):
                     zone_hold_state = "HOLDING_PULLBACK"
                     if s1 is not None:
                         pullback_target_zone = s1
@@ -443,7 +457,7 @@ def validate_snr_entry(
                 direction="SELL",
                 entry_price=cp,
                 active_zone=r1,
-                opposing_zones=active_sups,
+                opposing_zones=risk_supports,
                 trigger_candle={"low": last_m5_low, "high": recent_max_high},
                 atr=m5_atr,
                 symbol_spec=symbol_spec,
@@ -514,8 +528,8 @@ def validate_snr_entry(
     retest_candidates = list(broken_zones) + list(active_ress[:1]) + list(active_sups[:1])
     for bz in retest_candidates:
         z_type = str(bz.get("zone_type", "RESISTANCE")).upper()
-        bo_res = bz.get("breakout_info") or detect_zone_breakout(bz, clean_m5, momentum_result=m5_mom, config=cfg)
-        rt_res = bz.get("retest_info") or detect_zone_retest(bz, clean_m5, breakout_result=bo_res, config=cfg)
+        bo_res = detect_zone_breakout(bz, clean_m5, momentum_result=m5_mom, config=cfg)
+        rt_res = detect_zone_retest(bz, clean_m5, breakout_result=bo_res, config=cfg)
 
         if bo_res.get("status") == "FALSE_BREAKOUT":
             invalid_reasons.append(bo_res.get("reason", f"False breakout pada {z_type}."))
@@ -532,7 +546,7 @@ def validate_snr_entry(
                     direction="BUY",
                     entry_price=cp,
                     active_zone=bz,
-                    opposing_zones=active_ress,
+                    opposing_zones=risk_resistances,
                     atr=m5_atr,
                     symbol_spec=symbol_spec,
                     config=cfg,
@@ -594,7 +608,7 @@ def validate_snr_entry(
                     direction="SELL",
                     entry_price=cp,
                     active_zone=bz,
-                    opposing_zones=active_sups,
+                    opposing_zones=risk_supports,
                     atr=m5_atr,
                     symbol_spec=symbol_spec,
                     config=cfg,
@@ -712,6 +726,36 @@ def validate_snr_entry(
     else:
         default_wait_msg = "Waiting for valid price reaction at SNR zone."
 
+    focus_is_support = bool(s1 and focus_zone and focus_zone.get("zone_id") == s1.get("zone_id"))
+    focus_is_resistance = bool(r1 and focus_zone and focus_zone.get("zone_id") == r1.get("zone_id"))
+    recent_closed_touch = False
+    if (focus_is_support and not h4_bear_counter) or (focus_is_resistance and not h4_bull_counter):
+        target = s1 if focus_is_support else r1
+        entered = entered_support if focus_is_support else entered_resistance
+        rejection_valid = valid_bull_rej if focus_is_support else valid_bear_rej
+        directional_close = m5_bull_close if focus_is_support else m5_bear_close
+        momentum_valid = m5_bull_mom if focus_is_support else m5_bear_mom
+        location_valid = (
+            entered_support and dist_from_s1_atr <= max_entry_dist_atr
+            if focus_is_support else entered_resistance and dist_from_r1_atr <= max_entry_dist_atr
+        )
+        inside_now = safe_float(target.get("low")) <= cp <= safe_float(target.get("high"))
+        closed_touch = _closed_touch(target)
+        recent_closed_touch = closed_touch
+        if not closed_touch and inside_now:
+            default_wait_msg = "WAIT_M5_CONFIRMATION: Harga di zona; tunggu interaksi candle M5 tertutup."
+        elif not closed_touch or not entered:
+            distance = max(safe_float(target.get("low")) - cp, cp - safe_float(target.get("high")), 0.0)
+            approach = safe_float(cfg.get("radar", {}).get("approaching_distance_atr"), 0.60) * max(0.25, safe_float(target.get("ref_atr"), 2.0))
+            code = "WAIT_ZONE_TOUCH" if distance <= approach else "WAIT_ZONE_APPROACH"
+            default_wait_msg = f"{code}: Menunggu harga mencapai {focus_label}."
+        elif not rejection_valid:
+            default_wait_msg = f"WAIT_M5_CONFIRMATION: Belum ada rejection M5 terkonfirmasi pada {focus_label}."
+        elif not directional_close or not momentum_valid:
+            default_wait_msg = f"WAIT_M5_CONFIRMATION: Candle atau momentum M5 belum mendukung {focus_label}."
+        elif not location_valid:
+            default_wait_msg = f"WAIT_ZONE_APPROACH: Lokasi entry terlalu jauh dari {focus_label}."
+
     return {
         "final_status": "WAIT",
         "buy_status": "WAIT",
@@ -720,6 +764,7 @@ def validate_snr_entry(
         "direction": "NONE",
         "zone_label": focus_label,
         "target_zone": focus_zone,
+        "recent_closed_touch": recent_closed_touch,
         "nearest_snr_zone": nearest_snr_zone,
         "nearest_snr_label": nearest_snr_label,
         "trend_entry_zone": trend_entry_zone,
@@ -739,7 +784,7 @@ def validate_snr_entry(
         "zone_hold_state": zone_hold_state,
         "pullback_target_zone": pullback_target_zone,
         "pullback_target_label": pullback_target_label,
-        "wait_reasons": [default_wait_msg] + [w for w in wait_reasons if w != default_wait_msg] if (h4_bear_counter or h4_bull_counter) else (wait_reasons if wait_reasons else [default_wait_msg]),
+        "wait_reasons": [default_wait_msg] + [w for w in wait_reasons if w != default_wait_msg],
         "reason": default_wait_msg,
     }
 

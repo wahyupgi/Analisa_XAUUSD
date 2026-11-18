@@ -364,7 +364,58 @@ class TestPantauAudit(unittest.TestCase):
         # Tanpa commission attribute -> net_profit=None (tidak mengarang 0.0)
         self.assertIsNone(res_idc["net_profit"])
 
-    def test_19_profit_protection_suggestion_directions_stops_freeze_no_risk_free(self):
+    def test_19_primary_zone_prefers_monitored_identity_and_signal_lock(self):
+        tick = _make_tick(bid=3887.40, ask=3887.60)
+        scan_result = {
+            "radar_priority": {
+                "primary_directional_zone": {
+                    "zone_id": "SUPPLY_3914",
+                    "timeframe": "H1",
+                    "zone_type": "SUPPLY",
+                    "price_low": 3914.61,
+                    "price_high": 3923.19,
+                    "status": "RADAR",
+                },
+                "nearest_radar_zone": {
+                    "zone_id": "DEMAND_3870",
+                    "timeframe": "M15",
+                    "zone_type": "DEMAND",
+                    "price_low": 3871.00,
+                    "price_high": 3878.00,
+                    "status": "RADAR",
+                },
+            }
+        }
+        decision = {
+            "monitored_zone_identity": {
+                "zone_id": "LOCK_3881",
+                "timeframe": "ACTIVE_SIGNAL",
+                "zone_type": "SUPPLY",
+                "price_low": 3881.66,
+                "price_high": 3893.84,
+                "status": "SIGNAL_LOCKED",
+            }
+        }
+        monitor_data = pantau._build_monitor_snapshot(
+            tick=tick,
+            scan_result=scan_result,
+            decision=decision,
+            otomatis={
+                "sinyal": {
+                    "arah": "SELL",
+                    "lo": 3881.66,
+                    "hi": 3893.84,
+                    "sl": 3907.36,
+                }
+            },
+            monitor_status="MONITORING",
+        )
+        pz = monitor_data.get("primary_zone") or {}
+        self.assertEqual(pz.get("zone_id"), "LOCK_3881")
+        self.assertAlmostEqual(float(pz.get("price_low", 0.0)), 3881.66, places=2)
+        self.assertAlmostEqual(float(pz.get("price_high", 0.0)), 3893.84, places=2)
+
+    def test_20_profit_protection_suggestion_directions_stops_freeze_no_risk_free(self):
         src = inspect.getsource(pantau)
         self.assertNotIn("100% BEBAS RISIKO", src)
         self.assertNotIn("Risk-Free", src)
@@ -403,7 +454,7 @@ class TestPantauAudit(unittest.TestCase):
         self.assertIsNone(pp_frz["suggested_sl"])
         self.assertEqual(pp_frz["reason"], "FREEZE_LEVEL_RESTRICTION")
 
-    def test_20_audit_8_pending_orders_and_structural_sl_unavailable(self):
+    def test_21_audit_8_pending_orders_and_structural_sl_unavailable(self):
         orders = [
             SimpleNamespace(ticket=500 + i, symbol=pantau.SYMBOL, type=2, volume_current=0.01, price_open=3890.0 - i, sl=0.0, tp=0.0)
             for i in range(8)
@@ -416,7 +467,7 @@ class TestPantauAudit(unittest.TestCase):
             self.assertEqual(oa["price_validity"], "VALID_PRICE")
             self.assertEqual(oa["status"], "ACTIVE_PENDING")
 
-    def test_21_reconciliation_scanner_3_received_8_active_3_excluded_5_reasons(self):
+    def test_22_reconciliation_scanner_3_received_8_active_3_excluded_5_reasons(self):
         rq3 = [
             {"zone_id": "RQ1", "timeframe": "M15", "zone_type": "SUPPLY", "price_low": 3910.0, "price_high": 3912.0, "invalidation": 3914.0, "risk_tier": "HIGH_RISK", "status": "RADAR", "radar_eligibility": "QUALIFIED"},
             {"zone_id": "RQ2", "timeframe": "M5", "zone_type": "SUPPLY", "price_low": 3920.0, "price_high": 3922.0, "invalidation": 3924.0, "risk_tier": "UNCLASSIFIED", "status": "RADAR", "radar_eligibility": "QUALIFIED"},

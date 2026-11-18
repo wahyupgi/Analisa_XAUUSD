@@ -6299,7 +6299,58 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 bid=scan.get("bid"), ask=scan.get("ask"),
             )
             # ENTRY VALIDATION SUMMARY (Sinkronkan zona yang dipantau dengan satu sumber data kandidat)
-            monitored_ref = dec.get("zone")
+            locked_signal_zone = None
+            try:
+                import modules.state_manager as _sm
+                _st_data = _sm.muat_state_sinyal() or {}
+                _sig_data = _st_data.get("sinyal") if isinstance(_st_data, dict) else None
+                if isinstance(_sig_data, dict):
+                    _arah = str(_sig_data.get("arah", "")).upper()
+                    _lo = float(_sig_data.get("lo", 0.0) or 0.0)
+                    _hi = float(_sig_data.get("hi", 0.0) or 0.0)
+                    _sl = float(_sig_data.get("sl", 0.0) or 0.0)
+                    _cp = float(price or 0.0)
+                    if _lo > 0 and _hi > 0 and _arah in ("BUY", "SELL"):
+                        if _lo > _hi:
+                            _lo, _hi = _hi, _lo
+                        _invalid = False
+                        if _cp > 0 and _sl > 0:
+                            if _arah == "SELL" and _cp > _sl:
+                                _invalid = True
+                            if _arah == "BUY" and _cp < _sl:
+                                _invalid = True
+                        if not _invalid:
+                            _ztype = "SUPPLY" if _arah == "SELL" else "DEMAND"
+                            _match = next((z for z in (all_r or [])
+                                           if str(z.get("zone_type", "")).upper() == _ztype
+                                           and abs(float(z.get("price_low", 0.0)) - _lo) <= 1.5
+                                           and abs(float(z.get("price_high", 0.0)) - _hi) <= 1.5), None)
+                            if _match is not None:
+                                locked_signal_zone = _match
+                            else:
+                                locked_signal_zone = {
+                                    "zone_id": f"LOCKED_SIGNAL_{_arah}_{_lo:.2f}_{_hi:.2f}",
+                                    "timeframe": "ACTIVE_SIGNAL",
+                                    "zone_type": _ztype,
+                                    "price_low": _lo,
+                                    "price_high": _hi,
+                                    "status": "SIGNAL_LOCKED",
+                                    "approach": "TOUCHED" if (_cp > 0 and _lo <= _cp <= _hi) else "UNTOUCHED",
+                                }
+            except Exception:
+                locked_signal_zone = None
+
+            monitored_ref = (
+                dec.get("zone")
+                or (winning_zdict if ("winning_zdict" in locals() and winning_zdict) else None)
+                or (best_candidate_dict if "best_candidate_dict" in locals() else None)
+                or locked_signal_zone
+                or prio.get("best_confirmed_candidate")
+                or prio.get("best_pending_candidate")
+                or prio.get("nearest_radar_zone")
+                or prio.get("primary_directional_zone")
+                or (all_r[0] if all_r else None)
+            )
             if monitored_ref:
                 z_lbl = f"{monitored_ref.get('timeframe', 'H1')} {monitored_ref.get('zone_type', '')} ({monitored_ref.get('price_low', 0.0):.2f} - {monitored_ref.get('price_high', 0.0):.2f})"
                 z_lo_val = float(monitored_ref.get("price_low", 0.0))

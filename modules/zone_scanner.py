@@ -40,10 +40,12 @@ from modules.config import (
 from modules.utils import _catat_error, WIB_TZ, get_current_wib, to_wib_datetime, format_wib_timestamp
 from modules.mt5_conn import ambil_data, pastikan_mt5_aktif, tambah_indikator
 from modules.trend_following import (
+    _is_snr_zone_broken_or_inactive,
     _snr_frames_signature,
     assess_m30_condition,
     evaluate_h1_trend_confirmation,
     evaluate_h4_primary_trend,
+    evaluate_snr_opposing_barrier,
     evaluate_trend_following_setup,
     extract_snr_supporting_context,
 )
@@ -992,6 +994,8 @@ def evaluate_htf_context(frames: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
 
     h4_info = evaluate_h4_primary_trend(frames.get("H4"), regime_h4=regimes["H4"])
     h1_conf = evaluate_h1_trend_confirmation(frames.get("H1"), h4_info, regime_h1=regimes["H1"])
+    r["h1_regime"] = regimes["H1"]
+    r["m30_regime"] = regimes["M30"]
     r["h1_confirmation"] = h1_conf.get("status", "UNCONFIRMED")
     r["h1_detail"] = h1_conf
 
@@ -2728,22 +2732,25 @@ def evaluate_zone_hybrid_eligibility(
         st_tr = m5_stages.get("structure_trigger", {}).get("status")
         st_dp = m5_stages.get("displacement", {}).get("status")
         st_rr = m5_stages.get("risk_reward", {}).get("status")
+        st_ev = m5_stages.get("entry_validation", {}).get("status")
+        rr_msg = str(m5_stages.get("risk_reward", {}).get("msg") or "").strip()
+        ev_msg = str(m5_stages.get("entry_validation", {}).get("msg") or "").strip()
 
-        if st_zt != "CONFIRMED":
+        if st_zt not in ("CONFIRMED", "NOT_REQUIRED", "PASS", "PASSED"):
             confirmed_elig = "WAIT"
             confirmed_reason = "Harga belum menyentuh zona (Zone Touch belum terkonfirmasi)"
-        elif st_sw != "CONFIRMED":
+        elif st_sw not in ("CONFIRMED", "OPTIONAL_OK", "PASS", "PASSED"):
             confirmed_elig = "WAIT"
             confirmed_reason = "Menunggu konfirmasi Liquidity Sweep M5 di area zona"
-        elif st_tr != "CONFIRMED":
+        elif st_tr not in ("CONFIRMED", "PASS", "PASSED"):
             confirmed_elig = "WAIT"
             confirmed_reason = "Menunggu konfirmasi pembalikan/kelanjutan struktur CHoCH/BOS/CISD M5"
-        elif st_dp != "CONFIRMED":
+        elif st_dp not in ("CONFIRMED", "PASS", "PASSED"):
             confirmed_elig = "WAIT"
             confirmed_reason = "Menunggu dorongan displacement momentum M5"
-        elif st_rr in ("FAILED", "WAIT"):
+        elif st_rr in ("FAILED", "FAIL", "WAIT") or st_ev in ("FAILED", "FAIL", "INVALID", "WAIT"):
             confirmed_elig = "FAILED"
-            confirmed_reason = "Risk/Reward kalkulasi M5 tidak memenuhi minimum 1:1.5"
+            confirmed_reason = rr_msg or ev_msg or "Risk/Reward kalkulasi M5 tidak memenuhi minimum 1:1.5"
         else:
             confirmed_elig = "CONFIRMED"
             confirmed_reason = "Seluruh 5 tahap konfirmasi M5 (Touch, Sweep, CHoCH/BOS, Displacement, RR) terpenuhi"
@@ -3244,12 +3251,20 @@ def prioritize_radar_zones(
                 missing.append("[DISPLACEMENT]: Belum ada konfirmasi dorongan displacement M5 searah")
 
             m5_triggers_ready = (st_tr in ("CONFIRMED", "PASS", "PASSED") and st_dp in ("CONFIRMED", "PASS", "PASSED"))
-            if st_rr in ("CONFIRMED", "PASS", "PASSED"):
+            st_ev = (m5_stages or {}).get("entry_validation", {}).get("status")
+            rr_msg_rad = str((m5_stages or {}).get("risk_reward", {}).get("msg") or "").strip()
+            ev_msg_rad = str((m5_stages or {}).get("entry_validation", {}).get("msg") or "").strip()
+            block_detail_rad = rr_msg_rad or ev_msg_rad
+            if st_rr in ("CONFIRMED", "PASS", "PASSED") and st_ev not in ("FAILED", "FAIL", "INVALID", "WAIT"):
                 confirmed_entry_rr_status = "PASSED"
             elif m5_triggers_ready:
-                if st_rr in ("FAILED", "FAIL", "WAIT"):
+                if st_rr in ("FAILED", "FAIL", "WAIT") or st_ev in ("FAILED", "FAIL", "INVALID", "WAIT"):
                     confirmed_entry_rr_status = "FAILED"
-                    missing.append("[CONFIRMED_ENTRY_RISK_REWARD]: Entry konfirmasi M5 tidak memenuhi Risk/Reward minimum 1:1.5")
+                    missing.append(
+                        f"[CONFIRMED_ENTRY_RISK_REWARD]: {block_detail_rad}"
+                        if block_detail_rad
+                        else "[CONFIRMED_ENTRY_RISK_REWARD]: Entry konfirmasi M5 tidak memenuhi Risk/Reward minimum 1:1.5"
+                    )
                 else:
                     confirmed_entry_rr_status = "WAIT"
             else:
@@ -3291,8 +3306,12 @@ def prioritize_radar_zones(
             st_tr = (m5_stages or {}).get("structure_trigger", {}).get("status")
             st_dp = (m5_stages or {}).get("displacement", {}).get("status")
             st_rr = (m5_stages or {}).get("risk_reward", {}).get("status")
+            st_ev = (m5_stages or {}).get("entry_validation", {}).get("status")
+            rr_m_blk = str((m5_stages or {}).get("risk_reward", {}).get("msg") or "").strip()
+            ev_m_blk = str((m5_stages or {}).get("entry_validation", {}).get("msg") or "").strip()
+            blk_m = rr_m_blk or ev_m_blk
 
-            if st_sw not in ("CONFIRMED", "PASS", "PASSED"):
+            if st_sw not in ("CONFIRMED", "OPTIONAL_OK", "PASS", "PASSED"):
                 sw_msg = (m5_stages or {}).get("liquidity_sweep", {}).get("msg", "")
                 if "jauh" in str(sw_msg).lower():
                     primary_blocker = f"Harga telah menyentuh {p_name} ({p_range}), namun Liquidity Sweep M5 terjadi tidak relevan (terlalu jauh dari area zona). Menunggu sweep yang valid."
@@ -3300,13 +3319,21 @@ def prioritize_radar_zones(
                     primary_blocker = f"Harga telah memasuki {p_name} ({p_range}), tetapi belum ada konfirmasi Liquidity Sweep M5 yang valid di area zona."
                 dynamic_wait = f"WAIT: {primary_blocker}{ct_note}"
             elif st_tr not in ("CONFIRMED", "PASS", "PASSED"):
-                primary_blocker = f"Harga telah menyentuh {p_name} dan membentuk Liquidity Sweep M5, tetapi belum terkonfirmasi pembalikan/kelanjutan struktur (CHoCH/BOS M5)."
+                tr_m = str((m5_stages or {}).get("structure_trigger", {}).get("msg") or "").strip()
+                primary_blocker = (
+                    tr_m
+                    if ("berbalik" in tr_m.lower() or "historis" in tr_m.lower())
+                    else f"Harga telah menyentuh {p_name} dan membentuk Liquidity Sweep M5, tetapi belum terkonfirmasi pembalikan/kelanjutan struktur (CHoCH/BOS M5)."
+                )
                 dynamic_wait = f"WAIT: {primary_blocker}{ct_note}"
             elif st_dp not in ("CONFIRMED", "PASS", "PASSED"):
                 primary_blocker = f"Sweep dan CHoCH M5 terkonfirmasi pada {p_name}, namun displacement M5 masih lemah."
                 dynamic_wait = f"WAIT: {primary_blocker}{ct_note}"
-            elif st_rr in ("FAILED", "FAIL", "WAIT"):
-                primary_blocker = f"Konfirmasi trigger M5 pada {p_name} terpenuhi, tetapi kalkulasi Risk/Reward belum mencapai minimum 1:1.5."
+            elif st_rr in ("FAILED", "FAIL", "WAIT") or st_ev in ("FAILED", "FAIL", "INVALID", "WAIT"):
+                if blk_m and any(k in blk_m.lower() for k in ("snr", "s&r", "konflik", "terhalang", "historis", "terlewat")):
+                    primary_blocker = f"Konfirmasi teknikal M5 pada {p_name} terpenuhi, namun entry ditahan: {blk_m}"
+                else:
+                    primary_blocker = f"Konfirmasi trigger M5 pada {p_name} terpenuhi, tetapi kalkulasi Risk/Reward belum mencapai minimum 1:1.5."
                 dynamic_wait = f"WAIT: {primary_blocker}{ct_note}"
             else:
                 primary_blocker = f"Menunggu penyelesaian validasi final pada {p_name}."
@@ -3347,12 +3374,16 @@ def prioritize_radar_zones(
         st_tr = (m5_stages or {}).get("structure_trigger", {}).get("status")
         st_dp = (m5_stages or {}).get("displacement", {}).get("status")
         st_rr = (m5_stages or {}).get("risk_reward", {}).get("status")
+        st_ev = (m5_stages or {}).get("entry_validation", {}).get("status")
+        rr_m_blk = str((m5_stages or {}).get("risk_reward", {}).get("msg") or "").strip()
+        ev_m_blk = str((m5_stages or {}).get("entry_validation", {}).get("msg") or "").strip()
+        blk_m = rr_m_blk or ev_m_blk
 
         is_touched = (eval_target.get("approach") in ("TOUCHED", "ZONE_TOUCHED") or st_zt in ("CONFIRMED", "PASS", "PASSED"))
         if not is_touched:
             confirmed_blockers.append(f"[ZONE_TOUCH]: Harga belum mencapai atau menyentuh {eval_target['zone_type'].capitalize()} ({eval_target['price_low']:.2f}-{eval_target['price_high']:.2f}, jarak {eval_target['distance']:.2f} pt) — konfirmasi M5 menunggu zone touch")
         else:
-            if st_sw not in ("CONFIRMED", "PASS", "PASSED"):
+            if st_sw not in ("CONFIRMED", "OPTIONAL_OK", "PASS", "PASSED"):
                 want_sw = "Buy-Side Liquidity (EQH/Swing High)" if eval_target["zone_type"] == "SUPPLY" else "Sell-Side Liquidity (EQL/Swing Low)"
                 sw_m = (m5_stages or {}).get("liquidity_sweep", {}).get("msg", "")
                 if "jauh" in str(sw_m).lower():
@@ -3365,8 +3396,12 @@ def prioritize_radar_zones(
             elif st_dp not in ("CONFIRMED", "PASS", "PASSED"):
                 dp_m = (m5_stages or {}).get("displacement", {}).get("msg", "Displacement lemah")
                 confirmed_blockers.append(f"[DISPLACEMENT]: Belum ada konfirmasi dorongan displacement momentum M5 searah ({dp_m})")
-            elif st_rr in ("FAILED", "FAIL", "WAIT"):
-                confirmed_blockers.append("[RISK_REWARD]: Kalkulasi Risk/Reward belum mencapai minimum 1:1.5")
+            elif st_rr in ("FAILED", "FAIL", "WAIT") or st_ev in ("FAILED", "FAIL", "INVALID", "WAIT"):
+                confirmed_blockers.append(
+                    f"[RISK_REWARD]: {blk_m}"
+                    if blk_m
+                    else "[RISK_REWARD]: Kalkulasi Risk/Reward belum mencapai minimum 1:1.5"
+                )
     else:
         pending_blockers.append(f"Tidak ada zona Grade A yang selaras dengan bias HTF ({htf_bias})")
         confirmed_blockers.append(f"Tidak ada zona aktif yang selaras dengan arah bias HTF ({htf_bias})")
@@ -4277,6 +4312,7 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
         atr=ref_atr,
         digits=2,
         frames=frames,
+        m30_status=ctx.get("m30_status", "CONFIRMED"),
         rejected_zones=rejected,
         bid=bid,
         ask=ask,
@@ -4298,7 +4334,11 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
 
     # Sinkronisasi atribut prioritas & multi-tier ke objek Zone
     p_map = {z_d["zone_id"]: z_d for z_d in radar_prio.get("all_prioritized", [])}
-    for z in radar_zones:
+    seen_sync_objs = set()
+    for z in (*radar_zones, *active):
+        if id(z) in seen_sync_objs:
+            continue
+        seen_sync_objs.add(id(z))
         if z.zone_id in p_map:
             p_item = p_map[z.zone_id]
             z.distance = p_item["distance"]
@@ -4310,11 +4350,28 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
             z.distance_atr_ratio = p_item.get("distance_atr_ratio")
             z.atr_value = p_item.get("atr_value")
             z.risk_tier = p_item.get("risk_tier", "")
+            z.risk_tier_reason = p_item.get("risk_tier_reason", "")
             z.status = p_item.get("status", "RADAR")
             z.radar_eligibility = p_item.get("radar_eligibility", "QUALIFIED")
             z.pending_eligibility = p_item.get("pending_eligibility", "NOT_QUALIFIED")
             z.confirmed_entry_eligibility = p_item.get("confirmed_entry_eligibility", "WAIT")
             z.pending_plan = p_item.get("pending_plan")
+        else:
+            d_res = calculate_zone_distance(
+                z.price_low, z.price_high, snapshot_price, digits=2,
+                zone_type=z.zone_type, bid=bid, ask=ask, atr=ref_atr,
+            )
+            z.distance = d_res.distance
+            z.direction_status = d_res.status
+            z.approach = calculate_zone_approach(d_res.distance, d_res.status, atr=ref_atr)
+            z.distance_atr_ratio, _ = calculate_distance_atr_ratio(d_res.distance, ref_atr)
+            z.atr_value = ref_atr
+            z.risk_tier = classify_zone_risk_tier(
+                z, snapshot_price,
+                htf_bias=ctx.get("H4", "NETRAL"),
+                h1_structure=ctx.get("H1", "NETRAL"),
+                atr=ref_atr, bid=bid, ask=ask,
+            )
 
     out["valid_zones"] = [z.to_dict() for z in active]
     out["active_zones"] = [z.to_dict() for z in active]
@@ -4491,6 +4548,9 @@ def evaluate_smc_snr_confluence(
             "gap_points": 0.0,
             "smc_zone": None,
             "snr_zone": None,
+            "opposing_conflict": False,
+            "opposing_snr_zone": None,
+            "opposing_overlap_points": 0.0,
             "htf_alignment": "NONE",
             "display_block": "SMC + SNR CONFLUENCE: NOT AVAILABLE (Data SNR tidak mencukupi)",
         }
@@ -4504,12 +4564,72 @@ def evaluate_smc_snr_confluence(
     smc_fresh = str(zd.get("freshness", "FRESH"))
     smc_grd = str(zd.get("grade", "A"))
 
+    def _snr_zone_list(key_plural: str, key_single: str) -> List[Dict[str, Any]]:
+        vals = snr_context.get(key_plural)
+        if isinstance(vals, list) and vals:
+            return [z for z in vals if isinstance(z, dict)]
+        single = snr_context.get(key_single)
+        if isinstance(single, list):
+            return [z for z in single if isinstance(z, dict)]
+        if isinstance(single, dict):
+            return [single]
+        return []
+
     # Cari zona SNR yang sejenis (Supply -> Resistance, Demand -> Support)
-    matching_snr_zones = []
+    # serta deteksi konflik terhadap zona SNR lawan yang masih aktif/unbroken
+    matching_snr_zones: List[Dict[str, Any]] = []
+    opposing_snr_zones: List[Dict[str, Any]] = []
+    opp_dir_for_zone = "SELL" if z_type == "SUPPLY" else "BUY"
     if z_type == "SUPPLY":
-        matching_snr_zones = snr_context.get("resistances") or snr_context.get("resistance") or []
+        matching_snr_zones = _snr_zone_list("resistances", "resistance")
+        opposing_snr_zones = _snr_zone_list("supports", "support")
     elif z_type == "DEMAND":
-        matching_snr_zones = snr_context.get("supports") or snr_context.get("support") or []
+        matching_snr_zones = _snr_zone_list("supports", "support")
+        opposing_snr_zones = _snr_zone_list("resistances", "resistance")
+
+    opposing_snr_zone: Optional[Dict[str, Any]] = None
+    opp_overlap_pts = 0.0
+    for oz in opposing_snr_zones:
+        if _is_snr_zone_broken_or_inactive(oz, opp_dir_for_zone, snr_context=snr_context):
+            continue
+        o_grade = str(oz.get("grade") or "").upper()
+        o_score = float(oz.get("score") or 0.0)
+        o_strength = str(oz.get("strength_short") or oz.get("strength") or "").upper()
+        o_material = (
+            o_grade in ("A+", "A", "B", "C")
+            or o_score >= 60.0
+            or ("STRONG" in o_strength)
+            or ("MODERATE" in o_strength)
+            or ("KUAT" in o_strength)
+            or ("SEDANG" in o_strength)
+        )
+        if not o_material:
+            continue
+        o_lo = float(oz.get("low", 0.0) or 0.0)
+        o_hi = float(oz.get("high", 0.0) or 0.0)
+        if o_lo <= 0 or o_hi <= 0:
+            continue
+        if o_lo > o_hi:
+            o_lo, o_hi = o_hi, o_lo
+        opp_ov_lo = max(smc_lo, o_lo)
+        opp_ov_hi = min(smc_hi, o_hi)
+        opp_ov = max(0.0, opp_ov_hi - opp_ov_lo)
+        if opp_ov > 0 and (opposing_snr_zone is None or opp_ov > opp_overlap_pts):
+            opp_overlap_pts = opp_ov
+            opposing_snr_zone = oz
+
+    opposing_conflict = opposing_snr_zone is not None
+    opp_conflict_line = ""
+    if opposing_conflict and opposing_snr_zone is not None:
+        o_tf = str(opposing_snr_zone.get("timeframe", "H1"))
+        o_lbl = str(opposing_snr_zone.get("label") or opposing_snr_zone.get("rank_label") or ("Support" if z_type == "SUPPLY" else "Resistance"))
+        o_grd = str(opposing_snr_zone.get("grade") or "-")
+        o_lo = float(opposing_snr_zone.get("low", 0.0) or 0.0)
+        o_hi = float(opposing_snr_zone.get("high", 0.0) or 0.0)
+        opp_conflict_line = (
+            f"KONFLIK SNR LAWAN: {smc_tf} {z_type} bertabrakan dengan {o_tf} "
+            f"{o_lbl} Grade {o_grd} ({o_lo:.2f} - {o_hi:.2f}, overlap {opp_overlap_pts:.2f} pt)"
+        )
 
     best_match = None
     best_overlap = -1.0
@@ -4535,18 +4655,24 @@ def evaluate_smc_snr_confluence(
                 best_match = (sz, 0.0, 0.0, 0.0, gap)
 
     if not best_match:
+        no_match_disp = "SMC + SNR CONFLUENCE: NONE (Tidak ditemukan zona SNR searah yang berdekatan)"
+        if opposing_conflict:
+            no_match_disp = f"{no_match_disp}\n  • {opp_conflict_line}"
         return {
             "available": True,
-            "status": "NO_CONFLUENCE",
-            "confluence_status": "NONE",
+            "status": "CONFLICT" if opposing_conflict else "NO_CONFLUENCE",
+            "confluence_status": "CONFLICT" if opposing_conflict else "NONE",
             "is_aligned": False,
             "overlap_points": 0.0,
             "overlap_percentage": 0.0,
             "gap_points": 0.0,
             "smc_zone": zd,
             "snr_zone": None,
+            "opposing_conflict": opposing_conflict,
+            "opposing_snr_zone": opposing_snr_zone,
+            "opposing_overlap_points": round(opp_overlap_pts, 2),
             "htf_alignment": "NONE",
-            "display_block": "SMC + SNR CONFLUENCE: NONE (Tidak ditemukan zona SNR yang berdekatan)",
+            "display_block": no_match_disp,
         }
 
     sz, ov_lo, ov_hi, overlap_pts, gap_pts = best_match
@@ -4576,6 +4702,8 @@ def evaluate_smc_snr_confluence(
         f"  • HTF Alignment  : {htf_align_str} with H4 {htf_bias}",
         "  • Keterangan     : Informasi pendukung konfluensi zona institusional (tidak menambah skor ganda atau memaksa entry).",
     ]
+    if opposing_conflict:
+        block_lines.append(f"  • Peringatan     : {opp_conflict_line}")
 
     return {
         "available": True,
@@ -4588,6 +4716,9 @@ def evaluate_smc_snr_confluence(
         "overlap_area": (ov_lo, ov_hi) if overlap_pts > 0 else None,
         "smc_zone": zd,
         "snr_zone": sz,
+        "opposing_conflict": opposing_conflict,
+        "opposing_snr_zone": opposing_snr_zone,
+        "opposing_overlap_points": round(opp_overlap_pts, 2),
         "htf_alignment": htf_align_str,
         "display_block": "\n".join(block_lines),
     }
@@ -4616,7 +4747,8 @@ def _structural_targets(frames: Dict[str, pd.DataFrame], zone_type: str, entry: 
 
 def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread: float = 0.0,
                  news_blackout=False, htf_frames: Optional[Dict[str, pd.DataFrame]] = None,
-                 require_sweep: Optional[bool] = None, server_time: Any = None) -> Dict[str, Any]:
+                 require_sweep: Optional[bool] = None, server_time: Any = None,
+                 snr_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Hasil terstruktur: status VALID/WAIT/INVALID, reasons, stages, plan.
     Urutan validasi ketat konsisten untuk semua grade zona:
       1. Validasi zona & integritas data candle close selesai
@@ -4624,7 +4756,7 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
       3. Terdapat indikasi Liquidity Sweep yang valid dan relevan dengan area zona
       4. Terdapat konfirmasi pembalikan atau kelanjutan struktur (CHoCH/BOS/CISD) SETELAH sweep
       5. Terdapat displacement yang memadai searah transaksi
-      6. Risk Reward memenuhi syarat (>= 1.5) dan jarak SL wajar (<= 20 pt)
+      6. Risk Reward memenuhi syarat (>= 1.5), jarak SL wajar (<= 20 pt), dan bebas penghalang SNR material
     """
     stages = {
         "zone_validation": {"status": "NOT_CHECKED", "msg": ""},
@@ -4635,7 +4767,15 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         "entry_validation": {"status": "NOT_CHECKED", "msg": ""},
         "risk_reward": {"status": "NOT_CHECKED", "msg": "", "rr": None},
     }
-    res: Dict[str, Any] = {"status": "WAIT", "reasons": [], "plan": None, "m5": {}, "stages": stages}
+    res: Dict[str, Any] = {
+        "status": "WAIT",
+        "reasons": [],
+        "plan": None,
+        "m5": {},
+        "stages": stages,
+        "smc_technical_confirmed": False,
+        "entry_permission": "WAIT",
+    }
     W = res["reasons"]
 
     # 1. Validasi Zona
@@ -4749,23 +4889,15 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         W.append(f"Harga belum mencapai atau menyentuh zona entry {lo:.2f}-{hi:.2f}")
         return res
 
-    if live_touch_only or (lo <= price <= hi and touch_indices[-1] != n5 - 1):
-        first_touch_k = n5
-    else:
-        first_touch_k = touch_indices[-1]
-        for previous, current in zip(reversed(touch_indices[:-1]), reversed(touch_indices[1:])):
-            if current - previous != 1:
-                break
-            first_touch_k = previous
+    first_touch_k = n5 if live_touch_only else touch_indices[0]
     dist = 0.0 if lo <= price <= hi else (lo - price if price < lo else price - hi)
     approach = max(3.0, 1.5 * atr5)
     if dist > approach:
-        # Distinguish price still waiting to reach the zone from a missed entry.
-        waiting_for_zone = (not demand and price < lo) or (demand and price > hi)
+        moved_away_profit = (demand and price > hi) or ((not demand) and price < lo)
         detail = (
+            f"Entry terlambat: harga telah melewati zona entry ({dist:.2f} pt > toleransi {approach:.2f} pt)"
+            if moved_away_profit else
             f"Harga masih di luar zona; menunggu pullback ({dist:.2f} pt > toleransi {approach:.2f} pt)"
-            if waiting_for_zone else
-            f"Harga telah melewati zona entry ({dist:.2f} pt > toleransi {approach:.2f} pt)"
         )
         stages["zone_touch"] = {"status": "FAIL", "msg": detail}
         W.append(detail)
@@ -4822,10 +4954,19 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     except Exception:
         pass
 
-    matching_events = [e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE and e["k"] >= max(first_touch_k, k_sweep)]
-    matching_cisd = [c for c in cl if c["arah"] == ("BULLISH" if demand else "BEARISH") and n5 - 1 - c["k"] <= M5_EVENT_MAX_AGE and c["k"] >= max(first_touch_k, k_sweep)]
+    def _has_opposing_m5_after(trig_k: int) -> bool:
+        return any(e2.get("arah") != want_dir and int(e2.get("k", -1)) > trig_k for e2 in events)
+
+    raw_matching_events = [e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE and e["k"] >= max(first_touch_k, k_sweep)]
+    raw_matching_cisd = [c for c in cl if c["arah"] == ("BULLISH" if demand else "BEARISH") and n5 - 1 - c["k"] <= M5_EVENT_MAX_AGE and c["k"] >= max(first_touch_k, k_sweep)]
+    matching_events = [e for e in raw_matching_events if not _has_opposing_m5_after(int(e["k"]))]
+    matching_cisd = [c for c in raw_matching_cisd if not _has_opposing_m5_after(int(c["k"]))]
 
     if not matching_events and not matching_cisd:
+        if raw_matching_events or raw_matching_cisd:
+            stages["structure_trigger"] = {"status": "WAIT", "msg": "Struktur M5 pasca-trigger sudah berbalik arah (sinyal M5 historis tidak berlaku)"}
+            W.append(stages["structure_trigger"]["msg"])
+            return res
         prior_events = [e for e in reversed(events) if e["arah"] == want_dir and n5 - 1 - e["k"] <= M5_EVENT_MAX_AGE]
         prior_cisd = [c for c in cl if c["arah"] == ("BULLISH" if demand else "BEARISH") and n5 - 1 - c["k"] <= M5_EVENT_MAX_AGE]
         if prior_events or prior_cisd:
@@ -4877,6 +5018,21 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
             W.append(msg_inv)
             return res
 
+    res["smc_technical_confirmed"] = True
+    m5["technical_confirmed"] = True
+
+    bars_since_trig = (n5 - 1) - k_ref
+    chase_tol = max(1.0, 0.5 * atr5)
+    if bars_since_trig > 2 and (
+        (demand and price > hi + chase_tol)
+        or ((not demand) and price < lo - chase_tol)
+    ):
+        msg_missed = f"Sinyal M5 sudah historis/terlewat (trigger {bars_since_trig} bar lalu); harga telah meninggalkan zona entry"
+        stages["entry_validation"] = {"status": "WAIT", "msg": msg_missed}
+        res["entry_permission"] = "WAIT"
+        W.append(msg_missed)
+        return res
+
     # 6. Risk Reward & Risk Management
     if demand:
         e_lo, e_hi = (lo, hi) if hi - lo <= ENTRY_LEBAR_MAKS else (round(hi - ENTRY_LEBAR_MAKS, 2), hi)
@@ -4912,9 +5068,44 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     rr = round(reward / risk, 2) if risk > 0 else 0.0
     res["rr"] = rr
 
+    if k_ref + 1 < n5:
+        post_tp_hit = (
+            bool(np.any(H[k_ref + 1 : n5] >= tp1))
+            if demand
+            else bool(np.any(L[k_ref + 1 : n5] <= tp1))
+        )
+        if post_tp_hit:
+            msg_tp = f"Target TP1 {tp1:.2f} sudah tersentuh pasca-trigger M5 (sinyal historis/terlewat)"
+            stages["risk_reward"] = {"status": "WAIT", "msg": msg_tp, "rr": rr}
+            stages["entry_validation"] = {"status": "WAIT", "msg": msg_tp}
+            res["entry_permission"] = "WAIT"
+            W.append(msg_tp)
+            return res
+
+    barrier = evaluate_snr_opposing_barrier(
+        "BUY" if demand else "SELL",
+        entry,
+        sl,
+        tp1=tp1,
+        current_price=price,
+        snr_context=snr_context,
+    )
+    if barrier.get("blocked"):
+        clean_rr = barrier.get("clean_rr")
+        if clean_rr is not None:
+            res["rr"] = clean_rr
+        stages["risk_reward"] = {"status": "WAIT", "msg": barrier["reason"], "rr": res["rr"]}
+        stages["entry_validation"] = {"status": "WAIT", "msg": barrier["reason"]}
+        res["entry_permission"] = "WAIT"
+        W.append(barrier["reason"])
+        return res
+
     if reward <= 0 or reward / risk < RR_MIN - 1e-9:
-        stages["risk_reward"] = {"status": "WAIT", "msg": f"R:R aktual ke TP1 struktural {rr:.2f} < 1:{RR_MIN:g}", "rr": rr}
-        W.append(f"R:R aktual ke TP1 struktural {rr:.2f} < 1:{RR_MIN:g}")
+        msg_rr = f"R:R aktual ke TP1 struktural {rr:.2f} < 1:{RR_MIN:g}"
+        stages["risk_reward"] = {"status": "WAIT", "msg": msg_rr, "rr": rr}
+        stages["entry_validation"] = {"status": "WAIT", "msg": msg_rr}
+        res["entry_permission"] = "WAIT"
+        W.append(msg_rr)
         return res
 
     stages["risk_reward"] = {"status": "CONFIRMED", "msg": f"1:{rr:.2f}", "rr": rr}
@@ -4925,6 +5116,7 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
                    "timeframe": zone.timeframe, "grade": zone.grade, "score": zone.score,
                    "keterangan": f"Zona {zone.grade} {zone.timeframe} {zone.zone_type} + trigger M5 {m5['structure_event']}"}
     res["status"] = "VALID"
+    res["entry_permission"] = "GRANTED"
     W.append(f"Entry valid: {m5['structure_event']}, displacement M5 {disp5:.2f} ATR, R:R {rr:.2f}")
     return res
 
@@ -4932,9 +5124,10 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
 def validate_entry_setup(zone: Zone, current_price: float, df_m5: pd.DataFrame, spread_points: float = 0.0,
                          is_news_blackout=False, htf_frames: Optional[Dict[str, pd.DataFrame]] = None,
                          require_sweep: Optional[bool] = None,
-                         server_time: Any = None) -> Tuple[bool, str, Dict[str, Any]]:
+                         server_time: Any = None,
+                         snr_context: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:
     """Kompatibel dgn versi lama: (ok, pesan, plan). Status lengkap ada di plan['status'] bila ok; pesan diawali VALID/WAIT/INVALID."""
-    r = _entry_check(zone, current_price, df_m5, spread_points, is_news_blackout, htf_frames, require_sweep, server_time=server_time)
+    r = _entry_check(zone, current_price, df_m5, spread_points, is_news_blackout, htf_frames, require_sweep, server_time=server_time, snr_context=snr_context)
     return r["status"] == "VALID", f"{r['status']}: " + "; ".join(r["reasons"]), (r["plan"] or {})
 
 
@@ -5449,6 +5642,16 @@ def detect_early_setups(
         m30_val = {"status": "CONFIRMED", "msg": "M30 ok"}
     m30_status = m30_val.get("status", "CONFIRMED")
 
+    ctx_m30_status = str(ctx.get("m30_status") or "").upper()
+    if ctx.get("m30_conflict") or ctx_m30_status == "CONFLICT":
+        m30_status = "CONFLICT"
+        ctx_m30_msg = (ctx.get("m30_condition") or {}).get("msg") or m30_val.get("msg") or f"M30 bertentangan dengan H4 {h4_bias}"
+        m30_val = {**m30_val, "status": "CONFLICT", "ok": False, "msg": ctx_m30_msg}
+    elif ctx_m30_status in ("INVALID", "WEAK") and m30_status not in ("CONFLICT", "INVALID", "WEAK"):
+        m30_status = ctx_m30_status
+        ctx_m30_msg = (ctx.get("m30_condition") or {}).get("msg") or m30_val.get("msg") or ""
+        m30_val = {**m30_val, "status": m30_status, "ok": False, "msg": ctx_m30_msg}
+
     if current_price is None:
         current_price = scan.get("current_price", 0.0)
 
@@ -5481,6 +5684,7 @@ def detect_early_setups(
         return out
 
     valid_plans = []
+    rejection_reasons = []
     tracker = get_zone_tracker(auto_save=False)
     tracked_zones = tracker.tracked_zones if tracker else {}
 
@@ -5502,12 +5706,18 @@ def detect_early_setups(
         )
         if plan.get("valid"):
             valid_plans.append(plan)
+        elif plan.get("rejection_reason"):
+            rejection_reasons.append(str(plan["rejection_reason"]))
 
     out["all_setups"] = valid_plans
     if valid_plans:
         out["best_setup"] = valid_plans[0]
     else:
-        out["empty_reason"] = "Tidak ada zona yang memenuhi syarat Risk/Reward >= 1.5 atau batas invalidasi"
+        out["empty_reason"] = (
+            rejection_reasons[0]
+            if rejection_reasons
+            else "Syarat pending order belum terpenuhi"
+        )
     return out
 
 
@@ -5917,14 +6127,40 @@ def _entry_audit(dec: Dict[str, Any]) -> Dict[str, Any]:
 def _provisional_zone_plans(dec, price, frames, h4_bias, m30_status, server_time, bid=None, ask=None):
     """Run the existing pending-order planner once per displayed zone so every command shows the same levels."""
     plans: Dict[str, Dict[str, Any]] = {}
-    for zd in (dec.get("zone"), dec.get("primary_zone"), dec.get("nearest_valid_zone"), dec.get("next_radar_zone")):
+    r_prio = dec.get("radar_priority") or {}
+    cands = (
+        dec.get("zone"),
+        dec.get("primary_zone"),
+        dec.get("nearest_valid_zone"),
+        dec.get("next_radar_zone"),
+        r_prio.get("primary_directional_zone"),
+        r_prio.get("nearest_radar_zone"),
+        r_prio.get("best_high_risk"),
+    )
+    for zd in cands:
         zid = zd.get("zone_id") if isinstance(zd, dict) else None
         if not zid or zid in plans:
             continue
         try:
-            plans[zid] = plan_pending_order(
-                _zone_from_dict(zd), float(price), frames, h4_bias, m30_status, server_time, bid=bid, ask=ask,
+            z_obj = _zone_from_dict(zd)
+            plan = plan_pending_order(
+                z_obj, float(price), frames, h4_bias, m30_status, server_time, bid=bid, ask=ask,
             )
+            z_type = str(zd.get("zone_type") or "").upper()
+            aligned_bias = (h4_bias == "BULLISH" and z_type == "DEMAND") or (h4_bias == "BEARISH" and z_type == "SUPPLY")
+            if not plan.get("valid") and aligned_bias and plan.get("status") in ("CONFLICT", "WEAK"):
+                calc = plan_pending_order(
+                    z_obj, float(price), frames, None, None, server_time, bid=bid, ask=ask, h1_structure=None,
+                )
+                if calc.get("valid"):
+                    calc["valid"] = False
+                    calc["provisional"] = True
+                    calc["status"] = "PROVISIONAL"
+                    calc["early_pending_status"] = "PROVISIONAL"
+                    calc["early_pending_status_label"] = f"PROVISIONAL ONLY — {plan.get('rejection_reason') or 'VALIDASI FINAL WAIT'}"
+                    calc["rejection_reason"] = plan.get("rejection_reason") or "Gagal validasi HTF/M30"
+                    plan = calc
+            plans[zid] = plan
         except Exception as exc:
             _catat_error("provisional_zone_plan", exc)
             plans[zid] = {"valid": False, "status": "WAIT", "rejection_reason": "PLAN ERROR"}
@@ -6000,6 +6236,12 @@ def _decide(dec, frames, price, spread, news, server_time, live,
 
     def finish(status, reason):
         dec["status"] = status
+        m5_tech_ok = (
+            (st.get("structure_trigger") or {}).get("status") == "CONFIRMED"
+            and (st.get("displacement") or {}).get("status") == "CONFIRMED"
+        )
+        dec["smc_technical_status"] = "CONFIRMED" if (status == "VALID" or m5_tech_ok) else "WAIT"
+        dec["entry_permission"] = "GRANTED" if status == "VALID" else "WAIT"
         if directional:
             focus_id = (dec.get("zone") or {}).get("zone_id")
             remaining = [z for z in directional if z.get("zone_id") != focus_id]
@@ -6144,6 +6386,8 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             "trigger_status": (st.get("structure_trigger") or {}).get("status", "NOT_CHECKED"),
             "entry_status": (st.get("entry_validation") or {}).get("status", "NOT_CHECKED"),
             "pending_status": pending_setup.get("status", "WAIT") if zone_id and pending_setup.get("zone_id") == zone_id else "NOT_APPLICABLE",
+            "smc_technical_status": dec.get("smc_technical_status", "WAIT"),
+            "entry_permission": dec.get("entry_permission", "WAIT"),
             "final_decision": dec.get("direction") if status == "VALID" else status,
             "blocker": (dec.get("reasons") or [""])[0] if status != "VALID" else "",
         }
@@ -6398,7 +6642,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         h4_eval_tf["bias"] = h4
         h4_eval_tf["ok"] = True
     h1_eval_tf = evaluate_h1_trend_confirmation(
-        frames.get("H1"), h4_eval_tf, explicit_conflict=bool(ctx.get("has_conflict"))
+        frames.get("H1"), h4_eval_tf, regime_h1=ctx.get("h1_regime"), explicit_conflict=bool(ctx.get("has_conflict"))
     )
 
     if ctx.get("has_conflict"):
@@ -6472,11 +6716,18 @@ def _decide(dec, frames, price, spread, news, server_time, live,
     m30_val = evaluate_m30_momentum(frames.get("M30"), h4)
     m30_cond = assess_m30_condition(
         frames, h4_eval_tf, h1_eval_tf, float(price),
-        explicit_m30_conflict=bool(ctx.get("m30_conflict")),
+        regime_m30=ctx.get("m30_regime"),
     )
     if ctx.get("m30_conflict") or m30_cond.get("status") == "CONFLICT":
-        st["M30"] = {"ok": False, "status": "CONFLICT", "msg": m30_cond.get("msg") or m30_val.get("msg") or f"M30 bertentangan dengan H4 {h4}"}
-        return finish("WAIT", f"M30 bertentangan dengan struktur utama H4 {h4}")
+        ctx_m30_cond = ctx.get("m30_condition") if isinstance(ctx.get("m30_condition"), dict) else {}
+        m30_msg = (
+            (m30_cond.get("msg") if m30_cond.get("status") == "CONFLICT" else None)
+            or (ctx_m30_cond.get("msg") if ctx.get("m30_conflict") else None)
+            or m30_val.get("msg")
+            or f"M30 bertentangan dengan H4 {h4}"
+        )
+        st["M30"] = {"ok": False, "status": "CONFLICT", "msg": m30_msg}
+        return finish("WAIT", m30_msg if f"H4 {h4}" in m30_msg else f"M30 bertentangan dengan struktur utama H4 {h4} ({m30_msg})")
     if m30_cond.get("status") == "INVALID" or m30_val.get("status") == "INVALID":
         st["M30"] = {"ok": False, "status": "INVALID", "msg": m30_val.get("msg") or m30_cond.get("msg", "Data M30 tidak valid")}
         return finish("WAIT", f"M30 INVALID: {st['M30']['msg']}")
@@ -6511,52 +6762,81 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             str(z.get("zone_id", "")),
         )
 
+    def _post_bos_closes(df: pd.DataFrame, z_dict: Dict[str, Any]) -> pd.Series:
+        raw_bos = z_dict.get("bos_candle_time")
+        if not raw_bos or not isinstance(df.index, pd.DatetimeIndex):
+            return df["Close"]
+        try:
+            bos_t = pd.Timestamp(raw_bos)
+        except Exception:
+            return df["Close"]
+        if pd.isna(bos_t):
+            return df["Close"]
+        bos_tf = str(z_dict.get("bos_timeframe") or z_dict.get("timeframe") or "").upper()
+        bos_min = TF_MINUTES.get(bos_tf, 0) or max(
+            (TF_MINUTES.get(p.strip(), 0) for p in bos_tf.split("+") if p.strip()),
+            default=0,
+        )
+        df_tz = df.index.tz
+        if df_tz is not None and bos_t.tzinfo is None:
+            origin_df = frames.get(bos_tf) if isinstance(frames, dict) else None
+            tz_hint = str((getattr(origin_df, "attrs", {}) or {}).get("time_tz") or (getattr(df, "attrs", {}) or {}).get("time_tz", "WIB"))
+            bos_t = bos_t.tz_localize("UTC" if tz_hint.upper() == "UTC" else "Asia/Jakarta").tz_convert(df_tz)
+        elif df_tz is None and bos_t.tzinfo is not None:
+            df_tz_hint = str((getattr(df, "attrs", {}) or {}).get("time_tz", "WIB")).upper()
+            bos_t = bos_t.tz_convert("UTC" if df_tz_hint == "UTC" else "Asia/Jakarta").tz_localize(None)
+        if bos_min > 0:
+            return df.loc[df.index >= (bos_t + timedelta(minutes=bos_min)), "Close"]
+        return df.loc[df.index > bos_t, "Close"]
+
     best_candidate_dict = None
     best_candidate_zone = None
+    eligible: List[Dict[str, Any]] = []
     if cands:
         cands.sort(key=_cand_sort)
-        dec["primary_zone"] = cands[0]
         tracker = get_zone_tracker(auto_save=False)
         now = to_wib_datetime(server_time) or get_current_wib()
 
         def _focus_eligible(z):
-            rec = tracker.get_zone(z.get("zone_id")) or {}
-            if rec.get("status") in ("INVALIDATED", "EXPIRED"):
+            if z.get("is_valid") is False:
                 return False
-            expires = to_wib_datetime(rec.get("expires_at")) if rec.get("expires_at") else None
-            if expires is not None and now > expires:
+            z_st = str(z.get("lifecycle_status") or z.get("status") or "").upper()
+            z_fr = str(z.get("freshness") or "").upper()
+            if z_st in ("INVALIDATED", "EXPIRED", "MITIGATED") or z_fr in ("INVALIDATED", "EXPIRED", "MITIGATED"):
                 return False
             inval = float(z.get("invalidation_price") or 0.0)
             if inval and ((ztype == "DEMAND" and price < inval) or (ztype == "SUPPLY" and price > inval)):
                 return False
-            bos_t = pd.Timestamp(z["bos_candle_time"]) if z.get("bos_candle_time") else None
             for tf in ("H1", "M30"):
-                df = frames[tf]
-                sub = df[df.index > bos_t] if bos_t is not None else df
-                closes = sub["Close"]
+                closes = _post_bos_closes(frames[tf], z)
                 if inval and ((closes < inval).any() if ztype == "DEMAND" else (closes > inval).any()):
                     return False
             return True
 
         eligible = [z for z in cands if _focus_eligible(z)]
+        dec["primary_zone"] = eligible[0] if eligible else None
         def _distance(z):
             return max(float(z["price_low"]) - price, price - float(z["price_high"]), 0.0)
 
         directional = [
             z for z in eligible
-            if (ztype == "SUPPLY" and float(z["price_high"]) >= price)
-            or (ztype == "DEMAND" and float(z["price_low"]) <= price)
+            if z.get("risk_tier") != "FAR_ZONE"
+            and (
+                (ztype == "SUPPLY" and float(z["price_high"]) >= price)
+                or (ztype == "DEMAND" and float(z["price_low"]) <= price)
+            )
         ]
         dec["nearest_valid_zone"] = min(directional, key=_distance) if directional else None
-        inside = [z for z in eligible if _distance(z) == 0]
+        inside = [z for z in eligible if _distance(z) == 0 and z.get("risk_tier") != "FAR_ZONE"]
         old_focus = next((rec for rec in tracker.tracked_zones.values() if rec.get("monitor_focus")), None)
-        previous = next((z for z in eligible if (tracker.get_zone(z.get("zone_id")) or {}).get("monitor_focus")), None)
+        previous = next((z for z in eligible if z.get("risk_tier") != "FAR_ZONE" and (tracker.get_zone(z.get("zone_id")) or {}).get("monitor_focus")), None)
         if not previous and old_focus and old_focus.get("status") not in ("INVALIDATED", "EXPIRED"):
             expires = to_wib_datetime(old_focus.get("expires_at")) if old_focus.get("expires_at") else None
             old_sources = set(old_focus.get("merged_from") or [old_focus.get("zone_id")])
             matches = [
                 z for z in eligible
                 if (expires is None or now <= expires)
+                and z.get("risk_tier") != "FAR_ZONE"
                 and old_focus.get("zone_type") == z.get("zone_type")
                 and old_sources.intersection(z.get("merged_from") or [z.get("zone_id")])
                 and min(float(old_focus["price_high"]), float(z["price_high"]))
@@ -6564,7 +6844,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             ]
             if len(matches) == 1:
                 previous = matches[0]
-        nearby = [z for z in eligible if _distance(z) <= ZONE_APPROACH_DISTANCE_POINTS]
+        nearby = [z for z in eligible if z.get("risk_tier") != "FAR_ZONE" and _distance(z) <= ZONE_APPROACH_DISTANCE_POINTS]
         previous_record = old_focus if previous and old_focus else {}
         awaiting = bool(
             previous
@@ -6592,16 +6872,24 @@ def _decide(dec, frames, price, spread, news, server_time, live,
     winning_zone = None
     winning_zdict = None
     first_reasons: List[str] = []
+    first_tech_confirmed = False
+
+    if not isinstance(dec.get("snr_context"), dict):
+        dec["snr_context"] = extract_snr_supporting_context(
+            frames,
+            float(price),
+            market_status=eff_mkt_dec,
+            snapshot=live_snap if isinstance(live_snap, dict) else (scan if isinstance(scan, dict) else None),
+        )
+    pre_snr_ctx = dec.get("snr_context")
 
     # Jalur 1: Zona OB+FVG aktif searah tren (konfirmasi SMC klasik)
     for zd in cands:
         zn = _zone_from_dict(zd)
         inval = zn.invalidation_price
-        bos_t = pd.Timestamp(zd["bos_candle_time"]) if zd.get("bos_candle_time") else None
 
         def closed_beyond(df):
-            sub = df[df.index > bos_t] if bos_t is not None else df
-            c = sub["Close"].values
+            c = _post_bos_closes(df, zd).values
             return len(c) > 0 and ((c < inval).any() if ztype == "DEMAND" else (c > inval).any())
 
         if closed_beyond(frames["H1"]):
@@ -6616,12 +6904,28 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 return finish("INVALID", f"Zona invalid: close M30 menembus {inval:.2f}")
             continue
 
-        r = _entry_check(zn, float(price), frames["M5"], spread if spread is not None else 0.0, news, frames, server_time=server_time)
-        if not first_reasons:
-            first_reasons = r["reasons"]
+        r = _entry_check(
+            zn,
+            float(price),
+            frames["M5"],
+            spread if spread is not None else 0.0,
+            news,
+            frames,
+            server_time=server_time,
+            snr_context=pre_snr_ctx,
+        )
+        is_r_tech = bool(r.get("smc_technical_confirmed")) and zd.get("risk_tier") != "FAR_ZONE"
+        if not first_reasons or (is_r_tech and not first_tech_confirmed):
+            first_reasons = list(r["reasons"])
             for k_st, v_st in r.get("stages", {}).items():
                 st[k_st] = v_st
-        if r["status"] == "VALID":
+            if is_r_tech:
+                first_tech_confirmed = True
+                best_candidate_dict = zd
+                best_candidate_zone = zn
+                dec["zone"] = zd
+                dec["m5"] = dict(r.get("m5") or {})
+        if r["status"] == "VALID" and zd.get("risk_tier") != "FAR_ZONE":
             valid_plan = dict(r["plan"])
             valid_plan.setdefault("setup_type", "TREND_PULLBACK")
             winning_zone = zn
@@ -6666,18 +6970,36 @@ def _decide(dec, frames, price, spread, news, server_time, live,
     tf_candidate = tf_res.get("best_candidate") or {}
     tf_id = tf_candidate.get("zone_id")
     tf_record = (get_zone_tracker(auto_save=False).get_zone(tf_id) or {}) if tf_id else {}
-    tf_expiry = to_wib_datetime(tf_record.get("expires_at")) if tf_record.get("expires_at") else None
-    tf_blocked = (
-        tf_record.get("status") in ("INVALIDATED", "EXPIRED")
-        or (tf_expiry is not None and (to_wib_datetime(server_time) or get_current_wib()) > tf_expiry)
+    tf_rec_status = str(tf_record.get("status") or "").upper()
+    tf_rec_reason = str(tf_record.get("rejection_reason") or "").strip()
+    tf_inval = float(tf_candidate.get("invalidation_price") or 0.0) if tf_candidate else 0.0
+    tf_inval_breached = bool(
+        tf_candidate and tf_inval > 0 and (
+            (ztype == "DEMAND" and float(price) < tf_inval)
+            or (ztype == "SUPPLY" and float(price) > tf_inval)
+        )
     )
+    tf_cand_in_eligible = bool(tf_id and any(z.get("zone_id") == tf_id for z in eligible))
+    tf_tracker_invalidated = bool(
+        tf_rec_status == "INVALIDATED"
+        and "invalidation" in tf_rec_reason.lower()
+        and not tf_cand_in_eligible
+    )
+    tf_blocked = bool(tf_candidate) and (tf_inval_breached or tf_tracker_invalidated)
+    tf_block_reason = ""
     if tf_blocked:
+        if tf_inval_breached:
+            tf_block_reason = f"Kandidat trend-following {tf_id or ''} INVALIDATED (harga {float(price):.2f} menembus invalidation {tf_inval:.2f}).".strip()
+        elif tf_rec_reason:
+            tf_block_reason = f"Kandidat trend-following {tf_id or ''} INVALIDATED: {tf_rec_reason}".strip()
+        else:
+            tf_block_reason = "Kandidat trend-following sebelumnya terinvalidasi pada batas invalidation."
         tf_res["status"] = "WAIT"
         tf_res["plan"] = None
         tf_res["signal_status"] = SIGNAL_STATUS_NO_SETUP
-        tf_res["reasons"] = ["Zona trend-following INVALIDATED atau EXPIRED."]
+        tf_res["reasons"] = [tf_block_reason]
     dec["trend_following"] = tf_res
-    dec["snr_context"] = tf_res.get("snr")
+    dec["snr_context"] = tf_res.get("snr") or pre_snr_ctx
 
     if tf_res.get("status") == "VALID" and tf_res.get("plan"):
         dec["setup_type"] = tf_res.get("setup_type", "NONE")
@@ -6717,6 +7039,8 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         return finish("VALID", "")
 
     # Tidak ada setup VALID pada jalur 1 & 2 -> WAIT transparan dengan stage & alasan lengkap
+    tf_m5_res = tf_res.get("m5") or {}
+    tf_tech_confirmed = bool(tf_m5_res.get("smc_technical_confirmed"))
     keep_tf_focus = bool(
         prior_tf_focus and not tf_blocked
         and tf_candidate.get("zone_id") == prior_tf_focus.get("zone_id")
@@ -6725,7 +7049,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             or max(float(tf_candidate["price_low"]) - price, price - float(tf_candidate["price_high"]), 0.0) <= ZONE_APPROACH_DISTANCE_POINTS
         )
     )
-    if cands and best_candidate_dict and best_candidate_zone and not keep_tf_focus:
+    if cands and best_candidate_dict and best_candidate_zone and (first_tech_confirmed or not keep_tf_focus) and not (tf_tech_confirmed and not first_tech_confirmed):
         dec["zone"] = best_candidate_dict
         dec["setup_type"] = "TREND_PULLBACK"
         dec["signal_status"] = (
@@ -6741,10 +7065,11 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         dec["signal_status"] = tf_res.get("signal_status", SIGNAL_STATUS_NO_SETUP)
         tf_reasons = tf_res.get("reasons") or []
         wait_msg = tf_reasons[0] if tf_reasons else (scan.get("empty_reason") or f"Menunggu setup {direction} valid")
-        tf_touch = ((tf_res.get("m5") or {}).get("stages") or {}).get("zone_touch") or {}
+        tf_touch = (tf_m5_res.get("stages") or {}).get("zone_touch") or {}
         tf_monitorable = bool(
             tf_candidate and not tf_blocked and (
                 keep_tf_focus
+                or tf_tech_confirmed
                 or tf_touch.get("status") == "CONFIRMED"
                 or max(float(tf_candidate["price_low"]) - price, price - float(tf_candidate["price_high"]), 0.0) <= ZONE_APPROACH_DISTANCE_POINTS
             )
@@ -6769,14 +7094,66 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             dec["zone"] = None
             dec["setup_type"] = "NONE"
             dec["signal_status"] = SIGNAL_STATUS_WAITING_PULLBACK
-            if tf_candidate and not tf_blocked and tf_touch.get("status") in ("WAIT", "FAIL"):
+            nz_ref = dec.get("nearest_valid_zone") or dec.get("primary_zone")
+            if nz_ref and (tf_blocked or (tf_candidate and tf_touch.get("status") in ("WAIT", "FAIL")) or not tf_candidate):
+                nz_lo = float(nz_ref.get("price_low", 0.0))
+                nz_hi = float(nz_ref.get("price_high", 0.0))
+                nz_dist = max(nz_lo - float(price), float(price) - nz_hi, 0.0)
+                if nz_ref.get("risk_tier") == "FAR_ZONE":
+                    wait_msg = (
+                        f"Zona {nz_ref.get('timeframe', '')} {nz_ref.get('zone_type', '')} "
+                        f"({nz_lo:.2f}-{nz_hi:.2f}) berjarak {nz_dist:.2f} pt (TOO FAR dari batas intraday); menunggu pullback dan konfirmasi M5."
+                    ).strip()
+                else:
+                    wait_msg = (
+                        f"Harga belum mendekati zona radar {nz_ref.get('timeframe', '')} {nz_ref.get('zone_type', '')} "
+                        f"({nz_lo:.2f}-{nz_hi:.2f}, jarak {nz_dist:.2f} pt); menunggu pullback dan konfirmasi M5."
+                    ).strip()
+                tf_reasons = [wait_msg]
+            elif not nz_ref:
+                far_aligned = [
+                    z for z in (scan.get("radar_zones") or [])
+                    if isinstance(z, dict)
+                    and z.get("is_valid", True)
+                    and z.get("zone_type") == ztype
+                    and z.get("risk_tier") == "FAR_ZONE"
+                    and str(z.get("status", "")).upper() not in ("INVALIDATED", "EXPIRED", "MITIGATED")
+                    and str(z.get("freshness", "")).upper() not in ("INVALIDATED", "EXPIRED", "MITIGATED")
+                ]
+                if far_aligned:
+                    fz_ref = min(
+                        far_aligned,
+                        key=lambda z: max(float(z.get("price_low", 0.0)) - float(price), float(price) - float(z.get("price_high", 0.0)), 0.0),
+                    )
+                    fz_lo = float(fz_ref.get("price_low", 0.0))
+                    fz_hi = float(fz_ref.get("price_high", 0.0))
+                    fz_dist = max(fz_lo - float(price), float(price) - fz_hi, 0.0)
+                    wait_msg = (
+                        f"Tidak ada zona radar intraday aktif; zona valid searah terdekat {fz_ref.get('timeframe', '')} {fz_ref.get('zone_type', '')} "
+                        f"({fz_lo:.2f}-{fz_hi:.2f}) berjarak {fz_dist:.2f} pt (TOO FAR); menunggu pullback."
+                    ).strip()
+                    tf_reasons = [wait_msg]
+                elif tf_blocked:
+                    wait_msg = tf_block_reason
+                    tf_reasons = [wait_msg]
+                elif tf_candidate and tf_touch.get("status") in ("WAIT", "FAIL"):
+                    wait_msg = "WAIT_ZONE_APPROACH: Belum ada zona aktif yang berinteraksi dengan harga."
+                    tf_reasons = [wait_msg]
+                elif not tf_reasons:
+                    wait_msg = f"Tidak ada zona {ztype} aktif yang memenuhi syarat saat ini."
+                    tf_reasons = [wait_msg]
+            elif tf_blocked:
+                wait_msg = tf_block_reason
+                tf_reasons = [wait_msg]
+            elif tf_candidate and not tf_blocked and tf_touch.get("status") in ("WAIT", "FAIL"):
                 wait_msg = "WAIT_ZONE_APPROACH: Belum ada zona aktif yang berinteraksi dengan harga."
                 tf_reasons = [wait_msg]
-        tf_m5_st = ((tf_res.get("m5") or {}).get("stages") or {}) if tf_monitorable else {}
-        for component in ("zone_validation", "zone_touch", "liquidity_sweep", "structure_trigger", "displacement", "entry_validation", "risk_reward"):
-            st.pop(component, None)
-        for k_st, v_st in tf_m5_st.items():
-            st[k_st] = v_st
+        if not first_tech_confirmed or tf_tech_confirmed:
+            tf_m5_st = (tf_m5_res.get("stages") or {}) if tf_monitorable else {}
+            for component in ("zone_validation", "zone_touch", "liquidity_sweep", "structure_trigger", "displacement", "entry_validation", "risk_reward"):
+                st.pop(component, None)
+            for k_st, v_st in tf_m5_st.items():
+                st[k_st] = v_st
         dec["reasons"].extend(tf_reasons if tf_reasons else [wait_msg])
         st["H4"] = {"ok": True, "msg": f"Bias H4 {h4}"}
         st["M5"] = {"ok": False, "msg": wait_msg}

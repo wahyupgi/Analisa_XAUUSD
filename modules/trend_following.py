@@ -406,12 +406,18 @@ def _is_sustained_opposing_trend(df: Optional[pd.DataFrame], target_dir: str) ->
         seq_opp = (len(highs) >= 2 and highs[-1]["price"] < highs[-2]["price"] and
                    len(lows) >= 2 and lows[-1]["price"] < lows[-2]["price"])
         ema_opp = (c_now < ema20 and ema20 < ema50 and rsi < 44.0)
+        latest_aligned = bool(events and events[-1].get("arah") == "bull")
+        if latest_aligned and not ema_opp:
+            return False, "Struktur terbaru sudah kembali searah BULLISH"
         if (len(recent_opp_events) >= 2 and seq_opp) or (seq_opp and ema_opp) or (len(recent_opp_events) >= 3 and ema_opp):
             return True, f"Konflik struktural serius: LH/LL + {len(recent_opp_events)}x Bearish BOS + EMA20<EMA50 (RSI {rsi:.1f})"
     else:
         seq_opp = (len(highs) >= 2 and highs[-1]["price"] > highs[-2]["price"] and
                    len(lows) >= 2 and lows[-1]["price"] > lows[-2]["price"])
         ema_opp = (c_now > ema20 and ema20 > ema50 and rsi > 56.0)
+        latest_aligned = bool(events and events[-1].get("arah") == "bear")
+        if latest_aligned and not ema_opp:
+            return False, "Struktur terbaru sudah kembali searah BEARISH"
         if (len(recent_opp_events) >= 2 and seq_opp) or (seq_opp and ema_opp) or (len(recent_opp_events) >= 3 and ema_opp):
             return True, f"Konflik struktural serius: HH/HL + {len(recent_opp_events)}x Bullish BOS + EMA20>EMA50 (RSI {rsi:.1f})"
 
@@ -677,8 +683,18 @@ def assess_m30_condition(
     )
 
     if explicit_m30_conflict and not within_h1_structure:
+        if sustained_opp:
+            return {"status": "CONFLICT", "condition": "CONFLICT", "ok": False,
+                    "msg": f"M30 bertentangan serius dengan H4 {h4_bias}: {opp_msg}", "impulse_leg": active_imp}
+        if m30_bias in ("BULLISH", "BEARISH") and m30_bias != h4_bias:
+            return {"status": "CONFLICT", "condition": "CONFLICT", "ok": False,
+                    "msg": f"M30 {m30_bias} bertentangan dengan H4 {h4_bias}", "impulse_leg": active_imp}
+        if reg == "CHOPPY":
+            return {"status": "WEAK", "condition": "CHOPPY", "ok": False,
+                    "msg": "Market M30 Choppy / Whipsaw", "impulse_leg": active_imp}
         return {"status": "CONFLICT", "condition": "CONFLICT", "ok": False,
-                "msg": f"M30 {m30_bias} bertentangan dengan H4 {h4_bias}", "impulse_leg": active_imp}
+                "msg": f"Konflik konteks M30 terhadap struktur H4 {h4_bias} (M30 {m30_bias}/{reg}, RSI {rsi:.1f})",
+                "impulse_leg": active_imp}
 
     if sustained_opp and (broke_h1_origin or not within_h1_structure):
         return {"status": "CONFLICT", "condition": "CONFLICT", "ok": False,
@@ -1297,7 +1313,11 @@ def build_trend_following_candidates(
     #    1a) Active SMC Zones (OB + FVG)
     for az in (scan or {}).get("active_zones") or []:
         azd = az.to_dict() if hasattr(az, "to_dict") else dict(az)
-        if str(azd.get("zone_type", "")).upper() != ztype or not azd.get("is_valid", True):
+        if (
+            str(azd.get("zone_type", "")).upper() != ztype
+            or not azd.get("is_valid", True)
+            or str(azd.get("risk_tier") or "").upper() == "FAR_ZONE"
+        ):
             continue
         _dedup_push_candidate(cands, {
             "zone_id": azd.get("zone_id") or f"TF_PB_OB_{direction}_{float(azd['price_low']):.2f}_{float(azd['price_high']):.2f}",
@@ -1604,6 +1624,162 @@ def build_strict_reversal_candidate(
 # =============================================================================
 # VALIDASI ENTRY M5 + RISK/REWARD PER TIPE SETUP (CLOSED CANDLES ONLY)
 # =============================================================================
+def _is_snr_zone_broken_or_inactive(
+    zone: Dict[str, Any],
+    direction: str,
+    snr_context: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True bila zona SNR lawan sudah breakout/invalid/mitigated/non-aktif sehingga bukan penghalang aktif."""
+    lifecycle = str(zone.get("lifecycle") or "").upper()
+    if lifecycle in ("BROKEN", "INVALIDATED", "EXPIRED", "MITIGATED", "RETEST", "RECLAIM_PENDING", "RECLAIMED"):
+        return True
+    if zone.get("is_broken") or zone.get("is_invalidated") or (zone.get("is_active") is False):
+        return True
+    bo_info = zone.get("breakout_info") if isinstance(zone.get("breakout_info"), dict) else {}
+    if str(bo_info.get("status") or "").upper() == "VALID_BREAKOUT":
+        return True
+    if isinstance(snr_context, dict):
+        want_bo_dirs = ("BUY", "BULLISH") if direction == "BUY" else ("SELL", "BEARISH")
+        if (
+            str(snr_context.get("breakout_code") or "").upper() == "VALID_BREAKOUT"
+            and str(snr_context.get("breakout_direction") or "").upper() in want_bo_dirs
+        ):
+            bo_z = snr_context.get("breakout_zone")
+            if isinstance(bo_z, dict):
+                z_id = str(zone.get("zone_id") or "").strip()
+                bo_id = str(bo_z.get("zone_id") or "").strip()
+                if z_id and bo_id and z_id == bo_id:
+                    return True
+                z_lo = _safe_float(zone.get("low"), -1.0)
+                z_hi = _safe_float(zone.get("high"), -1.0)
+                bo_lo = _safe_float(bo_z.get("low"), -2.0)
+                bo_hi = _safe_float(bo_z.get("high"), -2.0)
+                if z_lo > 0 and z_hi > 0 and abs(z_lo - bo_lo) < 1e-6 and abs(z_hi - bo_hi) < 1e-6:
+                    return True
+    return False
+
+
+def evaluate_snr_opposing_barrier(
+    direction: str,
+    entry: float,
+    sl: float,
+    tp1: Optional[float] = None,
+    current_price: Optional[float] = None,
+    snr_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Evaluasi apakah zona Support/Resistance SNR lawan menjadi penghalang material
+    bagi rencana entry SMC berdasarkan arah transaksi, posisi entry/harga saat ini,
+    kekuatan zona, status lifecycle/breakout, serta jarak bersih ke TP1 / R:R minimum.
+    """
+    clean = {
+        "blocked": False,
+        "reason": "",
+        "barrier_zone": None,
+        "clean_rr": None,
+        "conflict_type": "NONE",
+    }
+    dir_u = str(direction or "").upper()
+    if dir_u not in ("BUY", "SELL") or entry <= 0 or not _is_snr_ctx_usable(snr_context):
+        return clean
+
+    risk = round(abs(float(entry) - float(sl)), 2)
+    opp_list = list(snr_context.get("resistances" if dir_u == "BUY" else "supports") or [])
+    if not opp_list:
+        fallback_z = snr_context.get("resistance" if dir_u == "BUY" else "support")
+        if isinstance(fallback_z, dict):
+            opp_list = [fallback_z]
+
+    grade_rank = {"A+": 5, "A": 4, "B": 3, "C": 2, "D": 1}
+    best_block: Optional[Dict[str, Any]] = None
+    best_priority = (-1, -1, 0.0)
+
+    for z in opp_list:
+        if not isinstance(z, dict):
+            continue
+        if _is_snr_zone_broken_or_inactive(z, dir_u, snr_context=snr_context):
+            continue
+
+        z_lo = _safe_float(z.get("low"), 0.0)
+        z_hi = _safe_float(z.get("high"), 0.0)
+        if z_lo <= 0 or z_hi <= 0:
+            continue
+        if z_lo > z_hi:
+            z_lo, z_hi = z_hi, z_lo
+
+        grade = str(z.get("grade") or "").upper()
+        score = _safe_float(z.get("score"), 0.0)
+        strength = str(z.get("strength_short") or z.get("strength") or "").upper()
+        is_major = (
+            grade in ("A+", "A", "B")
+            or score >= 70.0
+            or ("STRONG" in strength)
+            or ("KUAT" in strength)
+        )
+        is_material = (
+            is_major
+            or grade == "C"
+            or score >= 60.0
+            or ("MODERATE" in strength)
+            or ("SEDANG" in strength)
+        )
+        if not is_material:
+            continue
+
+        label = str(z.get("label") or z.get("zone_id") or ("Resistance" if dir_u == "BUY" else "Support"))
+        tf_lbl = str(z.get("timeframe") or "H1")
+        g_lbl = f" Grade {grade}" if grade else ""
+        near_edge = z_lo if dir_u == "BUY" else z_hi
+        px = float(current_price) if current_price is not None and current_price > 0 else float(entry)
+
+        # A. Entry atau harga aktif berada langsung di dalam zona SNR lawan yang belum tembus
+        if (z_lo <= entry <= z_hi) or (z_lo <= px <= z_hi):
+            reason = (
+                f"Konflik SMC-SNR: entry {dir_u} @ {entry:.2f} berada di dalam zona lawan aktif "
+                f"{label} ({tf_lbl}{g_lbl} {z_lo:.2f}-{z_hi:.2f}) yang belum breakout"
+            )
+            prio = (2, grade_rank.get(grade, 0), score)
+            if prio > best_priority:
+                best_priority = prio
+                best_block = {
+                    "blocked": True,
+                    "reason": reason,
+                    "barrier_zone": z,
+                    "clean_rr": 0.0,
+                    "conflict_type": "ENTRY_INSIDE_OPPOSING_SNR",
+                }
+            continue
+
+        # B. Penghalang SNR mayor di depan entry memotong ruang bersih ke bawah RR_MIN
+        is_ahead = (dir_u == "BUY" and near_edge > entry) or (dir_u == "SELL" and near_edge < entry)
+        if is_ahead and is_major and risk > 0:
+            clean_reward = (near_edge - entry) if dir_u == "BUY" else (entry - near_edge)
+            clean_rr = round(clean_reward / risk, 2)
+            crosses_barrier = (
+                (tp1 is None)
+                or (dir_u == "BUY" and float(tp1) > near_edge)
+                or (dir_u == "SELL" and float(tp1) < near_edge)
+            )
+            if crosses_barrier and clean_rr < RR_MIN - 1e-9:
+                reason = (
+                    f"Konflik SMC-SNR: target {dir_u} terhalang {label} "
+                    f"({tf_lbl}{g_lbl} {z_lo:.2f}-{z_hi:.2f}); "
+                    f"ruang bersih sebelum SNR hanya 1:{clean_rr:.2f} < 1:{RR_MIN:g}"
+                )
+                prio = (1, grade_rank.get(grade, 0), score)
+                if prio > best_priority:
+                    best_priority = prio
+                    best_block = {
+                        "blocked": True,
+                        "reason": reason,
+                        "barrier_zone": z,
+                        "clean_rr": clean_rr,
+                        "conflict_type": "TARGET_BLOCKED_BY_SNR",
+                    }
+
+    return best_block if best_block is not None else clean
+
+
 def _compute_targets_and_rr(
     frames: Dict[str, pd.DataFrame],
     direction: str,
@@ -1611,16 +1787,41 @@ def _compute_targets_and_rr(
     sl: float,
     setup_type: str,
     snr_context: Optional[Dict[str, Any]] = None,
+    current_price: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Hitung TP1 & TP2 berdasarkan struktur H1/H4/M30 dan S&R aktif:
-      - Memastikan tidak ada obstacle mayor S&R/swing H1/H4 yang menghalangi TP1 dengan R:R < 1.5.
+      - Memastikan tidak ada obstacle mayor S&R/swing H1/H4 yang menghalangi TP1 dengan R:R < 1.5,
+        termasuk entry yang berada langsung di dalam zona SNR lawan aktif.
       - Jika target struktural tidak tersedia, tunggu tanpa membuat target proyeksi.
     """
     risk = round(abs(entry - sl), 2)
     if risk <= 0 or risk > SL_JARAK_MAKS:
         return {"ok": False, "rr": 0.0, "tp1": None, "tp2": None,
                 "reason": f"Jarak SL {risk:.2f} pt di luar batas aman (maks {SL_JARAK_MAKS:g} pt)"}
+
+    pre_barrier = evaluate_snr_opposing_barrier(
+        direction=direction,
+        entry=entry,
+        sl=sl,
+        tp1=None,
+        current_price=current_price,
+        snr_context=snr_context,
+    )
+    if pre_barrier.get("blocked"):
+        bz = pre_barrier.get("barrier_zone") or {}
+        bz_edge = (
+            _safe_float(bz.get("low"), entry) if direction == "BUY" else _safe_float(bz.get("high"), entry)
+        )
+        return {
+            "ok": False,
+            "rr": float(pre_barrier.get("clean_rr") or 0.0),
+            "tp1": round(bz_edge, 2) if bz_edge > 0 else None,
+            "tp2": None,
+            "snr_blocked": True,
+            "snr_conflict_type": pre_barrier.get("conflict_type"),
+            "reason": pre_barrier["reason"],
+        }
 
     raw_targets: List[Tuple[float, str]] = []
     for tf_name in ("H4", "H1", "M30"):
@@ -1638,11 +1839,13 @@ def _compute_targets_and_rr(
                 if i + 1 >= len(L_arr) or L_arr[i + 1 :].min() >= p:
                     raw_targets.append((round(p + 0.25, 2), f"{tf_name} Swing Low"))
 
-    # Tambahkan level penghalang SNR lawan (Resistance untuk BUY, Support untuk SELL)
+    # Tambahkan level penghalang SNR lawan aktif (Resistance untuk BUY, Support untuk SELL)
     major_obstacles: List[float] = []
     if _is_snr_ctx_usable(snr_context):
         opp_key = "resistances" if direction == "BUY" else "supports"
         for z in snr_context.get(opp_key) or []:
+            if not isinstance(z, dict) or _is_snr_zone_broken_or_inactive(z, direction, snr_context=snr_context):
+                continue
             edge = float(z.get("low") if direction == "BUY" else z.get("high"))
             if (direction == "BUY" and edge > entry) or (direction == "SELL" and edge < entry):
                 raw_targets.append((round(edge, 2), f"SNR {z.get('timeframe', 'H1')}"))
@@ -1659,6 +1862,7 @@ def _compute_targets_and_rr(
         obs_rr = obs_reward / risk if risk > 0 else 0.0
         if obs_rr < RR_MIN - 1e-9:
             return {"ok": False, "rr": round(obs_rr, 2), "tp1": round(nearest_obs, 2), "tp2": None,
+                    "snr_blocked": True,
                     "reason": f"Terhalang zona S&R mayor di {nearest_obs:.2f} (R:R aktual 1:{obs_rr:.2f} < 1:{RR_MIN:g})"}
 
     if raw_targets:
@@ -1685,6 +1889,25 @@ def _compute_targets_and_rr(
     else:
         return {"ok": False, "rr": 0.0, "tp1": None, "tp2": None,
                 "reason": "Tidak ada target likuiditas struktural searah"}
+
+    post_barrier = evaluate_snr_opposing_barrier(
+        direction=direction,
+        entry=entry,
+        sl=sl,
+        tp1=tp1,
+        current_price=current_price,
+        snr_context=snr_context,
+    )
+    if post_barrier.get("blocked"):
+        return {
+            "ok": False,
+            "rr": float(post_barrier.get("clean_rr") or 0.0),
+            "tp1": tp1,
+            "tp2": None,
+            "snr_blocked": True,
+            "snr_conflict_type": post_barrier.get("conflict_type"),
+            "reason": post_barrier["reason"],
+        }
 
     reward = abs(tp1 - entry)
     rr = round(reward / risk, 2) if risk > 0 else 0.0
@@ -1716,7 +1939,15 @@ def validate_m5_entry_confirmation(
         "entry_validation": {"status": "WAIT", "msg": ""},
         "risk_reward": {"status": "NOT_CHECKED", "msg": "", "rr": None},
     }
-    res: Dict[str, Any] = {"status": "WAIT", "reasons": [], "plan": None, "m5": {}, "stages": stages}
+    res: Dict[str, Any] = {
+        "status": "WAIT",
+        "reasons": [],
+        "plan": None,
+        "m5": {},
+        "stages": stages,
+        "smc_technical_confirmed": False,
+        "entry_permission": "WAIT",
+    }
     W = res["reasons"]
 
     direction = str(candidate.get("direction") or "").upper()
@@ -1829,14 +2060,10 @@ def validate_m5_entry_confirmation(
         W.append(stages["zone_touch"]["msg"])
         return res
 
-    if touched and lo <= price <= hi and (not touch_indices or touch_indices[-1] != n5 - 1):
+    if touched and lo <= price <= hi and not touch_indices:
         first_touch_k = n5
     elif touch_indices:
-        first_touch_k = touch_indices[-1]
-        for previous, current in zip(reversed(touch_indices[:-1]), reversed(touch_indices[1:])):
-            if current - previous != 1:
-                break
-            first_touch_k = previous
+        first_touch_k = touch_indices[0]
     else:
         first_touch_k = 0
     stages["zone_touch"] = {
@@ -1867,18 +2094,23 @@ def validate_m5_entry_confirmation(
     except Exception:
         cisd_list = []
 
-    match_evs = [
+    def _has_opposing_m5_event_after(trig_k: int) -> bool:
+        return any(e.get("arah") != want_ev and int(e.get("k", -1)) > trig_k for e in events)
+
+    raw_match_evs = [
         e for e in reversed(events)
         if e["arah"] == want_ev and n5 - 1 - e["k"] <= _M5_EVENT_MAX_AGE and e["k"] >= max(first_touch_k, k_sweep)
     ]
-    match_cisd = [
+    raw_match_cisd = [
         c for c in reversed(cisd_list)
         if c.get("arah") == ("BULLISH" if direction == "BUY" else "BEARISH")
         and n5 - 1 - int(c.get("k", 0)) <= _M5_EVENT_MAX_AGE
         and int(c.get("k", 0)) >= max(first_touch_k, k_sweep)
     ]
+    match_evs = [e for e in raw_match_evs if not _has_opposing_m5_event_after(int(e["k"]))]
+    match_cisd = [c for c in raw_match_cisd if not _has_opposing_m5_event_after(int(c.get("k", 0)))]
     rej = _detect_rejection_candle(df_m5, direction, lo, hi, atr5, lookback=6)
-    if rej and int(rej["k"]) < first_touch_k:
+    if rej and (int(rej["k"]) < first_touch_k or _has_opposing_m5_event_after(int(rej["k"]))):
         rej = None
 
     # Set stage sweep
@@ -1895,37 +2127,49 @@ def validate_m5_entry_confirmation(
     ev = match_evs[0] if match_evs else None
     cisd_ev = match_cisd[0] if match_cisd else None
     has_struct = bool(ev or cisd_ev)
+    reversed_after_trig = bool(not has_struct and (raw_match_evs or raw_match_cisd))
 
     if setup_type == "REVERSAL":
         if not best_sweep or not has_struct:
-            stages["structure_trigger"] = {"status": "WAIT", "msg": "Reversal wajib Sweep + CHoCH/BOS M5 terkonfirmasi"}
-            W.append(stages["structure_trigger"]["msg"])
+            msg_st = (
+                "Struktur M5 pasca-trigger sudah berbalik arah (sinyal historis tidak berlaku)"
+                if (best_sweep and reversed_after_trig)
+                else "Reversal wajib Sweep + CHoCH/BOS M5 terkonfirmasi"
+            )
+            stages["structure_trigger"] = {"status": "WAIT", "msg": msg_st}
+            W.append(msg_st)
             return res
     elif setup_type == "TREND_PULLBACK":
         # Trend Pullback: Sweep + CHoCH/BOS/CISD ATAU CHoCH/BOS/CISD + Rejection jelas dari pullback zone
         if not has_struct or (not best_sweep and not rej):
-            stages["structure_trigger"] = {
-                "status": "WAIT",
-                "msg": "Menunggu M5 Sweep + CHoCH/BOS/CISD atau CHoCH/BOS + Rejection jelas di area pullback",
-            }
-            W.append(stages["structure_trigger"]["msg"])
+            msg_st = (
+                "Struktur M5 pasca-trigger sudah berbalik arah (sinyal historis tidak berlaku)"
+                if reversed_after_trig
+                else "Menunggu M5 Sweep + CHoCH/BOS/CISD atau CHoCH/BOS + Rejection jelas di area pullback"
+            )
+            stages["structure_trigger"] = {"status": "WAIT", "msg": msg_st}
+            W.append(msg_st)
             return res
     elif setup_type == "BREAKOUT_RETEST":
         # Breakout Retest: minimal Rejection jelas dari level retest ATAU CHoCH/BOS/CISD M5
         if not has_struct and not rej:
-            stages["structure_trigger"] = {
-                "status": "WAIT",
-                "msg": "Menunggu Rejection atau CHoCH/BOS M5 pada area Breakout Retest",
-            }
-            W.append(stages["structure_trigger"]["msg"])
+            msg_st = (
+                "Struktur M5 pasca-trigger sudah berbalik arah (sinyal historis tidak berlaku)"
+                if reversed_after_trig
+                else "Menunggu Rejection atau CHoCH/BOS M5 pada area Breakout Retest"
+            )
+            stages["structure_trigger"] = {"status": "WAIT", "msg": msg_st}
+            W.append(msg_st)
             return res
     else:  # TREND_CONTINUATION
         if not has_struct:
-            stages["structure_trigger"] = {
-                "status": "WAIT",
-                "msg": f"Menunggu M5 BOS/CHoCH/CISD {direction} untuk Trend Continuation",
-            }
-            W.append(stages["structure_trigger"]["msg"])
+            msg_st = (
+                "Struktur M5 pasca-trigger sudah berbalik arah (sinyal historis tidak berlaku)"
+                if reversed_after_trig
+                else f"Menunggu M5 BOS/CHoCH/CISD {direction} untuk Trend Continuation"
+            )
+            stages["structure_trigger"] = {"status": "WAIT", "msg": msg_st}
+            W.append(msg_st)
             return res
 
     k_ref = int(ev["k"]) if ev else (int(cisd_ev["k"]) if cisd_ev else int(rej["k"]))
@@ -1956,6 +2200,41 @@ def validate_m5_entry_confirmation(
         W.append(stages["displacement"]["msg"])
         return res
     stages["displacement"] = {"status": "CONFIRMED", "msg": f"Displacement M5 {disp_atr:.2f} ATR", "atr": disp_atr}
+
+    if k_ref + 1 < n5:
+        post_c = C[k_ref + 1 : n5]
+        post_inval = bool(np.any(post_c < inval)) if direction == "BUY" else bool(np.any(post_c > inval))
+        if post_inval:
+            msg_inv = f"Trigger M5 historis telah terinvalidasi pasca-konfirmasi ({inval:.2f})"
+            stages["structure_trigger"] = {"status": "WAIT", "msg": msg_inv, "k": k_ref}
+            W.append(msg_inv)
+            return res
+
+    res["smc_technical_confirmed"] = True
+    m5_tech_payload = {
+        "zone_touched": touched,
+        "sweep": bool(best_sweep),
+        "structure_event": trig_msg,
+        "rejection": rej["label"] if rej else None,
+        "displacement_atr": disp_atr,
+        "technical_confirmed": True,
+    }
+    res["m5"] = dict(m5_tech_payload)
+
+    bars_since_trig = (n5 - 1) - k_ref
+    chase_tol = max(1.0, 0.5 * atr5)
+    if bars_since_trig > 2 and (
+        (direction == "BUY" and price > hi + chase_tol)
+        or (direction == "SELL" and price < lo - chase_tol)
+    ):
+        msg_missed = (
+            f"Sinyal M5 sudah historis/terlewat (trigger {bars_since_trig} bar lalu; "
+            f"harga {price:.2f} sudah meninggalkan area entry {lo:.2f}-{hi:.2f})"
+        )
+        stages["entry_validation"] = {"status": "WAIT", "msg": msg_missed}
+        res["entry_permission"] = "WAIT"
+        W.append(msg_missed)
+        return res
 
     # 5. Kalkulasi Entry Range, Stop Loss Struktural, dan Target TP / RR
     w_zone = max(0.4, hi - lo)
@@ -1991,26 +2270,42 @@ def validate_m5_entry_confirmation(
         sl_raw = max(anchors) + buf
         sl = round(max(sl_raw, entry + min_sl_floor), 2)
 
-    rr_info = _compute_targets_and_rr(frames, direction, entry, sl, setup_type, snr_context=snr_context)
+    rr_info = _compute_targets_and_rr(
+        frames, direction, entry, sl, setup_type, snr_context=snr_context, current_price=price
+    )
     if not rr_info.get("ok"):
         stages["risk_reward"] = {"status": "WAIT", "msg": rr_info["reason"], "rr": rr_info.get("rr", 0.0)}
+        stages["entry_validation"] = {"status": "WAIT", "msg": rr_info["reason"]}
+        res["entry_permission"] = "WAIT"
+        res["m5"] = dict(m5_tech_payload)
         W.append(rr_info["reason"])
         return res
 
     rr = float(rr_info["rr"])
     tp1 = float(rr_info["tp1"])
     tp2 = float(rr_info["tp2"])
+
+    if k_ref + 1 < n5:
+        post_tp_hit = (
+            bool(np.any(H[k_ref + 1 : n5] >= tp1))
+            if direction == "BUY"
+            else bool(np.any(L[k_ref + 1 : n5] <= tp1))
+        )
+        if post_tp_hit:
+            msg_tp = f"Target TP1 {tp1:.2f} sudah tersentuh pasca-trigger M5 (sinyal historis/terlewat)"
+            stages["risk_reward"] = {"status": "WAIT", "msg": msg_tp, "rr": rr}
+            stages["entry_validation"] = {"status": "WAIT", "msg": msg_tp}
+            res["entry_permission"] = "WAIT"
+            res["m5"] = dict(m5_tech_payload)
+            W.append(msg_tp)
+            return res
+
     stages["risk_reward"] = {"status": "CONFIRMED", "msg": f"1:{rr:.2f} ({rr_info['target_source']})", "rr": rr}
     stages["entry_validation"] = {"status": "PASSED", "msg": f"{setup_type} terkonfirmasi penuh"}
 
     res["status"] = "VALID"
-    res["m5"] = {
-        "zone_touched": touched,
-        "sweep": bool(best_sweep),
-        "structure_event": trig_msg,
-        "rejection": rej["label"] if rej else None,
-        "displacement_atr": disp_atr,
-    }
+    res["entry_permission"] = "GRANTED"
+    res["m5"] = dict(m5_tech_payload)
     res["plan"] = {
         "arah": direction,
         "setup_type": setup_type,
@@ -2230,7 +2525,7 @@ def evaluate_trend_following_setup(
     first_cand: Optional[Dict[str, Any]] = None
     for cand in cands:
         ev = validate_m5_entry_confirmation(cand, frames, current_price, spread=spread, news_blackout=news_blackout, snr_context=snr_ctx)
-        if first_eval is None:
+        if first_eval is None or (ev.get("smc_technical_confirmed") and not first_eval.get("smc_technical_confirmed")):
             first_eval, first_cand = ev, cand
         if ev["status"] == "VALID":
             return {
@@ -2268,6 +2563,8 @@ def evaluate_trend_following_setup(
                 "plan": rev_eval_fb["plan"],
                 "reasons": rev_eval_fb["reasons"],
             }
+        if rev_eval_fb.get("smc_technical_confirmed") and (first_eval is None or not first_eval.get("smc_technical_confirmed")):
+            first_eval, first_cand = rev_eval_fb, rev_cand_fb
 
     zt_st = ((first_eval or {}).get("stages") or {}).get("zone_touch", {}).get("status", "WAIT")
     sig_st = SIGNAL_STATUS_WAITING_PULLBACK if zt_st in ("WAIT", "FAIL") else SIGNAL_STATUS_WAITING_CONFIRMATION

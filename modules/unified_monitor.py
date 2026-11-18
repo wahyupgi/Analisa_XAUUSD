@@ -121,8 +121,11 @@ class PantauFocusTracker:
             saved = dict(record)
             zone = record["zone"]
             saved["zone"] = {
-                key: zone.get(key) for key in ("zone_id", "zone_type", "timeframe", "rank_label", "grade")
-                if zone.get(key) is None or isinstance(zone.get(key), (str, int, float, bool))
+                key: zone.get(key) for key in (
+                    "zone_id", "zone_type", "timeframe", "rank_label", "grade", "score", "source",
+                    "confirmed_time", "confirmation_time", "formation_time", "risk_tier", "distance", "distance_points",
+                )
+                if key in zone and (zone.get(key) is None or isinstance(zone.get(key), (str, int, float, bool)))
             }
             saved["zone"].update(
                 {"price_low": record["low"], "price_high": record["high"]}
@@ -162,10 +165,25 @@ class PantauFocusTracker:
         dec = result.get("decision") or {}
         scan = result.get("scan_result") or {}
         if method == "SMC":
-            zone = dec.get("zone") or dec.get("primary_zone") or {}
+            zone = dec.get("zone") or {}
+            if not zone:
+                pz = dec.get("primary_zone")
+                if isinstance(pz, dict) and pz.get("risk_tier") != "FAR_ZONE":
+                    zone = pz
             if not zone:
                 priority = dec.get("radar_priority") or scan.get("radar_priority") or {}
                 zone = priority.get("primary_directional_zone") or priority.get("primary_zone") or {}
+                if not zone:
+                    near_cand = priority.get("nearest_radar_zone")
+                    h4_bias = str((scan.get("htf_context") or {}).get("H4") or "").upper()
+                    if isinstance(near_cand, dict) and near_cand.get("risk_tier") != "FAR_ZONE":
+                        zt = str(near_cand.get("zone_type") or "").upper()
+                        aligned_ok = (
+                            h4_bias not in ("BULLISH", "BEARISH")
+                            or (not near_cand.get("is_counter") and zt == ("DEMAND" if h4_bias == "BULLISH" else "SUPPLY"))
+                        )
+                        if aligned_ok:
+                            zone = near_cand
             summary = smc_zone_summary(zone, dec) if zone else {}
             plan = {
                 "direction": summary.get("direction"),
@@ -212,8 +230,80 @@ class PantauFocusTracker:
         if method == "SMC":
             zones = (scan.get("radar_zones") or []) + (scan.get("active_zones") or []) + (scan.get("rejected_zones") or [])
         else:
-            zones = ((scan.get("ranked_zones") or {}).get("all_zones") or [])
+            ranked = scan.get("ranked_zones") or {}
+            zones = (
+                list(ranked.get("active_supports") or [])
+                + list(ranked.get("active_resistances") or [])
+                + list(ranked.get("all_zones") or [])
+            )
         return next((z for z in zones if isinstance(z, dict) and z.get("zone_id") == zone_id), None)
+
+    @classmethod
+    def _is_valid_focus_candidate(cls, method, zone):
+        if not isinstance(zone, dict) or not zone.get("zone_id"):
+            return False
+        low, high = cls._bounds(method, zone)
+        if not (0 < low <= high):
+            return False
+        kind = str(zone.get("zone_type") or "").upper()
+        if kind not in ("DEMAND", "SUPPORT", "SUPPLY", "RESISTANCE"):
+            return False
+        state = str(zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
+        if state in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN", "UNCONFIRMED", "HISTORICAL"):
+            return False
+        if zone.get("is_valid") is False:
+            return False
+        if str(zone.get("risk_tier") or "").upper() == "FAR_ZONE":
+            return False
+        if str(zone.get("radar_eligibility") or "QUALIFIED").upper() == "NOT_QUALIFIED":
+            return False
+        return True
+
+    @classmethod
+    def _same_zone_identity(cls, method, record, candidate):
+        if not isinstance(record, dict) or not isinstance(candidate, dict):
+            return False
+        rec_id = record.get("zone_id")
+        if not rec_id or candidate.get("zone_id") != rec_id:
+            return False
+        rec_zone = record.get("zone") or {}
+        rec_src = str(rec_zone.get("source") or method or "").strip().upper()
+        cand_src = str(candidate.get("source") or method or "").strip().upper()
+        if rec_src and cand_src and rec_src != cand_src:
+            return False
+        rec_zt = str(rec_zone.get("zone_type") or rec_zone.get("type") or "").strip().upper()
+        cand_zt = str(candidate.get("zone_type") or candidate.get("type") or "").strip().upper()
+        if rec_zt and cand_zt and rec_zt != cand_zt:
+            return False
+        rec_tf = str(rec_zone.get("timeframe") or "").strip().upper()
+        cand_tf = str(candidate.get("timeframe") or "").strip().upper()
+        if rec_tf and cand_tf and rec_tf != cand_tf:
+            return False
+        rec_lo, rec_hi = safe_float(record.get("low")), safe_float(record.get("high"))
+        cand_lo, cand_hi = cls._bounds(method, candidate)
+        if not (cand_lo > 0 and cand_hi >= cand_lo):
+            return False
+        if rec_lo > 0 and rec_hi >= rec_lo and (abs(rec_lo - cand_lo) >= 1e-6 or abs(rec_hi - cand_hi) >= 1e-6):
+            return False
+        for ts_key in ("confirmed_time", "confirmation_time", "formation_time"):
+            rec_ts = rec_zone.get(ts_key)
+            cand_ts = candidate.get(ts_key)
+            if rec_ts and cand_ts and str(rec_ts) != str(cand_ts):
+                return False
+        return True
+
+    @staticmethod
+    def _merged_zone_metadata(method, record, live_zone):
+        refreshed = dict(live_zone)
+        if method == "SMC":
+            refreshed["price_low"] = record["low"]
+            refreshed["price_high"] = record["high"]
+        else:
+            refreshed["low"] = record["low"]
+            refreshed["high"] = record["high"]
+        if not refreshed.get("source"):
+            refreshed["source"] = (record.get("zone") or {}).get("source") or method
+        return refreshed
 
     @staticmethod
     def _next_zone(method, result, previous, current_zone):
@@ -230,7 +320,12 @@ class PantauFocusTracker:
             if zone.get("zone_type") != current_zone.get("zone_type"):
                 continue
             lifecycle = str(zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
-            if zone.get("is_valid") is False or lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN", "UNCONFIRMED"):
+            if (
+                zone.get("is_valid") is False
+                or lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN", "UNCONFIRMED")
+                or str(zone.get("risk_tier") or "").upper() == "FAR_ZONE"
+                or str(zone.get("radar_eligibility") or "QUALIFIED").upper() == "NOT_QUALIFIED"
+            ):
                 continue
             return zone
         return None
@@ -320,13 +415,56 @@ class PantauFocusTracker:
             zone, plan = candidates[method]
             record = self.focus[method]
             completed = self.completed[method]
+            method_ok = isinstance(results.get(method), dict) and results[method].get("status") == "OK"
+            if (
+                record is not None
+                and full_refresh
+                and fresh
+                and method_ok
+                and not record["touched"]
+                and not record["ever_taken"]
+                and record.get("account_status") not in ("RUNNING", "AMBIGUOUS")
+            ):
+                cur_chk = self._current_zone(method, results.get(method), record["zone_id"])
+                cur_life = str((cur_chk or {}).get("lifecycle_status") or (cur_chk or {}).get("status") or "").upper()
+                cur_tier = str((cur_chk or {}).get("risk_tier") or "").upper()
+                cur_elig = str((cur_chk or {}).get("radar_eligibility") or "QUALIFIED").upper()
+                stale_untouched = (
+                    cur_chk is None
+                    or cur_life in ("INVALIDATED", "BROKEN", "EXPIRED", "MITIGATED", "UNCONFIRMED", "HISTORICAL")
+                    or cur_chk.get("is_valid") is False
+                    or cur_tier == "FAR_ZONE"
+                    or cur_elig == "NOT_QUALIFIED"
+                )
+                cand_valid = self._is_valid_focus_candidate(method, zone)
+                superseded_untouched = bool(
+                    cand_valid
+                    and (
+                        zone.get("zone_id") != record["zone_id"]
+                        or not self._same_zone_identity(method, record, zone)
+                    )
+                )
+                if stale_untouched or superseded_untouched:
+                    self.focus[method] = None
+                    record = None
+            if (
+                record is not None
+                and full_refresh
+                and method_ok
+                and snap.get("data_ok") is not False
+                and str(snap.get("data_freshness") or "").upper() not in ("STALE", "INVALID", "NO DATA")
+            ):
+                live_zone = self._current_zone(method, results[method], record["zone_id"])
+                if live_zone is None and isinstance(zone, dict) and zone.get("zone_id") == record["zone_id"]:
+                    live_zone = zone
+                if self._same_zone_identity(method, record, live_zone):
+                    record["zone"] = self._merged_zone_metadata(method, record, live_zone)
             if record is None and full_refresh and completed and zone and zone.get("zone_id") == completed["zone_id"]:
                 alternative = self._next_zone(method, results[method], completed, zone)
                 if alternative is not None:
                     zone, plan = alternative, None
             if record is None and full_refresh and fresh and isinstance(zone, dict) and zone.get("zone_id"):
                 low, high = self._bounds(method, zone)
-                state = str(zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
                 kind = str(zone.get("zone_type") or "").upper()
                 direction = "BUY" if kind in ("DEMAND", "SUPPORT") else "SELL" if kind in ("SUPPLY", "RESISTANCE") else ""
                 completed = self.completed[method]
@@ -338,7 +476,7 @@ class PantauFocusTracker:
                         if method == "SMC" else (results[method].get("decision") or {}).get("signal") in ("BUY", "SELL")
                     )):
                         continue
-                if direction and 0 < low <= high and state not in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN", "UNCONFIRMED") and zone.get("is_valid") is not False:
+                if direction and self._is_valid_focus_candidate(method, zone):
                     record = {
                         "zone": dict(zone), "zone_id": zone["zone_id"], "low": low, "high": high,
                         "direction": direction, "issued_at": time.time(), "plan": None, "touched": False,
@@ -352,7 +490,7 @@ class PantauFocusTracker:
                             f"[{method}] ZONA BERIKUTNYA {low:.2f}-{high:.2f}; "
                             "KANDIDAT RANKING, MENUNGGU VALIDASI ENTRY"
                         )
-            if record and full_refresh and zone and zone.get("zone_id") == record["zone_id"]:
+            if record and full_refresh and self._same_zone_identity(method, record, zone):
                 if not record["touched"]:
                     plan_updates[method] = (
                         {"direction": plan["direction"], **{key: safe_float(plan[key]) for key in ("entry", "sl", "tp1")}}
@@ -548,18 +686,31 @@ class PantauFocusTracker:
             result["formatted_section"] = format_smc_monitor_section(result, detailed=detailed)
         else:
             same_zone = bool(record and candidate_id == record["zone_id"])
+            same_identity = bool(same_zone and self._same_zone_identity(method, record, zone))
             same_bounds = bool(
-                same_zone
+                same_identity
                 and abs(safe_float(zone.get("low")) - record["low"]) < 1e-8
                 and abs(safe_float(zone.get("high")) - record["high"]) < 1e-8
             )
-            old_zone = zone if same_bounds else record["zone"] if record else None
+            live_zone = (
+                zone if same_identity
+                else self._current_zone(method, result, record["zone_id"]) if record
+                else None
+            )
+            if same_bounds:
+                old_zone = zone
+            elif self._same_zone_identity(method, record, live_zone):
+                old_zone = self._merged_zone_metadata(method, record, live_zone)
+            else:
+                old_zone = record["zone"] if record else None
             focus = {
                 key: old_zone.get(key) for key in (
-                    "zone_id", "zone_type", "timeframe", "rank_label", "low", "high", "grade", "score",
+                    "zone_id", "zone_type", "timeframe", "rank_label", "low", "high", "grade", "score", "source",
+                    "confirmed_time", "confirmation_time", "formation_time", "risk_tier", "distance", "distance_points",
                     "swing_class", "confluence_info", "historical_reaction_count", "touch_analysis", "lifecycle_event",
                     "lifecycle_status", "status",
                 )
+                if key in old_zone
             } if old_zone else None
             if focus and not same_bounds:
                 focus["lifecycle_status"] = "UNCONFIRMED"

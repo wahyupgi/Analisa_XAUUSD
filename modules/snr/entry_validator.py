@@ -19,37 +19,49 @@ from modules.snr.retest_detection import detect_zone_retest
 from modules.snr.risk_reward import calculate_snr_risk_reward, opposing_risk_zones
 
 
-def _zone_was_tested(zone, clean_m5=None):
-    """Memeriksa apakah zona SNR sudah pernah disentuh, diuji, atau dijemput harga."""
+def _zone_touch_provenance(zone, clean_m5=None):
+    """Memeriksa bukti dan sumber historis pengujian zona SNR pasca-konfirmasi."""
     if not isinstance(zone, dict):
-        return False
-    if int(zone.get("touch_count", 0) or 0) > 0:
-        return True
-    if int(zone.get("valid_touch_count", 0) or 0) > 0:
-        return True
-    if int(zone.get("reactions", 0) or 0) > 0:
-        return True
+        return {"tested": False, "source": None, "touch_time": None}
+    ta = zone.get("touch_analysis") if isinstance(zone.get("touch_analysis"), dict) else {}
+    touches = ta.get("touches") if isinstance(ta.get("touches"), list) else []
+    ta_time = ta.get("lifecycle_event_time") or (
+        touches[-1].get("bar_time") if touches and isinstance(touches[-1], dict) else None
+    )
+    if (
+        int(zone.get("touch_count", 0) or 0) > 0
+        or int(zone.get("valid_touch_count", 0) or 0) > 0
+        or int(zone.get("reactions", 0) or 0) > 0
+    ):
+        return {"tested": True, "source": "touch_analysis", "touch_time": ta_time}
     t_status = str(zone.get("touch_status", "")).upper()
-    if t_status and t_status != "UNTESTED":
-        return True
+    if t_status.startswith("TESTED") or t_status in ("TOUCHED", "SWEEP", "HISTORICAL_TOUCH"):
+        return {"tested": True, "source": "touch_status", "touch_time": ta_time}
     event = str(zone.get("lifecycle_event", "")).upper()
     if event in ("TOUCHED", "SWEEP", "HISTORICAL_TOUCH", "TESTED"):
-        return True
+        return {"tested": True, "source": "lifecycle_event", "touch_time": ta_time}
     st = str(zone.get("lifecycle_status", zone.get("status", ""))).upper()
     if st in ("TOUCHED", "SWEEP", "TESTED", "HISTORICAL_TOUCH"):
-        return True
+        return {"tested": True, "source": "lifecycle_status", "touch_time": ta_time}
     if clean_m5 is not None and not clean_m5.empty:
         z_low = safe_float(zone.get("low"), 0.0)
         z_high = safe_float(zone.get("high"), z_low)
-        z_type = str(zone.get("zone_type", "")).upper()
-        z_lbl = str(zone.get("rank_label", "")).upper()
-        if z_type == "RESISTANCE" or "R" in z_lbl or "RESISTANCE" in z_lbl:
-            if (clean_m5["High"] >= z_low).any():
-                return True
-        elif z_type == "SUPPORT" or "S" in z_lbl or "SUPPORT" in z_lbl:
-            if (clean_m5["Low"] <= z_high).any():
-                return True
-    return False
+        if z_low > 0 and z_high >= z_low:
+            start_idx = max(0, int(zone_confirmation_start(zone, clean_m5)))
+            post_m5 = clean_m5.iloc[start_idx:]
+            if not post_m5.empty:
+                overlap_mask = (post_m5["High"] >= z_low) & (post_m5["Low"] <= z_high)
+                if overlap_mask.any():
+                    touch_ts = None
+                    if "Time" in post_m5.columns:
+                        touch_ts = str(post_m5.loc[overlap_mask, "Time"].iloc[-1])
+                    return {"tested": True, "source": "m5_post_confirmation", "touch_time": touch_ts}
+    return {"tested": False, "source": None, "touch_time": None}
+
+
+def _zone_was_tested(zone, clean_m5=None):
+    """Memeriksa apakah zona SNR sudah pernah disentuh atau diuji pasca-konfirmasi."""
+    return bool(_zone_touch_provenance(zone, clean_m5=clean_m5).get("tested"))
 
 
 def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price, clean_m5=None):
@@ -755,12 +767,21 @@ def validate_snr_entry(
         }
 
     # Default: WAIT (belum ada konfirmasi lengkap; RR ditampilkan NOT CHECKED sesuai Section U)
+    def _hist_touch_note(zone):
+        prov = _zone_touch_provenance(zone, clean_m5)
+        if not prov.get("tested"):
+            return ""
+        ts = prov.get("touch_time")
+        return f" (event historis {ts})" if ts else " (event historis)"
+
     if h4_bear_counter:
+        r1_prov = _zone_touch_provenance(r1, clean_m5) if r1 else {"tested": False}
         if s1 and (s1.get("price_inside_zone") or entered_support or cp <= (s1_high + 0.20 * m5_atr)):
-            if _zone_was_tested(r1, clean_m5):
+            if r1 and r1_prov.get("tested"):
+                r1_note = _hist_touch_note(r1)
                 default_wait_msg = (
-                    f"WAIT_SUPPORT_REACTION: Harga telah terjemput di Resistance {r1.get('rank_label', 'R1')} "
-                    f"({r1_low:.2f}-{r1_high:.2f}) dan running turun menguji Support {s1.get('rank_label', 'S1')} "
+                    f"WAIT_SUPPORT_REACTION: Resistance {r1.get('rank_label', 'R1')} "
+                    f"({r1_low:.2f}-{r1_high:.2f}) tercatat pernah teruji{r1_note} dan harga saat ini menguji Support {s1.get('rank_label', 'S1')} "
                     f"({s1_low:.2f}-{s1_high:.2f}). Menunggu konfirmasi M5 Breakdown {s1.get('rank_label', 'S1')} "
                     f"untuk sell continuation, atau pantau reaksi support."
                 )
@@ -773,10 +794,17 @@ def validate_snr_entry(
         elif r1 is not None and (r1.get("price_inside_zone") or (entered_resistance and cp >= r1_low - 0.20 * m5_atr)):
             default_wait_msg = f"WAITING BEARISH CONFIRMATION at Resistance {r1.get('rank_label', 'R1')} ({r1_low:.2f}-{r1_high:.2f})."
         elif r1:
-            if _zone_was_tested(r1, clean_m5) and cp < r1_low:
+            if s1 and r1_prov.get("tested") and cp < r1_low:
+                r1_note = _hist_touch_note(r1)
                 default_wait_msg = (
-                    f"RUNNING_TO_SUPPORT: Harga telah terjemput di Resistance {r1.get('rank_label', 'R1')} "
-                    f"({r1_low:.2f}-{r1_high:.2f}) dan sedang running turun menuju Support {s1.get('rank_label', 'S1') if s1 else 'berikutnya'}."
+                    f"RUNNING_TO_SUPPORT: Resistance {r1.get('rank_label', 'R1')} "
+                    f"({r1_low:.2f}-{r1_high:.2f}) tercatat pernah teruji{r1_note} dan harga bergerak turun menuju Support {s1.get('rank_label', 'S1')}."
+                )
+            elif r1_prov.get("tested") and cp < r1_low:
+                r1_note = _hist_touch_note(r1)
+                default_wait_msg = (
+                    f"WAIT_RESISTANCE_RETEST: Resistance {r1.get('rank_label', 'R1')} "
+                    f"({r1_low:.2f}-{r1_high:.2f}) tercatat pernah teruji{r1_note} dan belum ada Support aktif (S1: NONE); harga saat ini di bawah resistance, menunggu retest atau struktur baru."
                 )
             else:
                 distance = max(r1_low - cp, 0.0)
@@ -786,11 +814,13 @@ def validate_snr_entry(
         else:
             default_wait_msg = "WAITING RESISTANCE PULLBACK (No active resistance detected)."
     elif h4_bull_counter:
+        s1_prov = _zone_touch_provenance(s1, clean_m5) if s1 else {"tested": False}
         if r1 and (r1.get("price_inside_zone") or entered_resistance or cp >= (r1_low - 0.20 * m5_atr)):
-            if _zone_was_tested(s1, clean_m5):
+            if s1 and s1_prov.get("tested"):
+                s1_note = _hist_touch_note(s1)
                 default_wait_msg = (
-                    f"WAIT_RESISTANCE_REACTION: Harga telah terjemput di Support {s1.get('rank_label', 'S1')} "
-                    f"({s1_low:.2f}-{s1_high:.2f}) dan running naik menguji Resistance {r1.get('rank_label', 'R1')} "
+                    f"WAIT_RESISTANCE_REACTION: Support {s1.get('rank_label', 'S1')} "
+                    f"({s1_low:.2f}-{s1_high:.2f}) tercatat pernah teruji{s1_note} dan harga saat ini menguji Resistance {r1.get('rank_label', 'R1')} "
                     f"({r1_low:.2f}-{r1_high:.2f}). Menunggu konfirmasi M5 Breakout {r1.get('rank_label', 'R1')} "
                     f"untuk buy continuation, atau pantau reaksi resistance."
                 )
@@ -803,10 +833,17 @@ def validate_snr_entry(
         elif s1 is not None and (s1.get("price_inside_zone") or (entered_support and cp <= s1_high + 0.20 * m5_atr)):
             default_wait_msg = f"WAITING BULLISH CONFIRMATION at Support {s1.get('rank_label', 'S1')} ({s1_low:.2f}-{s1_high:.2f})."
         elif s1:
-            if _zone_was_tested(s1, clean_m5) and cp > s1_high:
+            if r1 and s1_prov.get("tested") and cp > s1_high:
+                s1_note = _hist_touch_note(s1)
                 default_wait_msg = (
-                    f"RUNNING_TO_RESISTANCE: Harga telah terjemput di Support {s1.get('rank_label', 'S1')} "
-                    f"({s1_low:.2f}-{s1_high:.2f}) dan sedang running naik menuju Resistance {r1.get('rank_label', 'R1') if r1 else 'berikutnya'}."
+                    f"RUNNING_TO_RESISTANCE: Support {s1.get('rank_label', 'S1')} "
+                    f"({s1_low:.2f}-{s1_high:.2f}) tercatat pernah teruji{s1_note} dan harga bergerak naik menuju Resistance {r1.get('rank_label', 'R1')}."
+                )
+            elif s1_prov.get("tested") and cp > s1_high:
+                s1_note = _hist_touch_note(s1)
+                default_wait_msg = (
+                    f"WAIT_SUPPORT_RETEST: Support {s1.get('rank_label', 'S1')} "
+                    f"({s1_low:.2f}-{s1_high:.2f}) tercatat pernah teruji{s1_note} dan belum ada Resistance aktif (R1: NONE); harga saat ini di atas support, menunggu retest atau struktur baru."
                 )
             else:
                 distance = max(cp - s1_high, 0.0)
@@ -838,18 +875,30 @@ def validate_snr_entry(
         inside_now = safe_float(target.get("low")) <= cp <= safe_float(target.get("high"))
         closed_touch = _closed_touch(target)
         recent_closed_touch = closed_touch
+        target_prov = _zone_touch_provenance(target, clean_m5)
         if not closed_touch and inside_now:
             default_wait_msg = "WAIT_M5_CONFIRMATION: Harga di zona; tunggu interaksi candle M5 tertutup."
         elif not closed_touch or not entered:
-            if focus_is_resistance and _zone_was_tested(target, clean_m5) and cp < safe_float(target.get("low")):
+            target_note = _hist_touch_note(target)
+            if s1 and focus_is_resistance and target_prov.get("tested") and cp < safe_float(target.get("low")):
                 default_wait_msg = (
-                    f"RUNNING_TO_SUPPORT: Harga telah terjemput di {focus_label} dan sedang running turun "
-                    f"menuju Support {s1.get('rank_label', 'S1') if s1 else 'berikutnya'}."
+                    f"RUNNING_TO_SUPPORT: {focus_label} tercatat pernah teruji{target_note} dan harga bergerak turun "
+                    f"menuju Support {s1.get('rank_label', 'S1')}."
                 )
-            elif focus_is_support and _zone_was_tested(target, clean_m5) and cp > safe_float(target.get("high")):
+            elif focus_is_resistance and target_prov.get("tested") and cp < safe_float(target.get("low")):
                 default_wait_msg = (
-                    f"RUNNING_TO_RESISTANCE: Harga telah terjemput di {focus_label} dan sedang running naik "
-                    f"menuju Resistance {r1.get('rank_label', 'R1') if r1 else 'berikutnya'}."
+                    f"WAIT_RESISTANCE_RETEST: {focus_label} tercatat pernah teruji{target_note} dan belum ada Support aktif (S1: NONE); "
+                    f"harga saat ini di bawah resistance, menunggu retest {focus_label} atau struktur baru."
+                )
+            elif r1 and focus_is_support and target_prov.get("tested") and cp > safe_float(target.get("high")):
+                default_wait_msg = (
+                    f"RUNNING_TO_RESISTANCE: {focus_label} tercatat pernah teruji{target_note} dan harga bergerak naik "
+                    f"menuju Resistance {r1.get('rank_label', 'R1')}."
+                )
+            elif focus_is_support and target_prov.get("tested") and cp > safe_float(target.get("high")):
+                default_wait_msg = (
+                    f"WAIT_SUPPORT_RETEST: {focus_label} tercatat pernah teruji{target_note} dan belum ada Resistance aktif (R1: NONE); "
+                    f"harga saat ini di atas support, menunggu retest {focus_label} atau struktur baru."
                 )
             else:
                 distance = max(safe_float(target.get("low")) - cp, cp - safe_float(target.get("high")), 0.0)

@@ -338,6 +338,8 @@ def build_smc_zone_reason(zone: Dict[str, Any], max_words: int = 10) -> str:
 
 
 _PLAN_NOTES = (
+    ("Konflik SMC-SNR", "BLOCKED BY SNR"), ("Konflik SMC", "BLOCKED BY SNR"), ("Terhalang zona S&R", "BLOCKED BY SNR"),
+    ("historis/terlewat", "M5 HISTORICAL/MISSED"),
     ("Risk/Reward", "RR BELOW MINIMUM"), ("Jarak SL", "SL INVALID"), ("sudah di atas/di dalam entry", "PRICE AT/INSIDE ENTRY"),
     ("sudah di bawah/di dalam entry", "PRICE AT/INSIDE ENTRY"), ("Bias H4", "HTF FILTER"), ("Konflik struktur", "HTF FILTER"),
     ("M30", "M30 FILTER"), ("Spread", "SPREAD TOO HIGH"), ("Jarak zona", "ZONE TOO FAR"), ("Data MT5", "DATA STALE"),
@@ -370,8 +372,23 @@ def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan:
         or (stages.get("displacement") or {}).get("status") != "CONFIRMED"
     ):
         code = "WAIT_M5_CONFIRMATION"
-    elif active and (stages.get("risk_reward") or {}).get("rr") is not None and (stages.get("risk_reward") or {}).get("status") != "CONFIRMED" and "R:R" in str((stages.get("risk_reward") or {}).get("msg", "")):
-        code = "RR_FAILED"
+    elif active and decision.get("status") != "VALID" and (
+        (stages.get("risk_reward") or {}).get("status") != "CONFIRMED"
+        or (stages.get("entry_validation") or {}).get("status") in ("WAIT", "FAILED", "FAIL", "INVALID")
+    ):
+        rr_ev_msg = str(
+            (stages.get("risk_reward") or {}).get("msg")
+            or (stages.get("entry_validation") or {}).get("msg")
+            or ""
+        )
+        if "Konflik SMC" in rr_ev_msg or "S&R" in rr_ev_msg or "SNR" in rr_ev_msg:
+            code = "WAIT | M5 CONFIRMED (SNR CONFLICT)"
+        elif "historis" in rr_ev_msg or "terlewat" in rr_ev_msg:
+            code = "WAIT | M5 HISTORICAL/MISSED"
+        elif (stages.get("risk_reward") or {}).get("rr") is not None and "R:R" in rr_ev_msg:
+            code = "RR_FAILED"
+        else:
+            code = "WAIT"
     elif active:
         code = "WAIT"
     else:
@@ -386,13 +403,29 @@ def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan:
         ):
             plan, kind = confirmed, "CONFIRMED"
         else:
+            ctx = decision.get("context") or {}
+            h4_st = str(ctx.get("htf_bias") or ctx.get("H4") or "").upper()
+            m30_st_info = stages.get("M30") or {}
+            m30_st = str(m30_st_info.get("status") or ctx.get("m30_status") or ("CONFIRMED" if m30_st_info.get("ok") else "")).upper()
+            h1_ok = (stages.get("H1") or {}).get("ok", True)
+            pending_gate_ok = (
+                decision.get("status") != "INVALID"
+                and not ctx.get("has_conflict")
+                and h1_ok is not False
+                and (not h4_st or h4_st in ("BULLISH", "BEARISH"))
+                and m30_st not in ("CONFLICT", "INVALID", "WEAK")
+            )
             pending = decision.get("early_setup") or {}
             qualified = list(pending.get("all_setups") or []) + ([pending["best_setup"]] if pending.get("best_setup") else [])
             computed = (decision.get("zone_plans") or {}).get(zone_id) or {}
             plan = next((p for p in qualified if p.get("zone_id") == zone_id and p.get("valid") and p.get("status") == "READY"), None)
-            if plan:
+            if plan and pending_gate_ok:
                 kind = "PENDING"
-            elif computed.get("valid") and computed.get("status") == "READY":
+            elif plan:
+                kind = "PROVISIONAL"
+            elif (computed.get("valid") and computed.get("status") == "READY") or (
+                computed.get("status") == "PROVISIONAL" and computed.get("provisional")
+            ):
                 plan, kind = computed, "PROVISIONAL"
             else:
                 text = str(computed.get("rejection_reason") or "")
@@ -608,9 +641,22 @@ def format_scan_presentation(
     sw_desc = stages.get("liquidity_sweep", {}).get("msg")
     tr_desc = stages.get("structure_trigger", {}).get("msg")
     dp_desc = stages.get("displacement", {}).get("msg")
+    rr_desc = str(
+        stages.get("risk_reward", {}).get("msg")
+        or stages.get("entry_validation", {}).get("msg")
+        or ""
+    ).strip()
+    m5_tech_confirmed = (status == "VALID") or (tr == "CONFIRMED" and dp == "CONFIRMED")
+    m5_bias_disp = (
+        "CONFIRMED"
+        if status == "VALID"
+        else ("CONFIRMED (Entry WAIT)" if m5_tech_confirmed else "WAIT")
+    )
 
     if status == "VALID":
         m5_trig_str = f"CONFIRMED ({direction} Trigger Valid)"
+    elif m5_tech_confirmed:
+        m5_trig_str = f"CONFIRMED ({direction} M5 Valid — Entry WAIT)"
     elif zt in ("FAIL", "WAIT") and sw in ("NOT_CHECKED", "WAIT"):
         m5_trig_str = "WAIT (Zone Touch belum terpenuhi — trigger zona M5 belum dijalankan)"
     elif sw != "CONFIRMED":
@@ -669,11 +715,26 @@ def format_scan_presentation(
         out.append("1. MARKET BIAS")
         out.append(f"- Current Price    : {price:.2f} (Snapshot: {snapshot_time}{bid_ask_str})" if price > 0 else "- Current Price    : N/A")
         out.append(f"- Sumber Harga     : {price_src}")
-        out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {'CONFIRMED' if status == 'VALID' else 'WAIT'}")
+        m30_msg = str(m30_val.get("msg") or "").strip()
+        m30_cond_lbl = str(m30_val.get("condition") or ctx.get("m30_setup_condition") or "").strip()
+        if m30_status in ("CONFLICT", "WEAK", "INVALID") and m30_msg:
+            m30_disp = f"{m30_status} ({m30_msg})"
+        elif m30_status == "CONFIRMED" and m30_cond_lbl and m30_cond_lbl != m30_status:
+            m30_disp = f"{m30_status} (Condition: {m30_cond_lbl})"
+        else:
+            m30_disp = f"{m30_status}"
+        out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {m5_bias_disp}")
         out.append(f"- H4 Bias          : {h4_str}")
         out.append(f"- H1 Structure     : {h1_struct}{conflict_tag}")
-        out.append(f"- M30 Momentum     : {m30_status}")
-        out.append(f"- M5 Trigger       : {'CONFIRMED (' + str(direction) + ')' if status == 'VALID' else 'WAIT'}")
+        out.append(f"- M30 Momentum     : {m30_disp}")
+        out.append(
+            f"- M5 Trigger       : "
+            + (
+                f"CONFIRMED ({direction})"
+                if status == "VALID"
+                else (f"CONFIRMED ({direction} M5 Valid — Entry WAIT)" if m5_tech_confirmed else "WAIT")
+            )
+        )
         out.append("")
 
         # 2. ZONA UTAMA
@@ -753,6 +814,7 @@ def format_scan_presentation(
             best_p_c
             and best_p_c.get("valid")
             and h4_bias in ("BULLISH", "BEARISH")
+            and not ctx.get("has_conflict")
             and m30_status not in ("CONFLICT", "INVALID", "WEAK")
         )
         confirmed_ready_c = bool(status == "VALID" and plan)
@@ -805,7 +867,7 @@ def format_scan_presentation(
         rr_line = (
             f"CONFIRMED (1:{plan['rr']:.1f})"
             if (status == "VALID" and plan and plan.get("rr"))
-            else str(rr_st)
+            else (f"{rr_st} ({rr_desc})" if rr_desc else str(rr_st))
         )
         touch_display = zt
         if main_z and price > 0:
@@ -825,7 +887,11 @@ def format_scan_presentation(
         setup_t_disp = str(dec.get("setup_type") or (plan.get("setup_type") if isinstance(plan, dict) else None) or ("TREND_PULLBACK" if status == "VALID" else "NONE")).upper()
         sig_st_disp = str(dec.get("signal_status") or (SIGNAL_STATUS_SIGNAL_CONFIRMED if status == "VALID" else SIGNAL_STATUS_NO_SETUP)).upper()
         h1_conf_disp = str(ctx.get("h1_confirmation") or (stages.get("H1") or {}).get("status") or ("ALIGNED" if h4_bias == h1_struct and h4_bias in ("BULLISH", "BEARISH") else "UNCONFIRMED"))
-        m30_cond_disp = str((stages.get("M30") or {}).get("condition") or ctx.get("m30_setup_condition") or m30_status)
+        m30_cond_raw = str((stages.get("M30") or {}).get("condition") or ctx.get("m30_setup_condition") or "").strip()
+        if m30_cond_raw and m30_cond_raw != m30_status and m30_status == "CONFIRMED":
+            m30_cond_disp = f"{m30_cond_raw} (Momentum {m30_status})"
+        else:
+            m30_cond_disp = m30_cond_raw or m30_status
         m5_trig_disp = str((stages.get("structure_trigger") or {}).get("msg") or ("CONFIRMED" if status == "VALID" else "WAIT"))
         snr_ctx_obj = (dec.get("snr_context") if isinstance(dec.get("snr_context"), dict) else None) or (scan.get("snr_context") if isinstance(scan.get("snr_context"), dict) else None) or {}
         snr_ctx_disp = snr_ctx_obj.get("summary") or "Independen"
@@ -878,7 +944,10 @@ def format_scan_presentation(
             elif dp != "CONFIRMED":
                 main_reason = "Trigger struktur M5 terdeteksi, menunggu candle Displacement yang valid."
             elif rr_st != "CONFIRMED":
-                main_reason = "Rasio Risk/Reward belum memenuhi syarat minimum. Belum ada setup valid."
+                if rr_desc and any(k in rr_desc.lower() for k in ("snr", "s&r", "konflik", "terhalang", "historis", "terlewat")):
+                    main_reason = rr_desc
+                else:
+                    main_reason = "Rasio Risk/Reward belum memenuhi syarat minimum. Belum ada setup valid."
             else:
                 main_reason = "Menunggu konfirmasi M5. Belum ada setup valid."
 
@@ -903,10 +972,18 @@ def format_scan_presentation(
     out.append("A. KONDISI PASAR — 2. MARKET BIAS (MARKET OVERVIEW)")
     out.append(f"- Current Price    : {price:.2f} (Snapshot: {snapshot_time}{bid_ask_str})" if price > 0 else "- Current Price    : N/A")
     out.append(f"- Sumber Harga     : {price_src}")
-    out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {'CONFIRMED' if status == 'VALID' else 'WAIT'}")
+    m30_msg_d = str(m30_val.get("msg") or "").strip()
+    m30_cond_d = str(m30_val.get("condition") or ctx.get("m30_setup_condition") or "").strip()
+    if m30_status in ("CONFLICT", "WEAK", "INVALID") and m30_msg_d:
+        m30_disp_d = f"{m30_status} ({m30_msg_d})"
+    elif m30_status == "CONFIRMED" and m30_cond_d and m30_cond_d != m30_status:
+        m30_disp_d = f"{m30_status} (Condition: {m30_cond_d})"
+    else:
+        m30_disp_d = f"{m30_status}"
+    out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {m5_bias_disp}")
     out.append(f"- H4 Bias          : {h4_str}")
     out.append(f"- H1 Structure     : {h1_struct}")
-    out.append(f"- M30 Momentum     : {m30_status}")
+    out.append(f"- M30 Momentum     : {m30_disp_d}")
     out.append(f"- M5 Trigger       : {m5_trig_str}")
     if atr_diag_pres:
         atr_v_str = f"{atr_diag_pres['atr_value']:.2f} pt" if isinstance(atr_diag_pres.get("atr_value"), (int, float)) else "DATA_INCOMPLETE"
@@ -985,7 +1062,13 @@ def format_scan_presentation(
             out.append("  • Definisi Struct. Valid   : Fresh Valid + Tested Valid (Mitigated ditampilkan terpisah)")
             out.append(f"  • Radar Qualified          : {tot_radar} (Zona Aktif Pemantauan)")
             out.append(f"  • Pending Qualified (Limit): {tot_pend} (Seleksi radar awal; bukan status rencana pending final)")
-            out.append(f"  • Pending Plan READY       : {1 if ((early_setups or {}).get('best_setup') or {}).get('valid') else 0} (Planner agresif terpisah; BELUM order MT5)")
+            pend_ready_det = bool(
+                ((early_setups or {}).get("best_setup") or {}).get("valid")
+                and h4_bias in ("BULLISH", "BEARISH")
+                and not ctx.get("has_conflict")
+                and m30_status not in ("CONFLICT", "INVALID", "WEAK")
+            )
+            out.append(f"  • Pending Plan READY       : {1 if pend_ready_det else 0} (Planner agresif terpisah; BELUM order MT5)")
             out.append(f"  • Confirmed Entry Qualified: {tot_conf}")
             out.append(f"  • Jumlah Supply            : {tot_sup}")
             out.append(f"  • Jumlah Demand            : {tot_dem}")
@@ -1273,7 +1356,7 @@ def format_scan_presentation(
 
     # A. EARLY PENDING PLAN
     out.append("A. EARLY PENDING PLAN (Strategi Agresif - Risiko Lebih Tinggi):")
-    if best_p and best_p.get("valid") and h4_bias in ("BULLISH", "BEARISH") and m30_status not in ("CONFLICT", "INVALID", "WEAK"):
+    if best_p and best_p.get("valid") and h4_bias in ("BULLISH", "BEARISH") and not ctx.get("has_conflict") and m30_status not in ("CONFLICT", "INVALID", "WEAK"):
         out.append("   * Status         : READY — PENDING PLAN (BELUM DIPASANG DI MT5)")
         out.append("   * EARLY_PENDING_STATUS : READY")
         out.append(f"   * Order Type     : {best_p['order_type']}")
@@ -1338,7 +1421,14 @@ def format_scan_presentation(
     out.append(f"   * CHoCH/BOS/CISD : {tr}" + (f" ({tr_desc})" if tr == "CONFIRMED" and tr_desc else ""))
     out.append(f"   * Displacement   : {dp}" + (f" ({dp_desc})" if dp == "CONFIRMED" and dp_desc else ""))
     out.append(f"   * CONFIRMED_ENTRY_RR : {confirmed_rr_val}")
-    out.append(f"   * Risk/Reward    : {rr_st}" + (f" (1:{plan['rr']:.1f})" if (status == "VALID" and plan and plan.get("rr")) else ""))
+    out.append(
+        f"   * Risk/Reward    : {rr_st}"
+        + (
+            f" (1:{plan['rr']:.1f})"
+            if (status == "VALID" and plan and plan.get("rr"))
+            else (f" ({rr_desc})" if rr_desc else "")
+        )
+    )
 
     if status == "VALID" and plan:
         out.append(f"   * BUY / SELL / WAIT / INVALID: {direction} VALID")

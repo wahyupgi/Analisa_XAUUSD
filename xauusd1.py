@@ -33,6 +33,7 @@ import modules.zone_scanner as _m_zone
 import modules.state_manager as SM
 import modules.snr as _m_snr
 import modules.unified_monitor as _m_unified
+import modules.us_news_radar as _m_news
 
 # Expose every function, variable, and helper (including _catat_error, _tutup_mt5, etc.)
 for _mod in (_m_config, _m_utils, _m_mt5, _m_tek, _m_pasar, _m_jurnal, _m_state, _m_ai, _m_pantau, _m_zone):
@@ -76,6 +77,7 @@ def format_command_menu_help():
         "- jurnal           : Rekap riwayat sinyal, winrate, dan evaluasi performa",
         "- audit            : Audit fakta akun MT5, pending order & status ADR",
         "- refresh          : Perbarui analisis dengan data market MT5 terkini",
+        "- news             : US Fundamental Radar ringkas (news detail / news refresh)",
         "- help             : Menampilkan panduan dan daftar perintah ini",
         "- exit             : Keluar dari aplikasi (q / quit / keluar)",
         "",
@@ -325,6 +327,15 @@ def main():
         ai_status=ai_status,
         version=APP_VERSION,
     ))
+    try:
+        _nl = [x.replace(" : ", " : ", 1) for x in _m_news.startup_lines()]
+        print("\n5. US NEWS RADAR")
+        for _x in _nl:
+            _k, _, _v = _x.partition(" : ")
+            print(f"• {_k:<20}: {_v}")
+        print("=" * 70)
+    except Exception:
+        print("\n5. US NEWS RADAR\n• Status              : UNAVAILABLE\n" + "=" * 70)
 
     # Sinkronisasi target zona awal Python Scanner ke state jika belum diset
     if not ZONA_ATAS_DINAMIS or not ZONA_BAWAH_DINAMIS:
@@ -427,6 +438,20 @@ def main():
                     print(f"• Zona Supply Atas  : {la:.2f} - {ha:.2f} (Batas SL Zona: {ja:.2f})")
             print("=" * 70)
             continue
+
+        # US News Radar (informasional; terisolasi, tidak memengaruhi scanner/order)
+        try:
+            if cmd == "news" or cmd.startswith("news "):
+                _ask_news = None
+                if client is not None:
+                    _ask_news = lambda p: sanitasi_output_gemini(panggil_gemini(client, [{"role": "user", "parts": [{"text": p}]}])[0])
+                _sig_ref = SINYAL_AKTIF_DINAMIS
+                print("\n" + _m_news.handle_command(cmd, ask_ai=_ask_news, active_signal=_sig_ref))
+                continue
+            if cmd.split()[0] in ("scan", "scanner", "zona", "zone", "smc", "snr", "snd", "pantau", "watch"):
+                print("\n" + "\n".join(_m_news.context_lines()))
+        except Exception:
+            pass
 
         catatan_jebol_otomatis = None
         if cmd.startswith("pantau") or cmd.startswith("watch"):

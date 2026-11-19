@@ -654,14 +654,79 @@ def _build_monitor_snapshot(
     zt_status = str(zt_stage.get("status") or "WAIT").upper()
 
     # Primary Zone
+    def _zone_from_monitored_identity(mi):
+        if not isinstance(mi, dict):
+            return None
+        try:
+            z_lo = float(mi.get("price_low", mi.get("zone_range", (0.0, 0.0))[0]))
+            z_hi = float(mi.get("price_high", mi.get("zone_range", (0.0, 0.0))[1]))
+            if z_lo <= 0 or z_hi <= 0:
+                return None
+            if z_lo > z_hi:
+                z_lo, z_hi = z_hi, z_lo
+            return {
+                "zone_id": mi.get("zone_id") or "MONITORED_ZONE",
+                "timeframe": str(mi.get("timeframe", "N/A")),
+                "zone_type": str(mi.get("zone_type", "N/A")),
+                "price_low": z_lo,
+                "price_high": z_hi,
+                "status": str(mi.get("status") or mi.get("lifecycle_status") or "RADAR").upper(),
+            }
+        except Exception:
+            return None
+
+    def _zone_from_active_signal(sig, mid_price):
+        if not isinstance(sig, dict):
+            return None
+        try:
+            arah = str(sig.get("arah", "")).upper()
+            z_lo = float(sig.get("lo", 0.0) or 0.0)
+            z_hi = float(sig.get("hi", 0.0) or 0.0)
+            z_sl = float(sig.get("sl", 0.0) or 0.0)
+            if z_lo <= 0 or z_hi <= 0:
+                return None
+            if z_lo > z_hi:
+                z_lo, z_hi = z_hi, z_lo
+            if arah not in ("BUY", "SELL"):
+                return None
+
+            # Jangan kunci ke sinyal yang sudah invalid terhadap level SL.
+            if mid_price > 0 and z_sl > 0:
+                if arah == "SELL" and mid_price > z_sl:
+                    return None
+                if arah == "BUY" and mid_price < z_sl:
+                    return None
+
+            if z_lo <= mid_price <= z_hi:
+                z_status = "ZONE_TOUCHED"
+            else:
+                z_status = "SIGNAL_LOCKED"
+
+            return {
+                "zone_id": f"ACTIVE_SIGNAL_{arah}_{z_lo:.2f}_{z_hi:.2f}",
+                "timeframe": "ACTIVE_SIGNAL",
+                "zone_type": "SUPPLY" if arah == "SELL" else "DEMAND",
+                "price_low": z_lo,
+                "price_high": z_hi,
+                "status": z_status,
+            }
+        except Exception:
+            return None
+
     wl_list = list(watchlist or ())
     r_prio = (
         (dec.get("radar_priority") if isinstance(dec, dict) else None)
         or (scan_result.get("radar_priority") if isinstance(scan_result, dict) else None)
         or {}
     )
+    monitored_pz = _zone_from_monitored_identity(dec.get("monitored_zone_identity") if isinstance(dec, dict) else None)
+    signal_pz = _zone_from_active_signal(sinyal_aktif, mid_val)
     pz = (
-        r_prio.get("primary_directional_zone")
+        monitored_pz
+        or signal_pz
+        or r_prio.get("best_confirmed_candidate")
+        or r_prio.get("best_pending_candidate")
+        or r_prio.get("primary_directional_zone")
         or r_prio.get("primary_zone")
         or r_prio.get("nearest_radar_zone")
         or (wl_list[0] if wl_list else None)

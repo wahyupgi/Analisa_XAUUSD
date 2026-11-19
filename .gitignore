@@ -11,6 +11,7 @@ audit_zone_scanner.jsonl
 *.tmp
 *.bak
 state_*.json
+news_cache.json
 jurnal_sinyal_xauusd.csv
 Jurnal_XAUUSD_*.md
 

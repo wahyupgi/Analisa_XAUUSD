@@ -486,9 +486,22 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
         n_eval = len(eval_df)
         for cand in bo_candidates:
             c_label = f"{cand.get('rank_label', cand.get('zone_type', 'BROKEN'))} ({cand.get('low', 0):.2f}-{cand.get('high', 0):.2f})"
-            bo_cand = detect_zone_breakout(cand, eval_df, momentum_result=m5_mom, config=cfg)
+            cand_tf = str(cand.get("timeframe", "")).upper()
+            cand_df = frames_dict.get(cand_tf) if (frames_dict and cand_tf in frames_dict) else eval_df
+            cand_mom = momentum_by_tf.get(cand_tf) if (momentum_by_tf and cand_tf in momentum_by_tf) else m5_mom
+            # Gunakan breakout_info yang sudah dievaluasi pada timeframe zona aslinya jika ada
+            bo_cand = cand.get("breakout_info")
+            if not isinstance(bo_cand, dict) or not bo_cand.get("status"):
+                bo_cand = detect_zone_breakout(cand, cand_df if cand_df is not None else eval_df, momentum_result=cand_mom, config=cfg)
             if bo_cand.get("status") not in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION"):
                 continue
+            # Jangan turunkan zona yang sudah confirmed broken di timeframe aslinya menjadi potential akibat intrabar M5
+            cand_life = str(cand.get("lifecycle_status") or cand.get("status") or "").upper()
+            if cand_life in ("BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED") and bo_cand.get("status") == "BREAKOUT_PENDING_CONFIRMATION":
+                bo_cand = dict(bo_cand)
+                bo_cand["status"] = "VALID_BREAKOUT"
+                bo_cand["break_type"] = "CONFIRMED_BREAKDOWN" if str(cand.get("zone_type")).upper() == "SUPPORT" else "CONFIRMED_BREAKOUT"
+                bo_cand["summary_status"] = "CONFIRMED"
             c_bar_idx = bo_cand.get("breakout_bar_index")
             c_bars_ago = (n_eval - 1 - int(c_bar_idx)) if (c_bar_idx is not None and n_eval > 0) else 999
             c_is_hist = bool(bo_cand.get("is_historical_break")) or safe_float(cand.get("distance_atr"), 0.0) > 12.0
@@ -732,11 +745,13 @@ def run_snr_scan(
 
             # Deteksi dini potensi breakdown Support / breakout Resistance pada candle M5 closed
             # sebelum candle HTF selesai. M5 TIDAK boleh mengunci zona HTF sebagai BROKEN/RECLAIM_PENDING
-            # tanpa breakdown terkonfirmasi di timeframe zona sendiri.
+            # tanpa breakdown terkonfirmasi di timeframe zona sendiri, dan tidak boleh mendowngrade zona yang sudah terkonfirmasi break.
             bo_m5 = None
             if (
                 tf != "M5"
-                and current_lifecycle not in locked_states + ("INVALIDATED",)
+                and current_lifecycle not in locked_states + ("INVALIDATED", "BROKEN", "RECLAIM_PENDING", "RECLAIMED")
+                and not validated.get("breakout_confirmed")
+                and not validated.get("is_broken")
                 and m5_df_ref is not None
                 and not getattr(m5_df_ref, "empty", True)
             ):

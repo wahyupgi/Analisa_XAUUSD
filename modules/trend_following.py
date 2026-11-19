@@ -2270,6 +2270,8 @@ def validate_m5_entry_confirmation(
         )
         stages["entry_validation"] = {"status": "WAIT", "msg": msg_missed}
         res["entry_permission"] = "WAIT"
+        res["is_missed"] = True
+        res["signal_status"] = SIGNAL_STATUS_ENTRY_MISSED
         W.append(msg_missed)
         return res
 
@@ -2562,7 +2564,7 @@ def evaluate_trend_following_setup(
     first_cand: Optional[Dict[str, Any]] = None
     for cand in cands:
         ev = validate_m5_entry_confirmation(cand, frames, current_price, spread=spread, news_blackout=news_blackout, snr_context=snr_ctx)
-        if first_eval is None or (ev.get("smc_technical_confirmed") and not first_eval.get("smc_technical_confirmed")):
+        if first_eval is None or (ev.get("smc_technical_confirmed") and not first_eval.get("smc_technical_confirmed") and not ev.get("is_missed")):
             first_eval, first_cand = ev, cand
         if ev["status"] == "VALID":
             return {
@@ -2604,7 +2606,12 @@ def evaluate_trend_following_setup(
             first_eval, first_cand = rev_eval_fb, rev_cand_fb
 
     zt_st = ((first_eval or {}).get("stages") or {}).get("zone_touch", {}).get("status", "WAIT")
-    sig_st = SIGNAL_STATUS_WAITING_PULLBACK if zt_st in ("WAIT", "FAIL") else SIGNAL_STATUS_WAITING_CONFIRMATION
+    if (first_eval or {}).get("is_missed"):
+        sig_st = SIGNAL_STATUS_ENTRY_MISSED
+    elif zt_st in ("WAIT", "FAIL"):
+        sig_st = SIGNAL_STATUS_WAITING_PULLBACK
+    else:
+        sig_st = SIGNAL_STATUS_WAITING_CONFIRMATION
     return {
         "status": "WAIT",
         "signal_status": sig_st,

@@ -1205,7 +1205,11 @@ def _smart_monitor_context(cycle_result):
     }
     monitor_state = state_map.get(lifecycle, lifecycle)
     if monitor_state == "IN_ZONE":
-        monitor_state = "AWAITING_CONFIRMATION"
+        # Jika harga sudah berada di luar zona dan tidak ada trigger aktif, jangan paksakan AWAITING_CONFIRMATION
+        if lo > 0 and hi >= lo and price > 0 and not (lo <= price <= hi):
+            monitor_state = "IDLE"
+        else:
+            monitor_state = "AWAITING_CONFIRMATION"
 
     raw_stages = decision.get("m5_stages") or decision.get("stages") or {}
     m5_bound = _m5_stages_match_zone(decision, zone)
@@ -1409,6 +1413,10 @@ def _smart_monitor_context(cycle_result):
         reason, next_action, final_signal = "ZONE INVALIDATED", "CANCEL SETUP", "WAIT"
     elif monitor_state == "EXPIRED":
         reason, next_action, final_signal = "SETUP EXPIRED", "WAIT NEW SETUP", "WAIT"
+    elif decision.get("is_missed") or (decision.get("m5") or {}).get("is_missed") or decision.get("signal_status") in ("SIGNAL_STATUS_ENTRY_MISSED", "ENTRY_MISSED", "ENTRY MISSED"):
+        reason = "Sinyal M5 historis/terlewat; harga meninggalkan zona"
+        next_action, final_signal = "WAIT PULLBACK", "WAIT (ENTRY MISSED)"
+        monitor_state = "IDLE"
     elif touch_status in ("IN_ZONE", "TOUCHED_PREVIOUSLY") or monitor_state == "AWAITING_CONFIRMATION":
         reason = str((decision.get("reasons") or ["ZONE TOUCHED; M5 TRIGGER PENDING"])[0])
         next_action, final_signal = "CHECK VALIDATION", "WAIT"
@@ -1800,14 +1808,16 @@ def format_smart_monitor_report(cycle_result):
     z_tag = f" ({tag_inner})" if tag_inner else ""
 
     z_grade = str(zone.get("grade") or "N/A").strip()
+    zt_raw = str(zone.get("zone_type") or data.get("zone_type") or ("SUPPLY" if data.get("direction") == "SELL" else ("DEMAND" if data.get("direction") == "BUY" else "ZONE"))).strip().upper()
+    zone_header_label = f"ACTIVE {zt_raw} ZONE" if zt_raw in ("SUPPLY", "DEMAND") else "ACTIVE SETUP ZONE"
     if lo > 0 and hi > 0:
         zone_lines = [
-            f"DIRECTION   : {data['direction']}",
-            f"ZONE        : {lo:.2f} - {hi:.2f}{z_tag}",
-            f"GRADE       : {z_grade} ({score_disp}) [{z_src}]",
+            f"SETUP DIRECTION     : {data['direction']}",
+            f"{zone_header_label:<20}: {lo:.2f} - {hi:.2f}{z_tag}",
+            f"GRADE               : {z_grade} ({score_disp}) [{z_src}]",
         ]
     else:
-        zone_lines = ["DIRECTION   : N/A", "ZONE        : NO ACTIVE SETUP", "GRADE       : N/A"]
+        zone_lines = ["SETUP DIRECTION     : N/A", "ACTIVE ZONE         : NO ACTIVE SETUP", "GRADE               : N/A"]
 
     snr_lo = safe_float(snr_z.get("low", snr_z.get("price_low")), 0.0)
     snr_hi = safe_float(snr_z.get("high", snr_z.get("price_high")), 0.0)
@@ -1855,6 +1865,42 @@ def format_smart_monitor_report(cycle_result):
     if data["reason"] == "WAITING FOR ZONE PULLBACK" and summary.get("main_reason"):
         main_reason = str(summary["main_reason"]).replace("\n", " ").strip()
 
+    # Dynamic entry permission & blocking reason
+    entry_perm = "GRANTED" if (str(signal).upper() in ("BUY", "SELL") or str(data.get("signal_status", "")).upper() == "SIGNAL_CONFIRMED") else "WAIT"
+    entry_status_lines = [
+        "ENTRY STATUS",
+        f"M5 TRIGGER          : {trigger_disp}",
+        f"ENTRY PERMISSION    : {entry_perm}",
+    ]
+    if entry_perm == "WAIT":
+        # Formulate clean dynamic blocking reason
+        raw_reasons = (data.get("decision") or {}).get("reasons") or []
+        blocker_line = ""
+        # Check SL distance limit first if mentioned or present in decision/plan
+        plan_dict = data.get("plan") or {}
+        p_ent = safe_float(plan_dict.get("entry_acuan") or plan_dict.get("entry"), 0.0)
+        p_sl = safe_float(plan_dict.get("sl"), 0.0)
+        sl_dist = abs(p_ent - p_sl) if (p_ent > 0 and p_sl > 0) else 0.0
+        for r in raw_reasons:
+            r_str = str(r)
+            if "jarak sl" in r_str.lower() or "melebihi batas" in r_str.lower():
+                blocker_line = r_str.upper()
+                break
+        if not blocker_line and sl_dist > 20.0:
+            blocker_line = f"SL DISTANCE {sl_dist:.2f} > MAX 20 PT"
+        elif not blocker_line and raw_reasons:
+            blocker_line = str(raw_reasons[0])
+        elif not blocker_line:
+            blocker_line = main_reason
+        entry_status_lines.append(f"BLOCKING REASON     : {blocker_line}")
+
+    entry_status_lines.extend([
+        f"PENDING             : {pending_disp}",
+        *( [f"ALT PENDING         : {data['alt_pending_display']}"] if data.get("alt_pending_display") else [] ),
+        f"CONFIRMED           : {confirmed_disp}",
+        f"TOUCH               : {touch_disp}",
+    ])
+
     smc_focus = zone or data["decision"].get("primary_zone") or {}
     smc_block = format_smc_zone_lines(
         smc_focus, data["decision"], allow_plan=not data["data_invalid"],
@@ -1900,12 +1946,7 @@ def format_smart_monitor_report(cycle_result):
         f"CONFLUENCE  : {data.get('confluence_display', data['confluence'])}",
         f"SMC + SNR   : {data['confluence']}",
         *radar_lines,
-        "ENTRY STATUS",
-        f"PENDING     : {pending_disp}",
-        *( [f"ALT PENDING : {data['alt_pending_display']}"] if data.get("alt_pending_display") else [] ),
-        f"CONFIRMED   : {confirmed_disp}",
-        f"TOUCH       : {touch_disp}",
-        f"TRIGGER     : {trigger_disp}",
+        *entry_status_lines,
         "SMART MONITOR",
         f"STATE       : {status_text}",
         *( [f"SNR WATCH   : {data['snr_breakout_watch']}"] if data.get("snr_breakout_watch") else [] ),

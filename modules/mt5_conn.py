@@ -588,6 +588,26 @@ def format_pending_compact_status(plan_status, recon, order_type="", entry_price
         base = f"READY | MT5 PLACED {tkt_tag}".strip()
         return f"{base} | {mm_tag} | {ord_part}" if ord_part else f"{base} | {mm_tag}"
 
+    if b_st == "NEARBY_MISMATCH":
+        pm = rec.get("primary_match") or {}
+        p_tkt = f"#{pm.get('ticket')}" if pm.get("ticket") else (f"#{tickets[0]}" if tickets else "")
+        p_diff = float(pm.get("entry_diff_pt") or 0.0)
+        p_ent = float(pm.get("entry_price") or 0.0)
+        p_type = pm.get("order_type") or ord_t
+        sl_warn = " [SL MISSING — HIGH RISK]" if rec.get("sl_missing_high_risk") else ""
+        diff_str = f"Δentry {p_diff:+.2f} pt"
+        tkt_str = f" {p_tkt}".rstrip()
+        base = f"READY | MT5 NOT PLACED (NEARBY MISMATCH{tkt_str} MT5 {p_ent:.2f} vs Plan {ent_v:.2f}, {diff_str}{sl_warn})".strip()
+        return base
+
+    if b_st == "WRONG_TYPE":
+        near = rec.get("nearest_unmatched_order") or {}
+        n_tkt = f"#{near.get('ticket')}" if near.get("ticket") else ""
+        n_type = near.get("order_type") or "OPPOSITE TYPE"
+        n_ent = float(near.get("entry_price") or 0.0)
+        tkt_str = f" {n_tkt}".rstrip()
+        return f"READY | MT5 NOT PLACED (WRONG TYPE{tkt_str} {n_type} @ {n_ent:.2f} vs Plan {ord_part})".strip()
+
     if b_st == "NOT_PLACED":
         return f"READY | MT5 NOT PLACED | {ord_part}" if ord_part else "READY | MT5 NOT PLACED"
 
@@ -625,6 +645,8 @@ def format_pending_reconciliation_evidence(recon):
         e_diff = float(m0.get("entry_diff_pt") or 0.0)
         p_sl = float(recon.get("plan_sl") or 0.0)
         p_tp1 = float(recon.get("plan_tp1") or 0.0)
+        p_ent = float(recon.get("plan_entry") or 0.0)
+        match_qual = recon.get("match_quality") or ("EXACT MATCH" if abs(e_diff) <= float(recon.get("tick_size") or 0.01) + 1e-9 else "ACCEPTED TOLERANCE")
 
         if m0.get("sl_missing"):
             sl_ev = f"SL=0.0 vs Plan {p_sl:.2f} [SL MISSING — HIGH RISK]"
@@ -640,14 +662,40 @@ def format_pending_reconciliation_evidence(recon):
         else:
             tp_ev = f"TP={o_tp:.{digits}f} vs Plan {p_tp1:.2f} [TP MISMATCH Δ{float(m0.get('tp_diff_pt') or 0.0):+.{digits}f} pt]"
 
+        tol_note = f"{match_qual} | MT5 {o_ent:.{digits}f} vs Plan {p_ent:.2f}, Δ {e_diff:+.{digits}f} pt <= tol {entry_tol:.3f} pt"
         return (
             f"{b_st} — {cnt_lbl} | {m0.get('symbol', sym)} {m0.get('order_type')} {o_vol:g} lot @ {o_ent:.{digits}f} "
-            f"(Δentry {e_diff:+.{digits}f} pt <= tol {entry_tol:.3f} pt) | {sl_ev} | {tp_ev} | Checked: {ts_chk}"
+            f"({tol_note}) | {sl_ev} | {tp_ev} | Checked: {ts_chk}"
+        )
+
+    if b_st == "NEARBY_MISMATCH":
+        pm = recon.get("primary_match") or {}
+        p_tkt = f"#{pm.get('ticket')}" if pm.get("ticket") else "N/A"
+        o_ent = float(pm.get("entry_price") or 0.0)
+        o_vol = float(pm.get("volume") or 0.0)
+        e_diff = float(pm.get("entry_diff_pt") or 0.0)
+        p_ent = float(recon.get("plan_entry") or 0.0)
+        p_ord = str(recon.get("plan_order_type") or "PENDING")
+        sl_warn = " [SL MISSING — HIGH RISK]" if recon.get("sl_missing_high_risk") else ""
+        return (
+            f"NEARBY_MISMATCH — Ticket {p_tkt} | {pm.get('symbol', sym)} {pm.get('order_type', p_ord)} {o_vol:g} lot @ {o_ent:.{digits}f} "
+            f"(MT5 {o_ent:.{digits}f} vs Plan {p_ent:.2f}, Δentry {e_diff:+.{digits}f} pt > tol {entry_tol:.3f} pt; NOT PLACED){sl_warn} | Checked: {ts_chk}"
         )
 
     tot_sym = int(recon.get("symbol_orders_count") or 0)
     p_ent = float(recon.get("plan_entry") or 0.0)
     p_ord = str(recon.get("plan_order_type") or "PENDING")
+
+    if b_st in ("WRONG_TYPE", "TYPE_MISMATCH"):
+        near = recon.get("nearest_unmatched_order") or {}
+        n_tkt = f"#{near.get('ticket')}" if near.get("ticket") else ""
+        n_type = near.get("order_type") or "OPPOSITE TYPE"
+        n_ent = float(near.get("entry_price") or 0.0)
+        n_diff = float(near.get("entry_diff_pt") or 0.0)
+        return (
+            f"WRONG_TYPE — Ditemukan order {n_type} {n_tkt} @ {n_ent:.{digits}f} di {sym} (Δ {n_diff:+.{digits}f} pt), "
+            f"berbeda tipe dari plan {p_ord} @ {p_ent:.2f} (NOT PLACED) | Checked: {ts_chk}"
+        )
     if b_st == "OTHER_ORDER_EXISTS":
         near = recon.get("nearest_unmatched_order")
         if isinstance(near, dict) and near.get("ticket") is not None:
@@ -783,70 +831,118 @@ def reconcile_pending_plan_with_mt5(plan, mt5_snapshot=None, symbol=SYMBOL, excl
         return base_res
 
     matched_orders = []
+    price_mismatch_orders = []
+    type_mismatch_orders = []
+
+    # Proximity threshold terukur untuk membedakan nearby orders vs completely unrelated distant orders
+    # Sesuai aturan: jika di dalam zona atau jarak <= max(entry_tol, 1.5 pt), dievaluasi sebagai nearby
+    manual_entry_tol = max(entry_tol, 1.5)
+
     for ord_item in orders:
         tkt = ord_item.get("ticket")
         if tkt in excl_set:
             continue
         if str(ord_item.get("symbol") or "").upper() not in accepted_syms:
             continue
-        if str(ord_item.get("order_type") or "").upper() != order_type:
-            continue
+        o_type = str(ord_item.get("order_type") or "").upper()
         o_entry = float(ord_item.get("entry_price") or 0.0)
         if o_entry <= 0:
             continue
+        o_sl = float(ord_item.get("sl") or 0.0)
+        o_tp = float(ord_item.get("tp") or 0.0)
+        sl_missing = (o_sl <= 0.0)
+        tp_missing = (o_tp <= 0.0)
+        sl_diff = round(o_sl - plan_sl, max(digits, 3)) if (not sl_missing and plan_sl > 0) else None
+        sl_ok = (not sl_missing) and (plan_sl <= 0 or abs(o_sl - plan_sl) <= level_tol + 1e-9)
+
+        tp1_ok = (not tp_missing) and (plan_tp1 <= 0 or abs(o_tp - plan_tp1) <= level_tol + 1e-9)
+        tp2_ok = (not tp_missing) and (plan_tp2 > 0 and abs(o_tp - plan_tp2) <= level_tol + 1e-9)
+        tp_ok = tp1_ok or tp2_ok
+        tp_diff = round(o_tp - plan_tp1, max(digits, 3)) if (not tp_missing and plan_tp1 > 0) else None
+
         entry_diff = round(o_entry - plan_entry, max(digits, 3))
+        in_zone = bool(zone_low > 0 and zone_high > 0 and (zone_low - 1e-9 <= o_entry <= zone_high + 1e-9))
+        is_nearby = in_zone or (abs(entry_diff) <= manual_entry_tol + 1e-9)
+
+        if o_type != order_type:
+            # Hanya catat sebagai wrong type jika order berada di sekitar level rencana (in zone / nearby)
+            # Jangan pernah gunakan order berlawanan arah yang jauh sebagai match atau type mismatch
+            if is_nearby:
+                type_mismatch_orders.append({
+                    "ticket": tkt,
+                    "order_type": o_type,
+                    "direction": ord_item.get("direction"),
+                    "symbol": ord_item.get("symbol"),
+                    "entry_price": o_entry,
+                    "sl": o_sl,
+                    "tp": o_tp,
+                    "volume": float(ord_item.get("volume") or 0.0),
+                    "time_setup": ord_item.get("time_setup", 0),
+                    "retrieved_at": ord_item.get("retrieved_at") or retrieved_at,
+                    "entry_diff_pt": entry_diff,
+                    "inside_zone": in_zone,
+                    "sl_match": sl_ok,
+                    "tp_match": tp_ok,
+                    "sl_missing": sl_missing,
+                    "tp_missing": tp_missing,
+                    "sl_diff_pt": sl_diff,
+                    "tp_diff_pt": tp_diff,
+                })
+            continue
+
+        # Cek apakah exact match atau price mismatch terukur
+        mm_reasons = []
+        if sl_missing:
+            mm_reasons.append("SL MISSING — HIGH RISK")
+        elif not sl_ok:
+            mm_reasons.append(f"SL MISMATCH (MT5 {o_sl:.{digits}f} vs Plan {plan_sl:.2f}, Δ{sl_diff:+.{digits}f} pt)")
+        if tp_missing and plan_tp1 > 0:
+            mm_reasons.append("TP MISSING")
+        elif not tp_ok:
+            mm_reasons.append(f"TP MISMATCH (MT5 {o_tp:.{digits}f} vs Plan {plan_tp1:.2f}, Δ{tp_diff:+.{digits}f} pt)")
+
+        order_data = {
+            "ticket": tkt,
+            "order_type": o_type,
+            "direction": ord_item.get("direction"),
+            "symbol": ord_item.get("symbol"),
+            "entry_price": o_entry,
+            "sl": o_sl,
+            "tp": o_tp,
+            "volume": float(ord_item.get("volume") or 0.0),
+            "time_setup": ord_item.get("time_setup", 0),
+            "retrieved_at": ord_item.get("retrieved_at") or retrieved_at,
+            "entry_diff_pt": entry_diff,
+            "inside_zone": in_zone,
+            "sl_match": sl_ok,
+            "tp_match": tp_ok,
+            "sl_missing": sl_missing,
+            "tp_missing": tp_missing,
+            "sl_diff_pt": sl_diff,
+            "tp_diff_pt": tp_diff,
+            "mismatch_reasons": mm_reasons,
+        }
+
         if abs(entry_diff) <= entry_tol + 1e-9:
-            o_sl = float(ord_item.get("sl") or 0.0)
-            o_tp = float(ord_item.get("tp") or 0.0)
-            sl_missing = (o_sl <= 0.0)
-            tp_missing = (o_tp <= 0.0)
-            sl_diff = round(o_sl - plan_sl, max(digits, 3)) if (not sl_missing and plan_sl > 0) else None
-            sl_ok = (not sl_missing) and (plan_sl <= 0 or abs(o_sl - plan_sl) <= level_tol + 1e-9)
-
-            tp1_ok = (not tp_missing) and (plan_tp1 <= 0 or abs(o_tp - plan_tp1) <= level_tol + 1e-9)
-            tp2_ok = (not tp_missing) and (plan_tp2 > 0 and abs(o_tp - plan_tp2) <= level_tol + 1e-9)
-            tp_ok = tp1_ok or tp2_ok
-            tp_diff = round(o_tp - plan_tp1, max(digits, 3)) if (not tp_missing and plan_tp1 > 0) else None
-
-            mm_reasons = []
-            if sl_missing:
-                mm_reasons.append("SL MISSING — HIGH RISK")
-            elif not sl_ok:
-                mm_reasons.append(f"SL MISMATCH (MT5 {o_sl:.{digits}f} vs Plan {plan_sl:.2f}, Δ{sl_diff:+.{digits}f} pt)")
-            if tp_missing and plan_tp1 > 0:
-                mm_reasons.append("TP MISSING")
-            elif not tp_ok:
-                mm_reasons.append(f"TP MISMATCH (MT5 {o_tp:.{digits}f} vs Plan {plan_tp1:.2f}, Δ{tp_diff:+.{digits}f} pt)")
-
-            matched_orders.append({
-                "ticket": tkt,
-                "order_type": ord_item.get("order_type"),
-                "direction": ord_item.get("direction"),
-                "symbol": ord_item.get("symbol"),
-                "entry_price": o_entry,
-                "sl": o_sl,
-                "tp": o_tp,
-                "volume": float(ord_item.get("volume") or 0.0),
-                "time_setup": ord_item.get("time_setup", 0),
-                "retrieved_at": ord_item.get("retrieved_at") or retrieved_at,
-                "entry_diff_pt": entry_diff,
-                "sl_match": sl_ok,
-                "tp_match": tp_ok,
-                "sl_missing": sl_missing,
-                "tp_missing": tp_missing,
-                "sl_diff_pt": sl_diff,
-                "tp_diff_pt": tp_diff,
-                "mismatch_reasons": mm_reasons,
-            })
+            order_data["match_quality"] = "EXACT_MATCH" if abs(entry_diff) <= tick_size + 1e-9 else "ACCEPTED_TOLERANCE"
+            matched_orders.append(order_data)
+        elif is_nearby:
+            # Order tipe sama tetapi selisih entry melebihi entry_tol (NEARBY MISMATCH)
+            order_data["match_quality"] = "NEARBY_MISMATCH"
+            price_mismatch_orders.append(order_data)
 
     matched_orders.sort(key=lambda m: (abs(m["entry_diff_pt"]), not (m["sl_match"] and m["tp_match"]), m["ticket"] or 0))
+    price_mismatch_orders.sort(key=lambda m: (abs(m["entry_diff_pt"]), not (m["sl_match"] and m["tp_match"]), m["ticket"] or 0))
+    type_mismatch_orders.sort(key=lambda m: (abs(m["entry_diff_pt"]), m["ticket"] or 0))
 
     if matched_orders:
         all_verified = all(m["sl_match"] and m["tp_match"] for m in matched_orders)
         b_status = "PLACED_VERIFIED" if all_verified else "PLACED_MISMATCH"
+        primary_qual = matched_orders[0].get("match_quality", "ACCEPTED_TOLERANCE")
         base_res.update({
             "broker_order_status": b_status,
             "is_placed": True,
+            "match_quality": primary_qual,
             "matched_count": len(matched_orders),
             "matched_tickets": [m["ticket"] for m in matched_orders if m.get("ticket") is not None],
             "matched_orders": matched_orders,
@@ -855,10 +951,37 @@ def reconcile_pending_plan_with_mt5(plan, mt5_snapshot=None, symbol=SYMBOL, excl
             "tp_match": all(m["tp_match"] for m in matched_orders),
             "sl_missing_high_risk": any(m["sl_missing"] for m in matched_orders),
         })
+    elif price_mismatch_orders:
+        p0 = price_mismatch_orders[0]
+        # JANGAN label PLACED jika hanya order terdekat di luar toleransi (NEARBY MISMATCH)
+        base_res.update({
+            "broker_order_status": "NEARBY_MISMATCH",
+            "is_placed": False,
+            "match_quality": "NEARBY_MISMATCH",
+            "matched_count": 0,
+            "matched_tickets": [p0["ticket"]] if p0.get("ticket") else [],
+            "matched_orders": [],
+            "primary_match": p0,
+            "sl_match": bool(p0.get("sl_match")),
+            "tp_match": bool(p0.get("tp_match")),
+            "sl_missing_high_risk": bool(p0.get("sl_missing")),
+        })
+    elif type_mismatch_orders:
+        t0 = type_mismatch_orders[0]
+        base_res.update({
+            "broker_order_status": "WRONG_TYPE",
+            "is_placed": False,
+            "match_quality": "WRONG_TYPE",
+            "nearest_unmatched_order": t0,
+        })
     else:
         avail_orders = [o for o in orders if o.get("ticket") not in excl_set]
-        if len(orders) > 0:
-            base_res["broker_order_status"] = "OTHER_ORDER_EXISTS"
+        if len(avail_orders) > 0 or len(orders) > 0:
+            base_res.update({
+                "broker_order_status": "OTHER_ORDER_EXISTS",
+                "is_placed": False,
+                "match_quality": "NOT_FOUND",
+            })
             same_type_pool = [o for o in avail_orders if str(o.get("order_type") or "").upper() == order_type]
             pool = same_type_pool or avail_orders or orders
             if pool:
@@ -882,7 +1005,11 @@ def reconcile_pending_plan_with_mt5(plan, mt5_snapshot=None, symbol=SYMBOL, excl
                     "tp_missing": (n_tp <= 0.0),
                 }
         else:
-            base_res["broker_order_status"] = "NOT_PLACED"
+            base_res.update({
+                "broker_order_status": "NOT_PLACED",
+                "is_placed": False,
+                "match_quality": "NOT_FOUND",
+            })
 
     base_res["compact_status"] = format_pending_compact_status(plan_status, base_res, order_type=order_type, entry_price=plan_entry)
     base_res["evidence_summary"] = format_pending_reconciliation_evidence(base_res)

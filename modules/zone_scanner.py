@@ -4631,34 +4631,15 @@ def evaluate_smc_snr_confluence(
             f"{o_lbl} Grade {o_grd} ({o_lo:.2f} - {o_hi:.2f}, overlap {opp_overlap_pts:.2f} pt)"
         )
 
-    match_bo_dir = "BUY" if z_type == "SUPPLY" else "SELL"
-    snr_focus_zone: Optional[Dict[str, Any]] = None
-    ev_ctx = snr_context.get("entry_validation") if isinstance(snr_context.get("entry_validation"), dict) else {}
-    if isinstance(ev_ctx.get("target_zone"), dict):
-        snr_focus_zone = ev_ctx.get("target_zone")
-    elif matching_snr_zones:
-        snr_focus_zone = matching_snr_zones[0]
-
     best_match = None
     best_overlap = -1.0
     best_gap = 999.0
 
     for sz in matching_snr_zones:
-        if _is_snr_zone_broken_or_inactive(sz, match_bo_dir, snr_context=snr_context):
-            continue
-        sz_life = str(sz.get("lifecycle_status") or sz.get("status") or "ACTIVE").upper()
-        if sz_life in (
-            "BROKEN", "INVALIDATED", "EXPIRED", "MITIGATED", "RETEST",
-            "RECLAIM_PENDING", "RECLAIMED", "BREAKDOWN_PENDING", "BREAKOUT_PENDING",
-            "HISTORICAL", "UNCONFIRMED",
-        ):
-            continue
-        s_lo = float(sz.get("low", 0.0) or 0.0)
-        s_hi = float(sz.get("high", 0.0) or 0.0)
+        s_lo = float(sz.get("low", 0.0))
+        s_hi = float(sz.get("high", 0.0))
         if s_lo <= 0 or s_hi <= 0:
             continue
-        if s_lo > s_hi:
-            s_lo, s_hi = s_hi, s_lo
         # Overlap interval
         ov_lo = max(smc_lo, s_lo)
         ov_hi = min(smc_hi, s_hi)
@@ -4687,8 +4668,6 @@ def evaluate_smc_snr_confluence(
             "gap_points": 0.0,
             "smc_zone": zd,
             "snr_zone": None,
-            "snr_focus_zone": snr_focus_zone,
-            "snr_confluence_source": None,
             "opposing_conflict": opposing_conflict,
             "opposing_snr_zone": opposing_snr_zone,
             "opposing_overlap_points": round(opp_overlap_pts, 2),
@@ -4704,9 +4683,7 @@ def evaluate_smc_snr_confluence(
     s_lo = float(sz.get("low", 0.0))
     s_hi = float(sz.get("high", 0.0))
 
-    # ALIGNED wajib berdasarkan overlap directional valid (bukan sekadar kedekatan tanpa overlap).
-    is_aligned = overlap_pts > 0
-    snr_confluence_source = sz if is_aligned else None
+    is_aligned = (overlap_pts > 0) or (gap_pts <= 3.0)
     overlap_pct = round((overlap_pts / smc_w) * 100.0, 1) if smc_w > 0 else 0.0
 
     htf_align_str = "ALIGNED" if ((htf_bias == "BEARISH" and z_type == "SUPPLY") or (htf_bias == "BULLISH" and z_type == "DEMAND")) else "COUNTERTREND"
@@ -4714,36 +4691,19 @@ def evaluate_smc_snr_confluence(
     if overlap_pts > 0:
         area_desc = f"{ov_lo:.2f} - {ov_hi:.2f} ({overlap_pts:.2f} pt / {overlap_pct:.1f}% SMC Width)"
     else:
-        area_desc = f"Tidak overlap (terpisah {gap_pts:.2f} pt)"
-
-    focus_line = None
-    if isinstance(snr_focus_zone, dict):
-        f_lo = float(snr_focus_zone.get("low", 0.0) or 0.0)
-        f_hi = float(snr_focus_zone.get("high", 0.0) or 0.0)
-        if f_lo > 0 and f_hi >= f_lo:
-            f_tf = str(snr_focus_zone.get("timeframe", "H1"))
-            f_tp = str(snr_focus_zone.get("zone_type", snr_type)).upper()
-            f_lbl = str(snr_focus_zone.get("rank_label", "SNR"))
-            focus_line = f"  • SNR Focus            : {f_tf} {f_tp} {f_lbl} ({f_lo:.2f} - {f_hi:.2f})"
-
-    confl_src_line = (
-        f"  • SNR Confluence Source: {snr_tf} {snr_type} {snr_lbl} ({s_lo:.2f} - {s_hi:.2f}) | Freshness: {snr_fresh}"
-        if is_aligned
-        else f"  • SNR Confluence Source: NONE (terdekat searah {snr_tf} {snr_type} {snr_lbl} {s_lo:.2f} - {s_hi:.2f}, tidak overlap)"
-    )
+        area_desc = f"Bersebelahan / Terpisah {gap_pts:.2f} pt (<= 3.0 pt proximity)"
 
     block_lines = [
         "SMC + SNR CONFLUENCE: ALIGNED" if is_aligned else "SMC + SNR CONFLUENCE: SEPARATED",
-        "  • Status               : SUPPORTING CONTEXT — NOT ENTRY CONFIRMATION",
-        f"  • Overlap Area         : {area_desc}",
-        f"  • SMC Zone             : {smc_tf} {z_type} ({smc_lo:.2f} - {smc_hi:.2f}) [Grade {smc_grd}] | Freshness: {smc_fresh}",
-        *( [focus_line] if focus_line else [] ),
-        confl_src_line,
-        f"  • HTF Alignment        : {htf_align_str} with H4 {htf_bias}",
-        "  • Keterangan           : Informasi pendukung konfluensi zona institusional (tidak menambah skor ganda atau memaksa entry).",
+        "  • Status         : SUPPORTING CONTEXT — NOT ENTRY CONFIRMATION",
+        f"  • Overlap Area   : {area_desc}",
+        f"  • SMC Zone       : {smc_tf} {z_type} ({smc_lo:.2f} - {smc_hi:.2f}) [Grade {smc_grd}] | Freshness: {smc_fresh}",
+        f"  • SNR Zone       : {snr_tf} {snr_type} {snr_lbl} ({s_lo:.2f} - {s_hi:.2f}) | Freshness: {snr_fresh}",
+        f"  • HTF Alignment  : {htf_align_str} with H4 {htf_bias}",
+        "  • Keterangan     : Informasi pendukung konfluensi zona institusional (tidak menambah skor ganda atau memaksa entry).",
     ]
     if opposing_conflict:
-        block_lines.append(f"  • Peringatan           : {opp_conflict_line}")
+        block_lines.append(f"  • Peringatan     : {opp_conflict_line}")
 
     return {
         "available": True,
@@ -4756,8 +4716,6 @@ def evaluate_smc_snr_confluence(
         "overlap_area": (ov_lo, ov_hi) if overlap_pts > 0 else None,
         "smc_zone": zd,
         "snr_zone": sz,
-        "snr_focus_zone": snr_focus_zone,
-        "snr_confluence_source": snr_confluence_source,
         "opposing_conflict": opposing_conflict,
         "opposing_snr_zone": opposing_snr_zone,
         "opposing_overlap_points": round(opp_overlap_pts, 2),
@@ -4769,9 +4727,9 @@ def evaluate_smc_snr_confluence(
 # =============================================================================
 # ENTRY VALIDATOR (M5) + RISK
 # =============================================================================
-def _structural_target_details(frames: Dict[str, pd.DataFrame], zone_type: str, entry: float) -> List[Dict[str, Any]]:
-    """Likuiditas struktural searah transaksi (swing H1/H4 yang belum ditembus) beserta provenance & timestamp."""
-    by_level: Dict[float, Dict[str, Any]] = {}
+def _structural_targets(frames: Dict[str, pd.DataFrame], zone_type: str, entry: float) -> List[float]:
+    """Likuiditas struktural searah transaksi (swing H1/H4 yang belum ditembus), diurutkan dari terdekat."""
+    levels: List[float] = []
     for tf in ("H1", "H4"):
         df = frames.get(tf)
         if df is None or len(df) < 2 * SWING_N + 1:
@@ -4779,29 +4737,12 @@ def _structural_target_details(frames: Dict[str, pd.DataFrame], zone_type: str, 
         H, L = df["High"].values, df["Low"].values
         for s in detect_swings(df):
             i, p = s["idx"], s["price"]
-            is_valid_tgt = (
-                zone_type == "DEMAND" and s["type"] == "H" and p > entry and (i + 1 >= len(H) or H[i + 1:].max() <= p)
-            ) or (
-                zone_type == "SUPPLY" and s["type"] == "L" and p < entry and (i + 1 >= len(L) or L[i + 1:].min() >= p)
-            )
-            if not is_valid_tgt:
-                continue
-            lvl = round(float(p), 2)
-            if lvl not in by_level:
-                by_level[lvl] = {
-                    "level": lvl,
-                    "timeframe": tf,
-                    "swing_type": "SWING_HIGH" if s["type"] == "H" else "SWING_LOW",
-                    "swing_time": str(s.get("time", "")),
-                    "source": "UNBREACHED_SWING",
-                    "unbreached": True,
-                }
-    return sorted(by_level.values(), key=lambda item: item["level"], reverse=(zone_type == "SUPPLY"))
-
-
-def _structural_targets(frames: Dict[str, pd.DataFrame], zone_type: str, entry: float) -> List[float]:
-    """Likuiditas struktural searah transaksi (swing H1/H4 yang belum ditembus), diurutkan dari terdekat."""
-    return [item["level"] for item in _structural_target_details(frames, zone_type, entry)]
+            if zone_type == "DEMAND" and s["type"] == "H" and p > entry and (i + 1 >= len(H) or H[i + 1:].max() <= p):
+                levels.append(p)
+            elif zone_type == "SUPPLY" and s["type"] == "L" and p < entry and (i + 1 >= len(L) or L[i + 1:].min() >= p):
+                levels.append(p)
+    levels = sorted(set(round(x, 2) for x in levels), reverse=(zone_type == "SUPPLY"))
+    return levels
 
 
 def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread: float = 0.0,
@@ -5038,21 +4979,12 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
 
     ev = matching_events[0] if matching_events else None
     k_ref = ev["k"] if ev else matching_cisd[0]["k"]
-    trig_ts = format_wib_timestamp(d5.index[k_ref], default_now=False, source_tz=m5_tz) or str(d5.index[k_ref])
     cisd_ok = bool(matching_cisd and (not ev or matching_cisd[0]["k"] >= ev["k"]))
     m5["cisd"] = cisd_ok
     struct_str = f"{ev['tipe']} {ev['arah']} @ {ev['level']:.2f}" if ev else ("CISD " + ("BULLISH" if demand else "BEARISH"))
     m5["structure_event"] = f"{struct_str} (k={k_ref})"
-    stages["structure_trigger"] = {
-        "status": "CONFIRMED",
-        "msg": m5["structure_event"],
-        "k": k_ref,
-        "zone_id": zone.zone_id,
-        "timeframe": zone.timeframe,
-        "zone_type": zone.zone_type,
-        "zone_range": (round(lo, 2), round(hi, 2)),
-        "timestamp": trig_ts,
-    }
+    zid_cur = str(getattr(zone, "zone_id", "") or "")
+    stages["structure_trigger"] = {"status": "CONFIRMED", "msg": m5["structure_event"], "k": k_ref, "zone_id": zid_cur}
 
     # 5. Displacement yang Mendukung Arah Entry
     k0 = max(first_touch_k, k_ref - 3)
@@ -5069,14 +5001,7 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         W.append(f"Displacement M5 lemah ({disp5:.2f} ATR < {M5_MIN_DISPLACEMENT_ATR:g})")
         return res
 
-    stages["displacement"] = {
-        "status": "CONFIRMED",
-        "msg": f"Displacement M5 {disp5:.2f} ATR",
-        "atr": disp5,
-        "zone_id": zone.zone_id,
-        "timeframe": zone.timeframe,
-        "timestamp": trig_ts,
-    }
+    stages["displacement"] = {"status": "CONFIRMED", "msg": f"Displacement M5 {disp5:.2f} ATR", "atr": disp5}
 
     # Cek invalidasi M5 pasca-trigger
     inval = float(getattr(zone, "invalidation_price", 0.0) or (lo if demand else hi))
@@ -5096,22 +5021,6 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
 
     res["smc_technical_confirmed"] = True
     m5["technical_confirmed"] = True
-    m5["zone_id"] = zone.zone_id
-    m5["timeframe"] = zone.timeframe
-    m5["zone_type"] = zone.zone_type
-    m5["zone_range"] = (round(lo, 2), round(hi, 2))
-    m5["timestamp"] = trig_ts
-    m5["confirmed_at"] = trig_ts
-    res["m5_confirmation"] = {
-        "zone_id": zone.zone_id,
-        "timeframe": zone.timeframe,
-        "zone_type": zone.zone_type,
-        "zone_range": (round(lo, 2), round(hi, 2)),
-        "timestamp": trig_ts,
-        "status": "CONFIRMED",
-        "structure_event": m5["structure_event"],
-        "displacement_atr": disp5,
-    }
 
     bars_since_trig = (n5 - 1) - k_ref
     chase_tol = max(1.0, 0.5 * atr5)
@@ -5122,6 +5031,8 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         msg_missed = f"Sinyal M5 sudah historis/terlewat (trigger {bars_since_trig} bar lalu); harga telah meninggalkan zona entry"
         stages["entry_validation"] = {"status": "WAIT", "msg": msg_missed}
         res["entry_permission"] = "WAIT"
+        res["is_missed"] = True
+        res["signal_status"] = SIGNAL_STATUS_ENTRY_MISSED
         W.append(msg_missed)
         return res
 
@@ -5147,8 +5058,7 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         W.append(f"Jarak SL struktural {risk:.2f} pt melebihi batas maksimal {SL_JARAK_MAKS:g}")
         return res
 
-    target_details = _structural_target_details(htf_frames or {}, zone.zone_type, entry)
-    targets = [item["level"] for item in target_details]
+    targets = _structural_targets(htf_frames or {}, zone.zone_type, entry)
     if not targets:
         stages["risk_reward"] = {"status": "WAIT", "msg": "Tidak ada target likuiditas struktural H1/H4 searah transaksi"}
         W.append("Tidak ada target likuiditas struktural H1/H4 searah transaksi")
@@ -5157,8 +5067,6 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     buf = 0.3
     tp1 = round(targets[0] - buf if demand else targets[0] + buf, 2)
     tp2 = round(targets[1] - buf if demand else targets[1] + buf, 2) if len(targets) > 1 else tp1
-    tp1_prov = dict(target_details[0], tp_price=tp1)
-    tp2_prov = dict(target_details[1], tp_price=tp2) if len(target_details) > 1 else dict(tp1_prov)
     reward = round((tp1 - entry) if demand else (entry - tp1), 2)
     rr = round(reward / risk, 2) if risk > 0 else 0.0
     res["rr"] = rr
@@ -5208,7 +5116,6 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
 
     res["plan"] = {"arah": "BUY" if demand else "SELL", "entry_min": e_lo, "entry_max": e_hi, "entry_acuan": entry,
                    "sl": sl, "tp1": tp1, "tp2": tp2, "rr": rr, "zone_id": zone.zone_id,
-                   "tp1_provenance": tp1_prov, "tp2_provenance": tp2_prov,
                    "timeframe": zone.timeframe, "grade": zone.grade, "score": zone.score,
                    "keterangan": f"Zona {zone.grade} {zone.timeframe} {zone.zone_type} + trigger M5 {m5['structure_event']}"}
     res["status"] = "VALID"
@@ -5344,7 +5251,6 @@ def calculate_suggested_expiration(
         curr_dt = base_dt
 
     rem_sec = max(0, int((target_dt - curr_dt).total_seconds()))
-    is_expired = bool(target_time is not None and curr_dt >= target_dt)
     rem_h = rem_sec // 3600
     rem_m = (rem_sec % 3600) // 60
     rem_str = f"{rem_h:02d}h {rem_m:02d}m"
@@ -5377,7 +5283,6 @@ def calculate_suggested_expiration(
         "remaining_str": rem_str,
         "target_time": target_dt,
         "suggested_expiration": formatted_str,
-        "is_expired": is_expired,
         "is_error": False,
         "formatted_block": formatted_block,
     }
@@ -5625,8 +5530,7 @@ def plan_pending_order(
         return res
 
     # 7. Take Profit Struktural & Risk/Reward
-    target_details = _structural_target_details(frames or {}, getattr(zone, "zone_type", ""), entry) if frames else []
-    targets = [item["level"] for item in target_details]
+    targets = _structural_targets(frames or {}, getattr(zone, "zone_type", ""), entry) if frames else []
     if not targets:
         res["rejection_reason"] = "Tidak ada target likuiditas struktural H1/H4 searah transaksi"
         return res
@@ -5641,8 +5545,6 @@ def plan_pending_order(
         tp2 = round(targets[1] + buf, 2) if len(targets) > 1 else tp1
         reward_tp1 = round(entry - tp1, 2)
         reward_tp2 = round(entry - tp2, 2)
-    tp1_prov = dict(target_details[0], tp_price=tp1)
-    tp2_prov = dict(target_details[1], tp_price=tp2) if len(target_details) > 1 else dict(tp1_prov)
 
     rr_tp1 = round(reward_tp1 / risk_points, 2) if risk_points > 0 else 0.0
     rr_tp2 = round(reward_tp2 / risk_points, 2) if risk_points > 0 else 0.0
@@ -5674,17 +5576,12 @@ def plan_pending_order(
         "stop_loss": f"Level proteksi modal ({sl:.2f}) yang diletakkan di luar invalidation dengan buffer ({inval_buffer:.2f} pt) untuk menghindari market noise/spread",
     }
 
-    is_exp_err = bool(exp_info.get("is_error", False))
-    is_exp_past = bool(exp_info.get("is_expired", False))
-    plan_ok = not is_exp_err and not is_exp_past
     res.update({
-        "valid": plan_ok,
+        "valid": not exp_info.get("is_error", False),
         "entry_price": entry,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
-        "tp1_provenance": tp1_prov,
-        "tp2_provenance": tp2_prov,
         "risk": risk_points,
         "risk_points": risk_points,
         "reward": reward_tp1,
@@ -5706,20 +5603,13 @@ def plan_pending_order(
         "duration_text": exp_info["duration_text"],
         "duration_hours_str": exp_info.get("duration_hours_str", ""),
         "expiration_block": exp_info.get("formatted_block", ""),
-        "is_expiration_error": is_exp_err,
-        "is_expired": is_exp_past,
+        "is_expiration_error": exp_info.get("is_error", False),
         "entry_reason": entry_reason,
-        "status": "READY" if plan_ok else ("EXPIRED" if is_exp_past else "INVALID"),
-        "early_pending_status": "READY" if plan_ok else ("EXPIRED" if is_exp_past else "INVALID"),
-        "early_pending_status_label": (
-            "READY — PENDING PLAN (BELUM DIPASANG DI MT5)" if plan_ok
-            else ("EXPIRED (PENDING PLAN KEDALUWARSA)" if is_exp_past else "INVALID (EXPIRATION ERROR)")
-        ),
+        "status": "READY" if not exp_info.get("is_error", False) else "INVALID",
+        "early_pending_status": "READY" if not exp_info.get("is_error", False) else "INVALID",
+        "early_pending_status_label": "READY — PENDING PLAN (BELUM DIPASANG DI MT5)" if not exp_info.get("is_error", False) else "INVALID (EXPIRATION ERROR)",
         "early_pending_rr": f"PASSED (1:{rr_tp1:.1f})",
-        "rejection_reason": (
-            "" if plan_ok
-            else (f"Pending plan sudah kedaluwarsa ({exp_info.get('expires_at', 'N/A')})" if is_exp_past else "EXPIRATION ERROR")
-        ),
+        "rejection_reason": "EXPIRATION ERROR" if exp_info.get("is_error", False) else "",
     })
     return res
 
@@ -5800,69 +5690,27 @@ def detect_early_setups(
     rejection_reasons = []
     tracker = get_zone_tracker(auto_save=False)
     tracked_zones = tracker.tracked_zones if tracker else {}
-    r_prio_scan = scan.get("radar_priority") if isinstance(scan.get("radar_priority"), dict) else {}
-    primary_z_ref = r_prio_scan.get("primary_directional_zone") or r_prio_scan.get("primary_zone") or scan.get("primary_zone") or {}
-    primary_zone_id = primary_z_ref.get("zone_id") if isinstance(primary_z_ref, dict) else getattr(primary_z_ref, "zone_id", None)
-    now_wib = get_current_wib()
 
     for zd in cands:
         z_obj = _zone_from_dict(zd) if isinstance(zd, dict) else zd
         z_id = getattr(z_obj, "zone_id", "")
         existing_rec = tracked_zones.get(z_id)
-        if existing_rec and str(existing_rec.get("status", "")).upper() in ("EXPIRED", "INVALIDATED"):
-            rejection_reasons.append(
-                str(existing_rec.get("rejection_reason") or f"Zona {z_id} berstatus {existing_rec.get('status')}")
-            )
-            continue
         prev_created_at = None
         prev_expires_at = None
-        if existing_rec and existing_rec.get("pending_plan") and existing_rec.get("status") in ("READY", "APPROACHING", "TOUCHED", "ZONE_TOUCHED"):
+        if existing_rec and existing_rec.get("pending_plan") and existing_rec.get("status") in ("READY", "APPROACHING", "TOUCHED"):
             p_plan = existing_rec["pending_plan"]
-            prev_created_at = existing_rec.get("first_detected") or existing_rec.get("created_at") or p_plan.get("created_at")
-            prev_expires_at = existing_rec.get("expires_at") or p_plan.get("expires_at")
+            prev_created_at = p_plan.get("created_at") or existing_rec.get("first_detected")
+            prev_expires_at = p_plan.get("expires_at") or existing_rec.get("expires_at")
 
         plan = plan_pending_order(
             z_obj, float(current_price), frames, h4_bias, m30_status, server_time,
-            created_at=prev_created_at, target_time=prev_expires_at, current_time=now_wib,
+            created_at=prev_created_at, target_time=prev_expires_at,
             bid=scan.get("bid"), ask=scan.get("ask"),
         )
         if plan.get("valid"):
-            is_prim = bool(primary_zone_id and z_id == primary_zone_id)
-            plan["source_zone_id"] = z_id
-            plan["source_zone_label"] = f"{plan.get('timeframe', '')} {plan.get('zone_type', '')} {plan.get('zone_low', 0.0):.2f}-{plan.get('zone_high', 0.0):.2f}".strip()
-            plan["is_primary_zone"] = is_prim
-            plan["plan_source"] = "PRIMARY_ZONE" if is_prim else "ALTERNATIVE_CANDIDATE"
-            plan["snapshot_id"] = scan.get("snapshot_id")
-            plan["snapshot_time"] = scan.get("snapshot_time")
-            plan["zone_freshness"] = str(getattr(z_obj, "freshness", "") or "")
-            plan["score_reason"] = str(getattr(z_obj, "score_reason", "") or "")
-            plan["lifecycle_status"] = (
-                str(zd.get("lifecycle_status") or zd.get("status") or "RADAR").upper()
-                if isinstance(zd, dict) else str(getattr(z_obj, "status", "RADAR")).upper()
-            )
             valid_plans.append(plan)
         elif plan.get("rejection_reason"):
             rejection_reasons.append(str(plan["rejection_reason"]))
-
-    if valid_plans:
-        try:
-            from modules.mt5_conn import reconcile_pending_plans_batch
-            scan_sym = (scan.get("symbol") if isinstance(scan, dict) else None) or SYMBOL
-            scan_ord_snap = (
-                scan.get("mt5_orders_snapshot")
-                if isinstance(scan, dict) and scan.get("mt5_orders_snapshot") is not None
-                else ((scan.get("snapshot") or {}).get("mt5_orders_snapshot") if isinstance(scan, dict) and isinstance(scan.get("snapshot"), dict) else None)
-            )
-            reconcile_pending_plans_batch(valid_plans, mt5_snapshot=scan_ord_snap, symbol=scan_sym)
-            for vp in valid_plans:
-                b_st = str(vp.get("broker_order_status") or "UNKNOWN").upper()
-                c_st = str(vp.get("compact_status") or "READY")
-                if b_st in ("PLACED_VERIFIED", "PLACED_MISMATCH", "UNKNOWN"):
-                    vp["early_pending_status_label"] = c_st
-                else:
-                    vp["early_pending_status_label"] = f"{c_st} — PENDING PLAN (BELUM DIPASANG DI MT5)"
-        except Exception as e_rec:
-            _catat_error("detect_early_setups_reconcile", e_rec)
 
     out["all_setups"] = valid_plans
     if valid_plans:
@@ -5912,23 +5760,13 @@ class ZoneTracker:
         now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S WIB")
         new_alerts: List[Dict[str, Any]] = []
         created_any = False
-        updated_any = False
 
-        # 1. Daftarkan zona baru tanpa duplikasi & sinkronkan atribut live (grade/score/freshness)
+        # 1. Daftarkan zona baru tanpa duplikasi
         for z in (zones or []):
             z_id = getattr(z, "zone_id", None) if not isinstance(z, dict) else z.get("zone_id")
             if not z_id:
                 continue
             z_obj = z if isinstance(z, Zone) else _zone_from_dict(z)
-            z_fresh = str(getattr(z_obj, "freshness", "FRESH") or "FRESH").upper()
-            z_tc = int(getattr(z_obj, "touch_count", 0) or 0)
-            z_valid = bool(getattr(z_obj, "is_valid", True))
-            z_grade = getattr(z_obj, "grade", "")
-            z_score = float(getattr(z_obj, "score", 0.0))
-            z_score_reason = str(getattr(z_obj, "score_reason", "") or "")
-            z_inval = float(getattr(z_obj, "invalidation_price", 0.0) or 0.0)
-            z_snap_id = z.get("snapshot_id") if isinstance(z, dict) else None
-            z_snap_ts = z.get("snapshot_time") if isinstance(z, dict) else None
             if z_id not in self.tracked_zones:
                 created_any = True
                 exp_dt = now_dt + timedelta(hours=DEFAULT_PENDING_EXPIRATION_HOURS)
@@ -5948,16 +5786,9 @@ class ZoneTracker:
                     "price_high": z_hi,
                     "zone_range": (z_lo, z_hi),
                     "setup_type": z_stype_str,
-                    "invalidation_price": z_inval,
-                    "sl_recommended": float(getattr(z_obj, "sl_recommended", 0.0) or 0.0),
-                    "grade": z_grade,
-                    "score": z_score,
-                    "freshness": z_fresh,
-                    "touch_count": z_tc,
-                    "is_valid": z_valid,
-                    "score_reason": z_score_reason,
-                    "snapshot_id": z_snap_id,
-                    "snapshot_time": z_snap_ts,
+                    "invalidation_price": float(getattr(z_obj, "invalidation_price", 0.0)),
+                    "grade": getattr(z_obj, "grade", ""),
+                    "score": float(getattr(z_obj, "score", 0.0)),
                     "first_detected": now_str,
                     "created_at": now_str,
                     "last_updated": now_str,
@@ -5972,46 +5803,16 @@ class ZoneTracker:
                     "monitor_only": bool(z.get("monitor_only")) if isinstance(z, dict) else False,
                 }
             else:
-                rec_existing = self.tracked_zones[z_id]
-                rec_existing["last_updated"] = now_str
-                if z_grade and rec_existing.get("grade") != z_grade:
-                    rec_existing["grade"] = z_grade
-                    updated_any = True
-                if rec_existing.get("score") != z_score:
-                    rec_existing["score"] = z_score
-                    updated_any = True
-                if rec_existing.get("freshness") != z_fresh:
-                    rec_existing["freshness"] = z_fresh
-                    updated_any = True
-                if rec_existing.get("touch_count") != z_tc:
-                    rec_existing["touch_count"] = z_tc
-                    updated_any = True
-                if rec_existing.get("is_valid") is not z_valid:
-                    rec_existing["is_valid"] = z_valid
-                    updated_any = True
-                if z_score_reason:
-                    rec_existing["score_reason"] = z_score_reason
-                if z_inval > 0.0 and rec_existing.get("invalidation_price") != z_inval:
-                    rec_existing["invalidation_price"] = z_inval
-                    updated_any = True
-                if z_snap_id:
-                    rec_existing["snapshot_id"] = z_snap_id
-                if z_snap_ts:
-                    rec_existing["snapshot_time"] = z_snap_ts
-                if isinstance(z, dict) and ("monitor_only" in z or not str(z_id).startswith("TF_")):
-                    rec_existing["monitor_only"] = bool(z.get("monitor_only", False))
-                z_sl_rec = float(getattr(z_obj, "sl_recommended", 0.0) or 0.0)
-                if z_sl_rec > 0.0:
-                    rec_existing["sl_recommended"] = z_sl_rec
+                self.tracked_zones[z_id]["last_updated"] = now_str
                 if isinstance(z, dict) and z.get("merged_from"):
-                    rec_existing["merged_from"] = list(z["merged_from"])
-                if "setup_id" not in rec_existing:
-                    z_type_str = str(rec_existing.get("zone_type", "")).upper()
+                    self.tracked_zones[z_id]["merged_from"] = list(z["merged_from"])
+                if "setup_id" not in self.tracked_zones[z_id]:
+                    z_type_str = str(self.tracked_zones[z_id].get("zone_type", "")).upper()
                     z_dir_str = "SELL" if z_type_str == "SUPPLY" else ("BUY" if z_type_str == "DEMAND" else "NONE")
-                    z_stype_str = str(rec_existing.get("setup_type", "TREND_PULLBACK") or "TREND_PULLBACK")
-                    rec_existing["setup_id"] = f"{z_id}:{z_dir_str}:{z_stype_str}"
-                    rec_existing["direction"] = z_dir_str
-                    rec_existing["zone_range"] = (rec_existing.get("price_low", 0.0), rec_existing.get("price_high", 0.0))
+                    z_stype_str = str(self.tracked_zones[z_id].get("setup_type", "TREND_PULLBACK") or "TREND_PULLBACK")
+                    self.tracked_zones[z_id]["setup_id"] = f"{z_id}:{z_dir_str}:{z_stype_str}"
+                    self.tracked_zones[z_id]["direction"] = z_dir_str
+                    self.tracked_zones[z_id]["zone_range"] = (self.tracked_zones[z_id].get("price_low", 0.0), self.tracked_zones[z_id].get("price_high", 0.0))
 
         # 2. Evaluasi transisi state untuk seluruh zona yang sedang dilacak
         for z_id, rec in list(self.tracked_zones.items()):
@@ -6051,21 +5852,9 @@ class ZoneTracker:
             if curr_st in ("EXPIRED", "INVALIDATED"):
                 continue
 
-            # B. Cek Invalidation Level, Lifecycle & Market Change
-            rec_fresh = str(rec.get("freshness") or "FRESH").upper()
-            rec_valid = bool(rec.get("is_valid", True))
-            if rec_fresh == "MITIGATED" or int(rec.get("touch_count", 0) or 0) > 2:
-                rec["status"] = "MITIGATED"
-                rec["lifecycle_status"] = "MITIGATED"
-                rec["pending_plan"] = None
-                rec["rejection_reason"] = f"Zona termitigasi ({rec_fresh})"
-                updated_any = True
-                continue
-
+            # B. Cek Invalidation Level & Market Change
             inv_reason = None
-            if not rec_valid or rec_fresh == "INVALIDATED":
-                inv_reason = f"Zona tidak lagi valid pada scan terbaru ({rec_fresh})"
-            elif z_type == "DEMAND" and current_price < inval:
+            if z_type == "DEMAND" and current_price < inval:
                 inv_reason = f"Harga ({current_price:.2f}) menembus invalidation level ({inval:.2f})"
             elif z_type == "SUPPLY" and current_price > inval:
                 inv_reason = f"Harga ({current_price:.2f}) menembus invalidation level ({inval:.2f})"
@@ -6087,30 +5876,26 @@ class ZoneTracker:
                 continue
 
             # C. Hitung Pending Order Plan & Update Status
-            rec_sl_rec = float(rec.get("sl_recommended", 0.0) or 0.0)
-            fallback_sl_rec = rec["price_low"] - 1.5 if z_type == "DEMAND" else rec["price_high"] + 1.5
             z_mock = Zone(
                 zone_id=z_id, symbol=rec["symbol"], timeframe=rec["timeframe"], zone_type=rec["zone_type"],
                 price_low=rec["price_low"], price_high=rec["price_high"], midpoint=(rec["price_low"] + rec["price_high"]) / 2,
                 score=rec["score"], grade=rec["grade"], origin_bos={}, fvg_confirmation=None, displacement_strength=1.5,
-                freshness=rec_fresh, touch_count=int(rec.get("touch_count", 0) or 0),
-                liquidity_sweep_status="NONE", invalidation_price=inval,
-                is_valid=rec_valid, rejection_reason="", sl_recommended=(rec_sl_rec if rec_sl_rec > 0.0 else fallback_sl_rec),
+                freshness="FRESH", touch_count=0, liquidity_sweep_status="NONE", invalidation_price=inval,
+                is_valid=True, rejection_reason="", sl_recommended=(rec["price_low"] - 1.5 if z_type == "DEMAND" else rec["price_high"] + 1.5),
             )
             prev_plan = rec.get("pending_plan") or {}
-            prev_c_at = rec.get("first_detected") or rec.get("created_at") or prev_plan.get("created_at")
-            prev_e_at = rec.get("expires_at") or prev_plan.get("expires_at")
+            prev_c_at = prev_plan.get("created_at") or rec.get("first_detected")
+            prev_e_at = prev_plan.get("expires_at") or rec.get("expires_at")
             plan = (
                 {"valid": False, "rejection_reason": "Monitoring setup; bukan kandidat pending planner."}
                 if rec.get("monitor_only")
                 else plan_pending_order(
                     z_mock, current_price, frames, htf_bias, m30_status, server_time,
-                    created_at=prev_c_at, target_time=prev_e_at, current_time=now_dt,
+                    created_at=prev_c_at, target_time=prev_e_at
                 )
             )
             if plan.get("valid"):
                 rec["pending_plan"] = plan
-                rec["rejection_reason"] = ""
                 if rec["status"] in ("RADAR", "DETECTED"):
                     rec["status"] = "READY"
                     rec["history"].append({"status": "READY", "time": now_str, "reason": "Memenuhi kriteria Aggressive Pending Order"})
@@ -6140,6 +5925,11 @@ class ZoneTracker:
             else:
                 if rec.get("status") in ("ZONE_TOUCHED", "TOUCHED") or rec.get("touch_status") in ("IN_ZONE", "TOUCHED_PREVIOUSLY"):
                     rec["touch_status"] = "TOUCHED_PREVIOUSLY"
+                    # Jika harga sudah meninggalkan zona dan trigger terlewat / tidak valid, jangan tahan di ZONE_TOUCHED / WAITING_CONFIRMATION
+                    if dist > approach_thresh:
+                        rec["status"] = "RADAR"
+                        rec["lifecycle_status"] = "RADAR"
+                        rec["signal_status"] = SIGNAL_STATUS_WAITING_PULLBACK
                 if dist <= approach_thresh:
                     if rec["status"] in ("RADAR", "DETECTED", "READY"):
                         rec["status"] = "APPROACHING"
@@ -6177,7 +5967,7 @@ class ZoneTracker:
         if len(self.alerts) > 100:
             self.alerts = self.alerts[-100:]
 
-        if self.auto_save and self.filepath and (created_any or updated_any or new_alerts):
+        if self.auto_save and self.filepath and (created_any or new_alerts):
             self.save()
 
         return new_alerts
@@ -6407,51 +6197,15 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 return
             dec_obj["early_setup"] = detect_early_setups(frames=frames, current_price=eff_p, server_time=server_time, scan=scan_obj)
             tracker = get_zone_tracker(auto_save=False)
-            snap_id_att = scan_obj.get("snapshot_id") if isinstance(scan_obj, dict) else dec_obj.get("snapshot_id")
-            snap_ts_att = scan_obj.get("snapshot_time") if isinstance(scan_obj, dict) else dec_obj.get("snapshot_time")
-            zones_to_track = [
-                {**z, "snapshot_id": z.get("snapshot_id") or snap_id_att, "snapshot_time": z.get("snapshot_time") or snap_ts_att}
-                if isinstance(z, dict) else z
-                for z in (scan_obj.get("active_zones", []) if scan_obj else [])
-            ]
+            zones_to_track = list(scan_obj.get("active_zones", [])) if scan_obj else []
             decision_zone = dec_obj.get("zone") or {}
-            if decision_zone.get("zone_id") and not any(
-                (z.get("zone_id") if isinstance(z, dict) else getattr(z, "zone_id", None)) == decision_zone["zone_id"]
-                for z in zones_to_track
-            ):
-                zones_to_track.append({
-                    **decision_zone,
-                    "monitor_only": True,
-                    "snapshot_id": decision_zone.get("snapshot_id") or snap_id_att,
-                    "snapshot_time": decision_zone.get("snapshot_time") or snap_ts_att,
-                })
+            if decision_zone.get("zone_id") and not any(z.get("zone_id") == decision_zone["zone_id"] for z in zones_to_track):
+                zones_to_track.append({**decision_zone, "monitor_only": True})
             dec_obj["zone_tracker"] = tracker
             if not isinstance(eff_p, (int, float)) or not math.isfinite(eff_p) or eff_p <= 0 or st.get("DATA", {}).get("ok") is False:
                 return
             old_focus = next((rec for rec in tracker.tracked_zones.values() if rec.get("monitor_focus")), None)
             tracker.update(zones_to_track, eff_p, frames=frames, htf_bias=None, m30_status=None, server_time=server_time, conservative_dec=dec_obj)
-            # Sinkronkan pending_plan ZoneTracker dengan hasil authoritative detect_early_setups pada snapshot ini
-            early_setups_map = {
-                str(p.get("zone_id")): p
-                for p in ((dec_obj.get("early_setup") or {}).get("all_setups") or [])
-                if isinstance(p, dict) and p.get("zone_id") and p.get("valid") and str(p.get("status") or "").upper() == "READY"
-            }
-            scanned_ids = {
-                (z.get("zone_id") if isinstance(z, dict) else getattr(z, "zone_id", None))
-                for z in zones_to_track
-            }
-            for tz_id in scanned_ids:
-                if not tz_id or tz_id not in tracker.tracked_zones:
-                    continue
-                t_rec = tracker.tracked_zones[tz_id]
-                if str(t_rec.get("status") or "").upper() in ("EXPIRED", "INVALIDATED", "MITIGATED"):
-                    t_rec["pending_plan"] = None
-                elif tz_id in early_setups_map:
-                    t_rec["pending_plan"] = dict(early_setups_map[tz_id])
-                else:
-                    t_rec["pending_plan"] = None
-                    if t_rec.get("status") == "READY":
-                        t_rec["status"] = "RADAR"
             focus_id = (dec_obj.get("zone") or {}).get("zone_id")
             focus_evaluated = bool(dec_obj.get("focus_selection_evaluated")) or bool(focus_id)
             if old_focus and focus_evaluated and old_focus.get("zone_id") != focus_id:
@@ -6490,37 +6244,8 @@ def _decide(dec, frames, price, spread, news, server_time, live,
 
     def finish(status, reason):
         dec["status"] = status
-        active_zone_ref = dec.get("zone") or {}
-        active_zid_fin = str(active_zone_ref.get("zone_id") or "").strip()
-        active_tf_fin = str(active_zone_ref.get("timeframe") or "").strip().upper()
-        st_trig_fin = st.get("structure_trigger") if isinstance(st.get("structure_trigger"), dict) else {}
-        m5_conf_fin = dec.get("m5_confirmation") if isinstance(dec.get("m5_confirmation"), dict) else {}
-        st_origin_zid = str(
-            dec.get("m5_stages_zone_id")
-            or m5_conf_fin.get("zone_id")
-            or st_trig_fin.get("zone_id")
-            or ""
-        ).strip()
-        st_origin_tf = str(
-            m5_conf_fin.get("timeframe")
-            or st_trig_fin.get("timeframe")
-            or ""
-        ).strip().upper()
-        m5_origin_mismatch = bool(
-            (st_origin_zid and (not active_zid_fin or st_origin_zid != active_zid_fin))
-            or (st_origin_tf and active_tf_fin and st_origin_tf != active_tf_fin)
-        )
-        if m5_origin_mismatch:
-            for comp_clr in ("zone_validation", "zone_touch", "liquidity_sweep", "structure_trigger", "displacement", "entry_validation", "risk_reward"):
-                st[comp_clr] = {"status": "NOT_CHECKED", "msg": "Belum diperiksa untuk zona aktif ini"}
-            dec["m5"] = {}
-            dec["m5_confirmation"] = None
-            dec["m5_stages_zone_id"] = active_zid_fin or None
-        elif active_zid_fin and not dec.get("m5_stages_zone_id"):
-            dec["m5_stages_zone_id"] = active_zid_fin
         m5_tech_ok = (
-            not m5_origin_mismatch
-            and (st.get("structure_trigger") or {}).get("status") == "CONFIRMED"
+            (st.get("structure_trigger") or {}).get("status") == "CONFIRMED"
             and (st.get("displacement") or {}).get("status") == "CONFIRMED"
         )
         dec["smc_technical_status"] = "CONFIRMED" if (status == "VALID" or m5_tech_ok) else "WAIT"
@@ -6709,9 +6434,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         identity = dec.get("monitored_zone_identity") or {}
         zone_id = zone.get("zone_id")
         pending_setup = (dec.get("early_setup") or {}).get("best_setup") or {}
-        m5_conf_active = dec.get("m5_confirmation") if isinstance(dec.get("m5_confirmation"), dict) else None
-        if m5_conf_active and zone_id and m5_conf_active.get("zone_id") != zone_id:
-            m5_conf_active = None
         dec["active_setup"] = {
             **identity,
             "zone_id": zone_id,
@@ -6725,7 +6447,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             "pending_status": pending_setup.get("status", "WAIT") if zone_id and pending_setup.get("zone_id") == zone_id else "NOT_APPLICABLE",
             "smc_technical_status": dec.get("smc_technical_status", "WAIT"),
             "entry_permission": dec.get("entry_permission", "WAIT"),
-            "m5_confirmation": dict(m5_conf_active) if m5_conf_active else None,
             "final_decision": dec.get("direction") if status == "VALID" else status,
             "blocker": (dec.get("reasons") or [""])[0] if status != "VALID" else "",
         }
@@ -7257,8 +6978,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             first_reasons = list(r["reasons"])
             for k_st, v_st in r.get("stages", {}).items():
                 st[k_st] = v_st
-            dec["m5_stages_zone_id"] = zd.get("zone_id")
-            dec["m5_confirmation"] = dict(r["m5_confirmation"]) if isinstance(r.get("m5_confirmation"), dict) else None
             if is_r_tech:
                 first_tech_confirmed = True
                 best_candidate_dict = zd
@@ -7273,9 +6992,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             dec["setup_type"] = "TREND_PULLBACK"
             dec["signal_status"] = SIGNAL_STATUS_SIGNAL_CONFIRMED
             dec["reasons"].extend(r["reasons"])
-            dec["m5"] = dict(r.get("m5") or {})
-            dec["m5_confirmation"] = dict(r["m5_confirmation"]) if isinstance(r.get("m5_confirmation"), dict) else None
-            dec["m5_stages_zone_id"] = zd.get("zone_id")
             for k_st, v_st in r.get("stages", {}).items():
                 st[k_st] = v_st
             break
@@ -7366,18 +7082,12 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             "setup_type": tf_res["setup_type"],
             "source_kind": bc.get("source_kind"),
             "source_zone_id": bc.get("source_zone_id"),
-            "formation_time": bc.get("formation_time"),
-            "formation_timeframe": bc.get("formation_timeframe"),
         }
         winning_zone = _zone_from_dict(winning_zdict)
         valid_plan = tf_plan
         dec["zone"] = winning_zdict
         dec["plan"] = tf_plan
-        tf_m5_win = tf_res.get("m5") or {}
-        dec["m5"] = dict(tf_m5_win.get("m5") or {})
-        dec["m5_confirmation"] = dict(tf_m5_win["m5_confirmation"]) if isinstance(tf_m5_win.get("m5_confirmation"), dict) else None
-        dec["m5_stages_zone_id"] = winning_zdict.get("zone_id")
-        for k_st, v_st in (tf_m5_win.get("stages") or {}).items():
+        for k_st, v_st in (tf_res.get("m5", {}).get("stages") or {}).items():
             st[k_st] = v_st
         dec["reasons"].extend(tf_res.get("reasons", []))
         st["H4"] = {"ok": True, "msg": tf_res.get("h4", {}).get("reason") or f"Bias H4 {h4}"}
@@ -7438,8 +7148,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 "setup_type": bc.get("setup_type"),
                 "source_kind": bc.get("source_kind"),
                 "source_zone_id": bc.get("source_zone_id"),
-                "formation_time": bc.get("formation_time"),
-                "formation_timeframe": bc.get("formation_timeframe"),
             }
         else:
             dec["zone"] = None
@@ -7505,18 +7213,6 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 st.pop(component, None)
             for k_st, v_st in tf_m5_st.items():
                 st[k_st] = v_st
-            if tf_monitorable:
-                dec["m5"] = dict(tf_m5_res.get("m5") or {})
-                dec["m5_confirmation"] = (
-                    dict(tf_m5_res["m5_confirmation"])
-                    if isinstance(tf_m5_res.get("m5_confirmation"), dict)
-                    else None
-                )
-                dec["m5_stages_zone_id"] = (dec.get("zone") or {}).get("zone_id")
-            else:
-                dec["m5"] = {}
-                dec["m5_confirmation"] = None
-                dec["m5_stages_zone_id"] = None
         dec["reasons"].extend(tf_reasons if tf_reasons else [wait_msg])
         st["H4"] = {"ok": True, "msg": f"Bias H4 {h4}"}
         st["M5"] = {"ok": False, "msg": wait_msg}

@@ -540,8 +540,57 @@ def detect_zone_breakout(
         for event in breakout_events
     )
     is_support = (z_type == "SUPPORT")
-    pend_bo_idx = initial_bo_idx if is_historical_break else (int(best_bo["bar_index"]) if prior_confirmed_bo else int(latest_bo["bar_index"]))
-    pend_bo_time = initial_bo_time if is_historical_break else (best_bo["bar_time"] if prior_confirmed_bo else latest_bo["bar_time"])
+    if prior_confirmed_bo:
+        # Breakdown/breakout SUDAH terkonfirmasi pada closed candle sebelumnya dan belum tereclaim:
+        # pertahankan status VALID_BREAKOUT (CONFIRMED), jangan diturunkan menjadi potential akibat pullback/intrabar.
+        q_score = 11.5
+        if max_pen_atr >= strong_pen_atr:
+            q_score += 1.5
+        if candle_has_momentum and tf_mom_aligned:
+            q_score += 1.2
+        if vol_supported is True:
+            q_score += 0.8
+        q_score = min(15.0, round(q_score, 2))
+        rep_bo_idx = initial_bo_idx if is_historical_break else int(best_bo["bar_index"])
+        rep_bo_time = initial_bo_time if is_historical_break else best_bo["bar_time"]
+        return {
+            "zone_id": zone.get("zone_id", "UNKNOWN"),
+            "timeframe": tf,
+            "zone_type": z_type,
+            "status": "VALID_BREAKOUT",
+            "break_type": "CONFIRMED_BREAKDOWN" if is_support else "CONFIRMED_BREAKOUT",
+            "potential_breakdown": is_support,
+            "potential_breakout": not is_support,
+            "prior_confirmed_breakout": True,
+            "reclaim_detected": False,
+            "zone_failed": True,
+            "label": "VALID BREAKDOWN" if is_support else "VALID BREAKOUT",
+            "summary_status": "CONFIRMED",
+            "direction": expected_dir,
+            "breakout_bar_index": rep_bo_idx,
+            "breakout_bar_time": rep_bo_time,
+            "initial_break_bar_index": initial_bo_idx,
+            "initial_break_bar_time": initial_bo_time,
+            "is_historical_break": is_historical_break,
+            "close_outside_zone": True,
+            "wick_penetration_only": False,
+            "penetration_points": round(curr_pen_pts, 2),
+            "penetration_atr": round(curr_pen_atr, 3),
+            "body_atr": best_bo["body_atr"],
+            "body_ratio": best_bo["body_ratio"],
+            "consecutive_closes_outside": int(consec_outside),
+            "momentum_supported": True,
+            "volume_supported": vol_supported,
+            "pre_breakout_structure": pre_struct,
+            "quality_score_15": q_score,
+            "reason": (
+                f"Valid {expected_dir} {'breakdown' if is_support else 'breakout'} terkonfirmasi melewati {z_type} ({z_low:.2f}-{z_high:.2f}); "
+                f"harga bertahan di luar zona (close={last_close:.2f})."
+            ),
+        }
+
+    pend_bo_idx = initial_bo_idx if is_historical_break else int(latest_bo["bar_index"])
+    pend_bo_time = initial_bo_time if is_historical_break else latest_bo["bar_time"]
     return {
         "zone_id": zone.get("zone_id", "UNKNOWN"),
         "timeframe": tf,

@@ -1019,33 +1019,33 @@ _GOLD_TOPIC_RULES = (
     (
         "Fed Policy", 26,
         (r"\bfederal reserve\b", r"\bfomc\b", r"\bfed chair\b", r"\bfed funds\b",
-         r"\binterest rate(?:s)?\b", r"\brate cut(?:s)?\b", r"\brate hike(?:s)?\b",
-         r"\bmonetary policy\b", r"\bfed minutes\b", r"\bdot plot\b"),
-        (r"\bfed\b", r"\bpowell\b", r"\bwarsh\b", r"\bhawkish\b", r"\bdovish\b",
-         r"\bquantitative tightening\b", r"\bpolicy rate\b"),
+         r"\bfed minutes\b", r"\bdot plot\b",
+         r"\b(?:u\.?s\.?|fed)\s+interest rate(?:s)?\b", r"\bfed rate cut(?:s)?\b", r"\bfed rate hike(?:s)?\b"),
+        (r"\bfed\b", r"\bpowell\b", r"\bwarsh\b",
+         r"\bquantitative tightening\b", r"\bfed policy\b"),
     ),
     (
         "US Treasury Yields", 24,
         (r"\btreasury yields?\b", r"\b10-year (?:treasury )?yield\b", r"\b2-year (?:treasury )?yield\b",
-         r"\breal yields?\b", r"\bu\.?s\.? treasur(?:y|ies)\b", r"\bbond yields?\b"),
-        (r"\byields?\b", r"\btips yield\b"),
+         r"\breal yields?\b", r"\bu\.?s\.? treasur(?:y|ies)\b", r"\bu\.?s\.? bond yields?\b"),
+        (r"\btips yield\b",),
     ),
     (
         "US Dollar / DXY", 22,
         (r"\bu\.?s\.? dollar\b", r"\bdollar index\b", r"\bdxy\b", r"\bgreenback\b"),
-        (r"\busd\b", r"\bdollar\b"),
+        (r"\bus dollar\b", r"\bdollar\b"),
     ),
     (
         "US Inflation (CPI/PCE)", 24,
         (r"\bconsumer price index\b", r"\bcore cpi\b", r"\bcore pce\b", r"\bpce inflation\b",
          r"\bu\.?s\.? inflation\b", r"\bproducer price index\b"),
-        (r"\bcpi\b", r"\bpce\b", r"\bppi\b", r"\binflation\b", r"\bdisinflation\b", r"\bstagflation\b"),
+        (r"\bcpi\b", r"\bpce\b", r"\bppi\b", r"\bu\.?s\.? cpi\b"),
     ),
     (
         "US Employment (NFP)", 24,
-        (r"\bnonfarm payroll(?:s)?\b", r"\bjobs report\b", r"\bunemployment rate\b",
+        (r"\bnonfarm payroll(?:s)?\b", r"\bjobs report\b", r"\bu\.?s\.? unemployment rate\b",
          r"\bjobless claims\b", r"\bemployment situation\b"),
-        (r"\bnfp\b", r"\bpayrolls?\b", r"\blabor market\b", r"\bjolts\b"),
+        (r"\bnfp\b", r"\bpayrolls?\b", r"\bjolts\b"),
     ),
     (
         "Geopolitical Risk", 20,
@@ -1361,6 +1361,18 @@ def _score_and_classify_article(art):
 
     # Saring noise non-pasar (olahraga, hiburan, dsb.)
     if any(re.search(pat, hl_l) for pat in _NOISE_PATTERNS):
+        return None
+
+    # Filter headline forex non-XAUUSD yang tidak mempunyai hubungan material dengan emas (AUD, ZAR, GBP, NZD, CAD, CHF, dsb.)
+    # Jangan menganggap rilis bank sentral regional (RBA, BoE, SARB, SNB) atau pergerakan pasangan mata uang asing otomatis sebagai Fed / DXY.
+    has_explicit_gold = bool(re.search(r"\b(?:xau|gold|bullion|precious metals?|emas)\b", txt_l))
+    has_explicit_us_macro = bool(re.search(r"\b(?:federal reserve|fomc|powell|treasury yield|dollar index|dxy|greenback|u\.?s\.? cpi|core pce|nonfarm payroll)\b", txt_l))
+    is_non_xau_fx = bool(re.search(
+        r"\b(?:aud/?usd|usd/?zar|gbp/?usd|nzd/?usd|usd/?cad|usd/?chf|eur/?gbp|eur/?jpy|gbp/?jpy|aud/?nzd|"
+        r"rba|reserve bank of australia|boe|bank of england|sarb|south african reserve bank|rand|sterling|aussie|kiwi|loonie)\b",
+        hl_l,
+    ))
+    if is_non_xau_fx and not (has_explicit_gold or has_explicit_us_macro):
         return None
 
     matched_topics = []

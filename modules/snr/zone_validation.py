@@ -63,11 +63,11 @@ def validate_single_zone(zone, df=None, current_price=None, config=None, has_unc
     elif is_invalidated:
         lifecycle = "INVALIDATED"
         reasons.append("Zona telah ditembus jauh melewati batas invalidasi.")
-    elif is_broken or detected_lifecycle == "BROKEN":
-        lifecycle = "BROKEN"
+    elif is_broken or detected_lifecycle in ("BROKEN", "RECLAIM_PENDING", "RECLAIMED"):
+        lifecycle = detected_lifecycle if detected_lifecycle in ("RECLAIM_PENDING", "RECLAIMED") else "BROKEN"
         reasons.append("Zona telah ditembus (BROKEN); dialihkan ke pemantauan potensi retest/flip.")
     elif detected_lifecycle in (
-        "BREAKDOWN_PENDING", "BREAKOUT_PENDING", "RETEST", "RECLAIM_PENDING", "RECLAIMED", "UNCONFIRMED"
+        "BREAKDOWN_PENDING", "BREAKOUT_PENDING", "RETEST", "UNCONFIRMED"
     ):
         lifecycle = detected_lifecycle
         reasons.append(f"Lifecycle zona: {lifecycle}.")

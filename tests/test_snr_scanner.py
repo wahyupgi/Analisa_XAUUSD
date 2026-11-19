@@ -1221,6 +1221,145 @@ class TestSnrAdvancedScanner(unittest.TestCase):
             self.assertIsInstance(called_args[0][0], int)
             self.assertEqual(called_args[0][1], 220)
 
+    def test_13_support_breakdown_resistance_breakout_vs_false_break_and_reclaim(self):
+        """
+        Verifikasi pemisahan tegas:
+        1. Support ditembus ke bawah -> potensi breakdown (BREAKDOWN_PENDING) / confirmed breakdown (BROKEN), bukan active support.
+        2. Resistance ditembus ke atas -> potensi breakout (BREAKOUT_PENDING) / confirmed breakout (BROKEN), bukan active resistance.
+        3. False breakout / false breakdown (1-bar trap dangkal tanpa penerimaan) dibedakan dari reclaim.
+        4. Zona yang sudah gagal (broken) lalu di-reclaim TIDAK dipromosikan kembali sebagai support/resistance aktif.
+        5. _build_price_action_summary tetap mendeteksi breakdown/breakout baru meski ada focus_zone aktif lain.
+        """
+        from modules.snr.scanner import _build_price_action_summary
+        from modules.snr.touch_analysis import analyze_zone_touches
+        from modules.snr.zone_validation import validate_single_zone
+
+        sup_zone = {
+            "zone_id": "SNR_H1_SUP_3880_3882",
+            "timeframe": "H1",
+            "zone_type": "SUPPORT",
+            "low": 3880.0,
+            "high": 3882.0,
+            "mid": 3881.0,
+            "width": 2.0,
+            "ref_atr": 4.0,
+            "formation_index": 1,
+            "confirmed_index": 2,
+            "score": 80.0,
+            "grade": "A",
+            "lifecycle_status": "ACTIVE",
+        }
+        res_zone = {
+            "zone_id": "SNR_H1_RES_3914_3916",
+            "timeframe": "H1",
+            "zone_type": "RESISTANCE",
+            "low": 3914.0,
+            "high": 3916.0,
+            "mid": 3915.0,
+            "width": 2.0,
+            "ref_atr": 4.0,
+            "formation_index": 1,
+            "confirmed_index": 2,
+            "score": 80.0,
+            "grade": "A",
+            "lifecycle_status": "ACTIVE",
+        }
+
+        sup_prefix = [
+            (3886, 3888, 3884, 3885),
+            (3885, 3886, 3880, 3884),
+            (3884, 3885, 3882, 3883),
+        ]
+        res_prefix = [
+            (3908, 3910, 3906, 3909),
+            (3909, 3916, 3908, 3911),
+            (3911, 3913, 3910, 3912),
+        ]
+
+        # 1a. Support ditembus tipis ke bawah -> POTENTIAL BREAKDOWN (BREAKDOWN_PENDING), bukan active support
+        df_sup_pot = make_synthetic_ohlc(sup_prefix + [
+            (3880.5, 3881.0, 3879.0, 3879.7),  # close < 3880 tapi penetrasi & body tipis
+        ], atr_val=4.0)
+        bo_sup_pot = detect_zone_breakout(sup_zone, df_sup_pot)
+        self.assertEqual(bo_sup_pot["status"], "BREAKOUT_PENDING_CONFIRMATION")
+        self.assertEqual(bo_sup_pot["break_type"], "POTENTIAL_BREAKDOWN")
+        self.assertTrue(bo_sup_pot["potential_breakdown"])
+        self.assertFalse(bo_sup_pot["reclaim_detected"])
+        t_sup_pot = analyze_zone_touches(sup_zone, df_sup_pot)
+        v_sup_pot = validate_single_zone(t_sup_pot, df=df_sup_pot, current_price=3879.7)
+        self.assertEqual(v_sup_pot["lifecycle_status"], "BREAKDOWN_PENDING")
+        self.assertFalse(v_sup_pot["is_active"])
+        ranked_pot = rank_zones([v_sup_pot], current_price=3879.7)
+        self.assertEqual(len(ranked_pot["active_supports"]), 0)
+        self.assertEqual(len(ranked_pot["pending_break_zones"]), 1)
+
+        # 1b. Support ditembus kuat ke bawah -> CONFIRMED BREAKDOWN (BROKEN), bukan active support
+        df_sup_brk = make_synthetic_ohlc(sup_prefix + [
+            (3882.0, 3882.2, 3874.5, 3875.2),  # body 6.8 (1.7 ATR), pen 4.8 (1.2 ATR)
+        ], atr_val=4.0)
+        bo_sup_brk = detect_zone_breakout(sup_zone, df_sup_brk)
+        self.assertEqual(bo_sup_brk["status"], "VALID_BREAKOUT")
+        self.assertEqual(bo_sup_brk["break_type"], "CONFIRMED_BREAKDOWN")
+        self.assertTrue(bo_sup_brk["zone_failed"])
+
+        # 2a. Resistance ditembus tipis ke atas -> POTENTIAL BREAKOUT (BREAKOUT_PENDING), bukan active resistance
+        df_res_pot = make_synthetic_ohlc(res_prefix + [
+            (3915.7, 3917.0, 3915.0, 3916.3),
+        ], atr_val=4.0)
+        bo_res_pot = detect_zone_breakout(res_zone, df_res_pot)
+        self.assertEqual(bo_res_pot["status"], "BREAKOUT_PENDING_CONFIRMATION")
+        self.assertEqual(bo_res_pot["break_type"], "POTENTIAL_BREAKOUT")
+        self.assertTrue(bo_res_pot["potential_breakout"])
+        t_res_pot = analyze_zone_touches(res_zone, df_res_pot)
+        v_res_pot = validate_single_zone(t_res_pot, df=df_res_pot, current_price=3916.3)
+        self.assertEqual(v_res_pot["lifecycle_status"], "BREAKOUT_PENDING")
+        self.assertFalse(v_res_pot["is_active"])
+        ranked_res_pot = rank_zones([v_res_pot], current_price=3916.3)
+        self.assertEqual(len(ranked_res_pot["active_resistances"]), 0)
+        self.assertEqual(len(ranked_res_pot["pending_break_zones"]), 1)
+
+        # 3. False Breakdown (1 bar trap dangkal < 0.42 ATR lalu langsung balik ke atas support) -> bukan Reclaim
+        df_sup_false = make_synthetic_ohlc(sup_prefix + [
+            (3882.0, 3882.2, 3878.5, 3879.0),  # 1 bar close tipis di bawah 3880 (0.25 ATR)
+            (3879.0, 3885.5, 3878.8, 3884.8),  # langsung balik kuat ke atas 3882
+        ], atr_val=4.0)
+        bo_sup_false = detect_zone_breakout(sup_zone, df_sup_false)
+        self.assertEqual(bo_sup_false["status"], "FALSE_BREAKOUT")
+        self.assertEqual(bo_sup_false["break_type"], "FALSE_BREAKDOWN")
+        self.assertFalse(bo_sup_false["reclaim_detected"])
+        self.assertFalse(bo_sup_false["zone_failed"])
+
+        # 4. Reclaim setelah breakdown terkonfirmasi (2+ close di bawah atau penetrasi >= invalidation ATR, lalu reclaim)
+        #    -> zone_failed=True, reclaim_detected=True, dan TIDAK dipromosikan sebagai active support!
+        df_sup_reclaim = make_synthetic_ohlc(sup_prefix + [
+            (3882.0, 3882.2, 3874.5, 3875.5),  # breakdown kuat (1.125 ATR)
+            (3875.5, 3877.0, 3874.0, 3876.2),  # acceptance bar ke-2 di bawah support
+            (3876.2, 3886.0, 3876.0, 3885.2),  # reclaim kembali di atas 3882
+        ], atr_val=4.0)
+        bo_sup_rec = detect_zone_breakout(sup_zone, df_sup_reclaim)
+        self.assertEqual(bo_sup_rec["status"], "FALSE_BREAKOUT")
+        self.assertEqual(bo_sup_rec["break_type"], "RECLAIM_AFTER_BREAKDOWN")
+        self.assertTrue(bo_sup_rec["reclaim_detected"])
+        self.assertTrue(bo_sup_rec["zone_failed"])
+        rec_zone = dict(sup_zone, breakout_info=bo_sup_rec, lifecycle_status="RECLAIMED", is_broken=True, is_active=False)
+        ranked_rec = rank_zones([rec_zone], current_price=3885.2)
+        self.assertEqual(len(ranked_rec["active_supports"]), 0)
+        self.assertEqual(len(ranked_rec["reclaimed_zones"]), 1)
+
+        # 5. _build_price_action_summary tetap menangkap breakdown baru pada pending/broken zone meski focus_zone lain aktif
+        other_active_res = dict(res_zone, zone_id="SNR_H1_RES_3950_3952", low=3950.0, high=3952.0, rank_label="R1")
+        pa = _build_price_action_summary(
+            focus_zone=other_active_res,
+            ranked_zones={"pending_break_zones": [sup_zone], "broken_zones": []},
+            m5_df=df_sup_brk,
+            frames_dict={"M5": df_sup_brk},
+            momentum_by_tf={"M5": {"direction": "BEARISH", "strength": "STRONG", "momentum_weakening": False, "summary_label": "BEARISH"}},
+            cfg=None,
+        )
+        self.assertEqual(pa["breakout_code"], "VALID_BREAKOUT")
+        self.assertEqual(pa["break_type"], "CONFIRMED_BREAKDOWN")
+        self.assertTrue(pa["potential_breakdown"])
+
 
 if __name__ == "__main__":
     unittest.main()

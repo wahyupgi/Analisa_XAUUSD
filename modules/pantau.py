@@ -24,6 +24,7 @@ from modules.config import (
     ST_AKTIF_ENTRY, ST_VALID_BERJALAN, ST_VALID_PULLBACK, ST_VALID_DEKAT_SL
 )
 from modules.utils import bunyi, wkt, _catat_error
+from modules.terminal_ui import print_terminal, print_terminal as print  # noqa: A004
 from modules.mt5_conn import (
     pastikan_mt5_aktif, ambil_data, tambah_indikator,
     cek_posisi_terbuka_mt5, _info_tipe_pending, _nilai_per_poin, hitung_mm_sinyal
@@ -1469,7 +1470,6 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
     3) Deteksi jika menyentuh TP1 / TP2
     4) Pengawal Posisi Running Otomatis (Auto-Guard): Peringatan BEP, Partial TP, Bahaya Struktur Berlawanan, & Risiko SL.
     5) Sinyal Aktif Dinamis: Sinyal Aktif otomatis berubah mengikuti peringatan Stop-Hunt, Impuls, Konfirmasi Zona, atau Breakout."""
-    import builtins as _builtins
     global SINYAL_AKTIF_DINAMIS, ZONA_ATAS_DINAMIS, ZONA_BAWAH_DINAMIS, CATATAN_JEBOL_PANTAU
 
     tokens = arg.split()
@@ -1491,12 +1491,12 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
     sl_manual = angka[2] if len(angka) >= 3 else None
 
     if not pastikan_mt5_aktif():
-        _builtins.print("Gagal konek MT5 untuk mode pantau.")
+        print_terminal("Gagal konek MT5 untuk mode pantau.")
         return None
 
     def print(*args, **kwargs):
         if detail:
-            _builtins.print(*args, **kwargs)
+            print_terminal(*args, **kwargs)
 
     print("\n" + "=" * 70)
     print("MODE PANTAU PINTAR & PENGAWAL POSISI RUNNING (SMART RADAR ALERT) AKTIF")
@@ -1570,13 +1570,13 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                 "status": "INSIDE_ZONE" if lo_manual <= harga_awal_pantau <= hi_manual else "MONITORING",
             }
         init_res = smart_tracker.evaluate(snap_init)
-        _builtins.print("\n" + format_monitor_summary(snap_init))
+        print_terminal("\n" + format_monitor_summary(snap_init))
         if init_res.get("critical_warnings"):
-            _builtins.print("-" * 56)
+            print_terminal("-" * 56)
             for cw in init_res["critical_warnings"]:
-                _builtins.print(f"! {cw}")
-            _builtins.print("-" * 56)
-        _builtins.print("Tekan Ctrl+C kapan saja untuk kembali ke mode Tanya Jawab.")
+                print_terminal(f"! {cw}")
+            print_terminal("-" * 56)
+        print_terminal("Tekan Ctrl+C kapan saja untuk kembali ke mode Tanya Jawab.")
 
     # Tampilkan riwayat sinyal sebelumnya (HANYA jika masih valid) di awal mode pantau
     state_pantau = muat_state_sinyal()
@@ -1743,8 +1743,12 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                     cycle_res = None
                     cycle_events = []
                     cycle_risk_flags = set()
-                    pos_live = mt5.positions_get(symbol=SYMBOL) or ()
-                    orders_live = mt5.orders_get(symbol=SYMBOL) or ()
+                    raw_pos_live = mt5.positions_get(symbol=SYMBOL)
+                    raw_orders_live = mt5.orders_get(symbol=SYMBOL)
+                    pos_query_ok = raw_pos_live is not None
+                    orders_query_ok = raw_orders_live is not None
+                    pos_live = raw_pos_live or ()
+                    orders_live = raw_orders_live or ()
                     if _mm_acc is None or (now_s - _mm_ts) >= 5.0:   # info akun cukup disegarkan tiap 5 detik
                         _mm_acc, _mm_sym, _mm_ts = mt5.account_info(), mt5.symbol_info(SYMBOL), now_s
                     acc_live_mm, sym_live_mm = _mm_acc, _mm_sym
@@ -1899,24 +1903,48 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             print(f"\n[Catatan #{tkt_o}] Harga sempat mendekati {nm_o} @ {p_limit:.2f} ({min_jrk_hist:.2f} pt) lalu memantul {jarak_skrg:.2f} pt tanpa menjemput order. Zona ini sudah mengalami mitigasi dini.")
                             bunyi(780, 200)
 
-                    # Cek jika ada Pending Order yang baru saja hilang (karena TEREKSEKUSI jadi posisi running atau DIHAPUS manual)
-                    tiket_pos_skrg = {p.ticket for p in pos_live}
-                    for tkt_o_lama in list(pending_terpantau.keys()):
-                        if tkt_o_lama not in pending_aktif_skrg:
-                            inf_o = pending_terpantau.pop(tkt_o_lama)
-                            # Cek apakah tiketnya berubah menjadi posisi running atau ada posisi baru di harga yang sama
-                            terjemput = (tkt_o_lama in tiket_pos_skrg) or any(
-                                abs(p.price_open - inf_o["open"]) <= 1.5 and ("BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL") == inf_o["arah"]
-                                for p in pos_live
-                            )
-                            if terjemput:
-                                print(f"\n\n[🎯 PENDING ORDER TEREKSEKUSI #{tkt_o_lama}!] {inf_o['nama']} {inf_o['volume']} lot @ {inf_o['open']:.2f} telah TERJEMPUT dan aktif menjadi Posisi Running!")
-                                print("   -> Pengawal Posisi Otomatis langsung mengambil alih untuk mengawal BEP, Partial TP, dan keamanan SL Anda!")
-                                for _ in range(3):
-                                    bunyi(1500, 200)
-                            else:
-                                print(f"\n\n[ℹ️ PENDING ORDER DIBATALKAN/DIHAPUS #{tkt_o_lama}] {inf_o['nama']} {inf_o['volume']} lot @ {inf_o['open']:.2f} telah dihapus dari MT5.")
-                                bunyi(1050, 200)
+                    # Cek jika ada Pending Order yang baru saja hilang (hanya jika query orders_get sukses)
+                    if orders_query_ok:
+                        tiket_pos_skrg = {p.ticket for p in pos_live}
+                        for tkt_o_lama in list(pending_terpantau.keys()):
+                            if tkt_o_lama not in pending_aktif_skrg:
+                                inf_o = pending_terpantau.pop(tkt_o_lama)
+                                # Verifikasi via posisi running atau history deals/orders MT5; jangan menyimpulkan terisi tanpa bukti
+                                terjemput = pos_query_ok and (
+                                    (tkt_o_lama in tiket_pos_skrg)
+                                    or any(getattr(p, "identifier", None) == tkt_o_lama for p in pos_live)
+                                )
+                                hist_canceled = False
+                                if not terjemput:
+                                    try:
+                                        h_deals = mt5.history_deals_get(position=tkt_o_lama) or ()
+                                        if any(getattr(d, "order", None) == tkt_o_lama or getattr(d, "position_id", None) == tkt_o_lama for d in h_deals):
+                                            terjemput = True
+                                        else:
+                                            h_orders = mt5.history_orders_get(ticket=tkt_o_lama) or ()
+                                            for ho in h_orders:
+                                                st_ho = getattr(ho, "state", None)
+                                                if st_ho == getattr(mt5, "ORDER_STATE_FILLED", 4):
+                                                    terjemput = True
+                                                elif st_ho in (
+                                                    getattr(mt5, "ORDER_STATE_CANCELED", 2),
+                                                    getattr(mt5, "ORDER_STATE_EXPIRED", 6),
+                                                    getattr(mt5, "ORDER_STATE_REJECTED", 5),
+                                                ):
+                                                    hist_canceled = True
+                                    except Exception:
+                                        pass
+                                if terjemput:
+                                    print(f"\n\n[🎯 PENDING ORDER TEREKSEKUSI #{tkt_o_lama}!] {inf_o['nama']} {inf_o['volume']} lot @ {inf_o['open']:.2f} telah TERJEMPUT dan aktif menjadi Posisi Running!")
+                                    print("   -> Pengawal Posisi Otomatis langsung mengambil alih untuk mengawal BEP, Partial TP, dan keamanan SL Anda!")
+                                    for _ in range(3):
+                                        bunyi(1500, 200)
+                                elif hist_canceled:
+                                    print(f"\n\n[ℹ️ PENDING ORDER DIBATALKAN/DIHAPUS #{tkt_o_lama}] {inf_o['nama']} {inf_o['volume']} lot @ {inf_o['open']:.2f} telah dihapus/expired di MT5.")
+                                    bunyi(1050, 200)
+                                else:
+                                    print(f"\n\n[ℹ️ PENDING ORDER STATUS UNKNOWN #{tkt_o_lama}] {inf_o['nama']} {inf_o['volume']} lot @ {inf_o['open']:.2f} tidak lagi di daftar pending (status eksekusi/histori MT5 UNKNOWN).")
+                                    bunyi(1050, 200)
 
                     # 0B. PENGAWAL POSISI RUNNING OTOMATIS (LIVE TRADE GUARD)
                     tiket_aktif_skrg = set()
@@ -2798,7 +2826,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                         snap_loop["risk_flags"] = sorted(cycle_risk_flags)
                         smart_res = smart_tracker.evaluate(snap_loop, now_ts=now_s)
                         if smart_res.get("should_print"):
-                            _builtins.print("\n" + SmartAlertTracker.format_alert_block(smart_res, snap_loop))
+                            print_terminal("\n" + SmartAlertTracker.format_alert_block(smart_res, snap_loop))
 
                 _err_beruntun = 0
             except KeyboardInterrupt:
@@ -2807,10 +2835,10 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                 _err_beruntun += 1
                 _catat_error('mode_pantau', e_loop)
                 if _err_beruntun in (1, 10) or _err_beruntun % 100 == 0:
-                    _builtins.print(f'\n[⚠️ Error di loop pantau (#{_err_beruntun}): {e_loop!r} — dicatat ke {FILE_ERROR_LOG}; pemantauan dilanjutkan]')
+                    print_terminal(f'\n[⚠️ Error di loop pantau (#{_err_beruntun}): {e_loop!r} — dicatat ke {FILE_ERROR_LOG}; pemantauan dilanjutkan]')
                 time.sleep(1.0)
                 continue
             time.sleep(0.1)  # Live update 10x per detik (halus, stabil, dan bebas lag)
     except KeyboardInterrupt:
-        _builtins.print("\nMode pantau dihentikan (koneksi live MT5 tetap aktif).")
+        print_terminal("\nMode pantau dihentikan (koneksi live MT5 tetap aktif).")
     return None

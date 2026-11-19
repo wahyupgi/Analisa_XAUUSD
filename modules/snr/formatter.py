@@ -11,13 +11,28 @@ def format_snr_lifecycle_status(scan_result, decision=None):
     sr = scan_result if isinstance(scan_result, dict) else {}
     dec = decision if isinstance(decision, dict) else sr.get("decision") or {}
     ranked = sr.get("ranked_zones") or {}
-    supports = [
-        zone for zone in (ranked.get("all_zones") or [])
-        if str(zone.get("zone_type", "")).upper() == "SUPPORT"
-    ]
-    supports.sort(key=lambda zone: safe_float(zone.get("distance_points"), float("inf")))
+    all_zones = ranked.get("all_zones") or []
+    pending_breaks = ranked.get("pending_break_zones") or []
+    broken_zones = ranked.get("broken_zones") or []
     active_supports = ranked.get("active_supports") or []
-    zone = active_supports[0] if active_supports else (supports[0] if supports else None)
+    active_resistances = ranked.get("active_resistances") or []
+    supports = [z for z in all_zones if str(z.get("zone_type", "")).upper() == "SUPPORT"]
+    supports.sort(key=lambda z: safe_float(z.get("distance_points"), float("inf")))
+
+    # Prioritaskan zona yang sedang mengalami potensi breakdown/breakout, lalu broken/reclaim terdekat,
+    # lalu support/resistance aktif terdekat agar peristiwa breakdown/breakout terlihat jelas.
+    zone = None
+    if pending_breaks:
+        zone = pending_breaks[0]
+    elif active_supports:
+        zone = active_supports[0]
+    elif broken_zones:
+        zone = broken_zones[0]
+    elif active_resistances:
+        zone = active_resistances[0]
+    elif supports:
+        zone = supports[0]
+
     signal = str(dec.get("signal", "WAIT")).upper()
     entry_confirmed = dec.get("entry_confirmed", False) if isinstance(dec, dict) else False
     entry_status = "CONFIRMED" if signal in ("BUY", "SELL") and (entry_confirmed or dec.get("status") == "CONFIRMED") else ("CONFIRMED" if signal in ("BUY", "SELL") else "WAIT")
@@ -27,10 +42,13 @@ def format_snr_lifecycle_status(scan_result, decision=None):
         disp_event = "NONE"
         zone_label = "S1"
     else:
+        z_type = str(zone.get("zone_type", "SUPPORT")).upper()
         lifecycle = str(zone.get("lifecycle_status", zone.get("status", "UNCONFIRMED"))).upper()
         event = str(zone.get("lifecycle_event") or lifecycle).upper()
         reclaim = str(zone.get("reclaim_status") or "WAIT").upper()
-        zone_label = str(zone.get("rank_label") or "NEAREST SUPPORT")
+        default_lbl = "NEAREST SUPPORT" if z_type == "SUPPORT" else "NEAREST RESISTANCE"
+        zone_label = str(zone.get("rank_label") or default_lbl)
+        break_word = "BREAKDOWN" if z_type == "SUPPORT" else "BREAKOUT"
 
         if lifecycle == "RECLAIMED" or (lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING") and reclaim == "CONFIRMED"):
             disp_status = "RECLAIMED"
@@ -39,8 +57,14 @@ def format_snr_lifecycle_status(scan_result, decision=None):
             disp_status = "BROKEN"
             disp_event = (
                 "RETEST" if lifecycle == "RETEST"
-                else ("RECLAIM PENDING" if lifecycle == "RECLAIM_PENDING" else "BREAKDOWN")
+                else ("RECLAIM PENDING" if lifecycle == "RECLAIM_PENDING" else break_word)
             )
+        elif lifecycle == "BREAKDOWN_PENDING":
+            disp_status = "BREAKDOWN_PENDING"
+            disp_event = "POTENTIAL BREAKDOWN"
+        elif lifecycle == "BREAKOUT_PENDING":
+            disp_status = "BREAKOUT_PENDING"
+            disp_event = "POTENTIAL BREAKOUT"
         elif lifecycle == "INVALIDATED":
             disp_status = "INVALIDATED"
             disp_event = "INVALIDATED"
@@ -49,9 +73,12 @@ def format_snr_lifecycle_status(scan_result, decision=None):
             disp_event = "UNCONFIRMED"
         elif lifecycle in ("ACTIVE", "TOUCHED", "SWEEP"):
             disp_status = "ACTIVE"
-            disp_event = event if event in ("SWEEP", "TOUCHED") else ("TOUCHED" if event == "ACTIVE" and zone.get("touch_count", 0) > 0 else "NONE")
-            if disp_event in ("SWEEP", "TOUCHED"):
-                disp_event += " (HISTORICAL)"
+            if event in ("FALSE_BREAKDOWN", "FALSE_BREAKOUT"):
+                disp_event = event.replace("_", " ")
+            else:
+                disp_event = event if event in ("SWEEP", "TOUCHED") else ("TOUCHED" if event == "ACTIVE" and zone.get("touch_count", 0) > 0 else "NONE")
+                if disp_event in ("SWEEP", "TOUCHED"):
+                    disp_event += " (HISTORICAL)"
         else:
             disp_status = lifecycle
             disp_event = event if event not in ("", "N/A") else "NONE"
@@ -66,11 +93,9 @@ def format_snr_lifecycle_status(scan_result, decision=None):
     if not alerts and isinstance(dec, dict) and dec.get("alerts"):
         alerts.extend(dec["alerts"])
 
-    alert_text = str(alerts[-1]).strip() if alerts else "NONE"
+    alert_text = str(alerts[-1]).replace("\n", " ").strip() if alerts else "NONE"
     if alert_text != "NONE" and alert_text.startswith("[SNR] "):
         alert_text = alert_text[6:].strip()
-    if len(alert_text) > 48:
-        alert_text = alert_text[:45] + "..."
 
     lines = [
         f"{zone_label} STATUS : {disp_status}",
@@ -325,6 +350,44 @@ def format_snr_summary(scan_result, decision=None):
     else:
         lines.append("R1 : NONE (Belum ada zona resistance aktif)")
 
+    pending_breaks = [
+        pz for pz in (ranked.get("pending_break_zones") or [])
+        if isinstance(pz, dict)
+        and not pz.get("is_distant_historical")
+        and safe_float(pz.get("distance_atr"), 0.0) <= 12.0
+    ]
+    reclaimed_zs = [
+        rz_rec for rz_rec in (ranked.get("reclaimed_zones") or [])
+        if isinstance(rz_rec, dict)
+        and not rz_rec.get("is_distant_historical")
+        and safe_float(rz_rec.get("distance_atr"), 0.0) <= 12.0
+    ]
+    if mkt_status != "DATA UNAVAILABLE" and (pending_breaks or reclaimed_zs):
+        lines.extend([
+            "",
+            "----------------------------------------------------",
+            "BREAKOUT / BREAKDOWN & RECLAIM WATCH",
+            "----------------------------------------------------",
+        ])
+        for pz in pending_breaks[:2]:
+            p_zt = str(pz.get("zone_type", "")).upper()
+            p_tag = "POTENTIAL BREAKDOWN" if p_zt == "SUPPORT" else "POTENTIAL BREAKOUT"
+            p_bo = pz.get("m5_breakout_info") or pz.get("breakout_info") or {}
+            p_ts = str(p_bo.get("breakout_bar_time") or "").strip()
+            ts_note = f" @ {p_ts}" if p_ts else ""
+            lines.append(
+                f"• {p_tag} : {pz.get('timeframe', '')} {p_zt} "
+                f"{safe_float(pz.get('low')):.2f}-{safe_float(pz.get('high')):.2f}{ts_note} (tidak dipromosikan sebagai S/R aktif)"
+            )
+        for rz_rec in reclaimed_zs[:2]:
+            r_st = str(rz_rec.get("lifecycle_status", "RECLAIMED")).upper()
+            r_zt = str(rz_rec.get("zone_type", "")).upper()
+            r_dir = "AFTER BREAKDOWN" if r_zt == "SUPPORT" else "AFTER BREAKOUT"
+            lines.append(
+                f"• {r_st} ({r_dir}) : {rz_rec.get('timeframe', '')} {r_zt} "
+                f"{safe_float(rz_rec.get('low')):.2f}-{safe_float(rz_rec.get('high')):.2f} (zona gagal sebelumnya; non-aktif)"
+            )
+
     sig_final = dec.get("signal", "WAIT")
     dir_final = dec.get("direction", "NONE")
     reason_final = dec.get("reason", "Waiting for valid SNR confirmation.")
@@ -534,7 +597,8 @@ def format_snr_detail(scan_result, decision=None):
     lines.append("")
     lines.append("[10. BREAKOUT ANALYSIS]")
     bo_detail = pa.get("breakout_detail") or {}
-    lines.append(f"  • Summary Status : {pa.get('breakout_summary', 'NOT CONFIRMED')} ({bo_detail.get('status', 'NO_BREAKOUT')})")
+    lines.append(f"  • Summary Status : {pa.get('breakout_summary', 'NOT CONFIRMED')} ({bo_detail.get('status', 'NO_BREAKOUT')} | Type={bo_detail.get('break_type', pa.get('break_type', 'NONE'))})")
+    lines.append(f"  • Reclaim / Fail : ReclaimDetected={bool(bo_detail.get('reclaim_detected', False))} | ZoneFailed={bool(bo_detail.get('zone_failed', False))}")
     lines.append(f"  • Penetration    : {bo_detail.get('penetration_points', 0):.2f} pts ({bo_detail.get('penetration_atr', 0):.2f} ATR)")
     lines.append(f"  • Body & Mom     : Body={bo_detail.get('body_atr', 0):.2f} ATR | MomSupported={bo_detail.get('momentum_supported', False)} | Vol={bo_detail.get('volume_supported', 'N/A')}")
     lines.append(f"  • Reason         : {bo_detail.get('reason', 'N/A')}")
@@ -613,10 +677,13 @@ def format_snr_detail(scan_result, decision=None):
         lines.append("  • N/A")
 
     # 16. Zone Ranking
+    pending_breaks = ranked.get("pending_break_zones") or []
+    reclaimed_zs = ranked.get("reclaimed_zones") or []
     lines.append("")
     lines.append("[16. ZONE RANKING & LIFECYCLE SEPARATION]")
     lines.append(
         f"  • Active Supports={len(active_sups)} | Active Resistances={len(active_ress)} "
+        f"| PendingBreak={len(pending_breaks)} | Reclaimed={len(reclaimed_zs)} "
         f"| Historical={len(hist_zones)} | Broken={len(broken_zones)} | Invalidated={len(inv_zones)}"
     )
     by_cat = ranked.get("by_category") or {}

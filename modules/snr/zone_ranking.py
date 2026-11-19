@@ -29,7 +29,7 @@ def classify_zone_strength_category(zone):
 
     if lifecycle in (
         "INVALIDATED", "BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED",
-        "BREAKDOWN_PENDING", "UNCONFIRMED",
+        "BREAKDOWN_PENDING", "BREAKOUT_PENDING", "UNCONFIRMED",
     ) and str((zone.get("retest_info") or {}).get("status", "")) != "RETEST_CONFIRMED":
         tier = "WEAK"
     elif grade == "A" or (grade == "B" and has_conf and score >= 76.0):
@@ -155,6 +155,8 @@ def rank_zones(zones, current_price=None):
     broken_zones = []
     invalidated_zones = []
     unconfirmed_zones = []
+    pending_break_zones = []
+    reclaimed_zones = []
     major_zones = []
 
     for z in zones or []:
@@ -175,34 +177,105 @@ def rank_zones(zones, current_price=None):
 
         lifecycle = str(item.get("lifecycle_status", item.get("status", "ACTIVE"))).upper()
         z_type = str(item.get("zone_type", "SUPPORT")).upper()
+        bo_info = item.get("breakout_info") if isinstance(item.get("breakout_info"), dict) else {}
+        bo_status = str(bo_info.get("status", "NO_BREAKOUT")).upper()
+        zone_failed = bool(
+            item.get("is_broken")
+            or item.get("is_invalidated")
+            or bo_status == "VALID_BREAKOUT"
+            or bo_info.get("zone_failed")
+            or bo_info.get("reclaim_detected")
+        )
 
         if (
             str(item.get("timeframe", "")).upper() == "H4"
             and str(item.get("swing_class", "")).upper() == "MAJOR"
             and lifecycle in ("ACTIVE", "HISTORICAL")
+            and not zone_failed
         ):
             major_zones.append(item)
 
         if lifecycle in ("ACTIVE", "TOUCHED", "SWEEP"):
-            if z_type == "SUPPORT":
+            if item.get("is_invalidated"):
+                item["lifecycle_status"] = "INVALIDATED"
+                item["status"] = "INVALIDATED"
+                item["is_active"] = False
+                invalidated_zones.append(item)
+            elif zone_failed:
+                item["lifecycle_status"] = "RECLAIMED" if bo_info.get("reclaim_detected") else "BROKEN"
+                item["status"] = item["lifecycle_status"]
+                item["is_broken"] = True
+                item["is_active"] = False
+                broken_zones.append(item)
+                if item["lifecycle_status"] == "RECLAIMED":
+                    reclaimed_zones.append(item)
+            elif bo_status == "BREAKOUT_PENDING_CONFIRMATION":
+                pend_st = "BREAKDOWN_PENDING" if z_type == "SUPPORT" else "BREAKOUT_PENDING"
+                item["lifecycle_status"] = pend_st
+                item["status"] = pend_st
+                item["is_active"] = False
+                unconfirmed_zones.append(item)
+                pending_break_zones.append(item)
+            elif z_type == "SUPPORT":
                 # Support aktif berada di bawah atau sedang diuji oleh harga saat ini (cp >= z_low)
                 if cp <= 0 or safe_float(item.get("low"), 0.0) <= cp:
                     active_sup_candidates.append(item)
                 else:
-                    broken_zones.append(item)
+                    item["lifecycle_status"] = "BREAKDOWN_PENDING"
+                    item["status"] = "BREAKDOWN_PENDING"
+                    item["is_active"] = False
+                    unconfirmed_zones.append(item)
+                    pending_break_zones.append(item)
             else:
                 # Resistance aktif berada di atas atau sedang diuji oleh harga saat ini (cp <= z_high)
                 if cp <= 0 or safe_float(item.get("high"), 0.0) >= cp:
                     active_res_candidates.append(item)
                 else:
-                    broken_zones.append(item)
+                    item["lifecycle_status"] = "BREAKOUT_PENDING"
+                    item["status"] = "BREAKOUT_PENDING"
+                    item["is_active"] = False
+                    unconfirmed_zones.append(item)
+                    pending_break_zones.append(item)
         elif lifecycle == "HISTORICAL":
             historical_zones.append(item)
         elif lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED"):
+            item["is_active"] = False
+            item["is_distant_historical"] = bool(dist_atr > 12.0)
             broken_zones.append(item)
-        elif lifecycle in ("BREAKDOWN_PENDING", "UNCONFIRMED"):
-            unconfirmed_zones.append(item)
+            if lifecycle in ("RECLAIM_PENDING", "RECLAIMED"):
+                reclaimed_zones.append(item)
+        elif lifecycle in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING", "UNCONFIRMED"):
+            item["is_active"] = False
+            expected_pend = "BREAKDOWN_PENDING" if z_type == "SUPPORT" else "BREAKOUT_PENDING"
+            on_valid_side = (
+                cp > 0
+                and (
+                    (z_type == "SUPPORT" and cp > safe_float(item.get("high"), 0.0))
+                    or (z_type == "RESISTANCE" and cp < safe_float(item.get("low"), 0.0))
+                )
+            )
+            if lifecycle in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING") and lifecycle != expected_pend:
+                # Arah pending bertentangan dengan tipe zona (mis. BREAKDOWN_PENDING pada RESISTANCE)
+                if dist_atr > 12.0 and on_valid_side:
+                    item["lifecycle_status"] = "HISTORICAL"
+                    item["status"] = "HISTORICAL"
+                    historical_zones.append(item)
+                else:
+                    item["lifecycle_status"] = "UNCONFIRMED"
+                    item["status"] = "UNCONFIRMED"
+                    unconfirmed_zones.append(item)
+            elif lifecycle in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING") and dist_atr > 12.0 and on_valid_side and bo_status == "NO_BREAKOUT":
+                # Event lama yang jauh di sisi valid bukan pending break aktif
+                item["lifecycle_status"] = "HISTORICAL"
+                item["status"] = "HISTORICAL"
+                historical_zones.append(item)
+            else:
+                item["is_distant_historical"] = bool(dist_atr > 12.0 and bool(bo_info.get("is_historical_break")))
+                unconfirmed_zones.append(item)
+                if lifecycle in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING"):
+                    pending_break_zones.append(item)
         else:
+            item["is_active"] = False
             invalidated_zones.append(item)
 
         enriched_all.append(item)
@@ -243,6 +316,8 @@ def rank_zones(zones, current_price=None):
 
     broken_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
     unconfirmed_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
+    pending_break_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
+    reclaimed_zones.sort(key=lambda x: (x["distance_points"], -x.get("score", 0.0)))
     historical_zones.sort(key=lambda x: (-x.get("score", 0.0), x["distance_points"]))
     major_zones.sort(key=lambda x: (-x.get("score", 0.0), x["distance_points"]))
 
@@ -259,6 +334,8 @@ def rank_zones(zones, current_price=None):
         "broken_zones": broken_zones,
         "invalidated_zones": invalidated_zones,
         "unconfirmed_zones": unconfirmed_zones,
+        "pending_break_zones": pending_break_zones,
+        "reclaimed_zones": reclaimed_zones,
         "by_category": by_category,
     }
 

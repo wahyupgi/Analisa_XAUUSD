@@ -16,6 +16,13 @@ from modules.config import (
     SYMBOL, MULTI_TIER_MAX_ZONES,
     SIGNAL_STATUS_NO_SETUP, SIGNAL_STATUS_SIGNAL_CONFIRMED,
 )
+from modules.mt5_conn import (
+    fetch_mt5_pending_orders_snapshot,
+    format_pending_compact_status,
+    format_pending_reconciliation_evidence,
+    reconcile_pending_plan_with_mt5,
+    reconcile_pending_plans_batch,
+)
 from modules.utils import get_current_wib, to_wib_datetime
 from modules.zone_scanner import (
     SCORE_MIN_ACTIVE,
@@ -420,7 +427,8 @@ def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan:
             computed = (decision.get("zone_plans") or {}).get(zone_id) or {}
             plan = next((p for p in qualified if p.get("zone_id") == zone_id and p.get("valid") and p.get("status") == "READY"), None)
             if plan and pending_gate_ok:
-                kind = "PENDING"
+                best_zid_s = str((pending.get("best_setup") or {}).get("zone_id") or "")
+                kind = "SELECTED_PENDING" if (best_zid_s and zone_id == best_zid_s) else "ALT_PENDING"
             elif plan:
                 kind = "PROVISIONAL"
             elif (computed.get("valid") and computed.get("status") == "READY") or (
@@ -446,10 +454,41 @@ def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan:
     if valid and (tp2 == tp1 or not (tp2 > entry if expected == "BUY" else 0 < tp2 < entry)):
         tp2 = 0.0
     status = code
+    plan_status_val = code
+    broker_status_val = "UNKNOWN"
+    recon_val = None
     if kind == "CONFIRMED":
         status = "CONFIRMED"
-    elif kind == "PENDING":
-        status = f"{code} | PENDING READY (NOT PLACED)"
+        plan_status_val = "CONFIRMED"
+    elif kind in ("SELECTED_PENDING", "ALT_PENDING"):
+        plan_status_val = "READY"
+        if isinstance(plan, dict) and not isinstance(plan.get("mt5_reconciliation"), dict):
+            pending_obj = decision.get("early_setup") or {}
+            batch_list = []
+            seen_b = set()
+            for p_cand in ([pending_obj.get("best_setup")] if isinstance(pending_obj.get("best_setup"), dict) else []) + list(pending_obj.get("all_setups") or []):
+                if isinstance(p_cand, dict) and p_cand.get("valid") and str(p_cand.get("status") or "").upper().startswith("READY"):
+                    pz_id = str(p_cand.get("zone_id") or "")
+                    if pz_id not in seen_b:
+                        seen_b.add(pz_id)
+                        batch_list.append(p_cand)
+            if plan not in batch_list:
+                batch_list.append(plan)
+            reconcile_pending_plans_batch(
+                batch_list,
+                mt5_snapshot=decision.get("mt5_orders_snapshot"),
+                symbol=zone.get("symbol") or decision.get("symbol") or SYMBOL,
+            )
+        recon_val = (plan or {}).get("mt5_reconciliation")
+        broker_status_val = str((plan or {}).get("broker_order_status") or (recon_val or {}).get("broker_order_status") or "UNKNOWN").upper()
+        c_st = (plan or {}).get("compact_status") or format_pending_compact_status(
+            "READY",
+            recon_val,
+            order_type=str((plan or {}).get("order_type") or ""),
+            entry_price=entry,
+        )
+        role_tag = "SELECTED PENDING" if kind == "SELECTED_PENDING" else "ALT PENDING"
+        status = f"{code} | {role_tag} {c_st}"
     elif kind == "PROVISIONAL":
         status = f"{code} (PROVISIONAL ONLY)"
     return {
@@ -460,6 +499,7 @@ def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan:
         "grade": f"{zone.get('grade', 'N/A')} ({_num(zone.get('score')):.2f})" if zone.get("score") is not None else str(zone.get("grade", "N/A")),
         "reason": build_smc_zone_reason(zone),
         "direction": expected, "kind": kind, "note": note, "status": status, "active": active,
+        "plan_status": plan_status_val, "broker_order_status": broker_status_val, "mt5_reconciliation": recon_val,
         "entry": entry if valid else 0.0, "sl": sl if valid else 0.0, "tp1": tp1 if valid else 0.0,
         "tp2": tp2 if valid else 0.0,
         "rr": abs(tp1 - entry) / abs(entry - sl) if valid else 0.0,
@@ -473,7 +513,7 @@ def format_smc_zone_lines(zone: Dict[str, Any], decision: Dict[str, Any], allow_
     s = smc_zone_summary(zone, decision, allow_plan)
     if s["kind"] == "CONFIRMED":
         entry_text = f"{s['direction']} {s['entry']:.2f}"
-    elif s["kind"] in ("PENDING", "PROVISIONAL"):
+    elif s["kind"] in ("SELECTED_PENDING", "ALT_PENDING", "PENDING", "PROVISIONAL"):
         entry_text = f"{s['direction']} PLAN {s['entry']:.2f}"
     else:
         entry_text = f"N/A ({s['note']})"
@@ -620,6 +660,19 @@ def format_scan_presentation(
             early_setups = detect_early_setups(current_price=price, scan=scan)
         except Exception:
             early_setups = {"best_setup": None, "all_setups": [], "empty_reason": "Data tidak tersedia"}
+    if isinstance(early_setups, dict):
+        _es_plans = []
+        _seen_es = set()
+        for _ep in ([early_setups.get("best_setup")] if isinstance(early_setups.get("best_setup"), dict) else []) + list(early_setups.get("all_setups") or []):
+            if isinstance(_ep, dict) and _ep.get("valid") and str(_ep.get("status") or "READY").upper().startswith("READY"):
+                _ezid = str(_ep.get("zone_id") or "")
+                _ekey = _ezid or f"_idx_{len(_es_plans)}"
+                if _ekey not in _seen_es:
+                    _seen_es.add(_ekey)
+                    _es_plans.append(_ep)
+        if _es_plans:
+            _ord_snap_pres = scan.get("mt5_orders_snapshot") or dec.get("mt5_orders_snapshot")
+            reconcile_pending_plans_batch(_es_plans, mt5_snapshot=_ord_snap_pres, symbol=scan.get("symbol") or dec.get("symbol") or SYMBOL)
 
     # Zone Tracker
     if tracker is None:
@@ -813,6 +866,8 @@ def format_scan_presentation(
         pending_ready_c = bool(
             best_p_c
             and best_p_c.get("valid")
+            and str(best_p_c.get("status") or "READY").upper() == "READY"
+            and not best_p_c.get("is_expired")
             and h4_bias in ("BULLISH", "BEARISH")
             and not ctx.get("has_conflict")
             and m30_status not in ("CONFLICT", "INVALID", "WEAK")
@@ -822,11 +877,15 @@ def format_scan_presentation(
         if confirmed_ready_c:
             tp2_v = plan.get("tp2")
             tp_str = f"TP1 {plan.get('tp1', 0.0):.2f}" + (f" | TP2 {tp2_v:.2f}" if tp2_v else "")
-            pend_lbl = (
-                f"READY — PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}]"
-                if pending_ready_c
-                else "TIDAK AKTIF (BELUM DIPASANG DI MT5)"
-            )
+            if pending_ready_c:
+                bp_c_st = best_p_c.get("compact_status") or "READY | MT5 STATUS UNKNOWN"
+                bp_b_st = str(best_p_c.get("broker_order_status") or "UNKNOWN").upper()
+                if bp_b_st in ("PLACED_VERIFIED", "PLACED_MISMATCH", "UNKNOWN"):
+                    pend_lbl = f"{bp_c_st} [{best_p_c['order_type']}]"
+                else:
+                    pend_lbl = f"READY — PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}] ({bp_c_st})"
+            else:
+                pend_lbl = "TIDAK AKTIF"
             out.append(f"- Status Rencana   : READY (CONFIRMED ENTRY {direction})")
             out.append(f"- Confirmed Entry  : CONFIRMED ENTRY — {direction} VALID (Sinyal resmi sudah melewati seluruh validasi)")
             out.append(f"- Pending Plan     : {pend_lbl}")
@@ -837,13 +896,67 @@ def format_scan_presentation(
         elif pending_ready_c:
             tp2_p = best_p_c.get("tp2")
             tp_p_str = f"TP1 {best_p_c['tp1']:.2f}" + (f" | TP2 {tp2_p:.2f}" if tp2_p else "")
+            p_src_lbl = best_p_c.get("source_zone_label") or (
+                f"{best_p_c.get('timeframe', 'N/A')} {best_p_c.get('zone_type', 'ZONE')} "
+                f"{float(best_p_c.get('zone_low', 0.0)):.2f}-{float(best_p_c.get('zone_high', 0.0)):.2f}"
+            )
+            p_grd_str = f"Grade {best_p_c.get('zone_grade', 'N/A')} ({float(best_p_c.get('zone_score', 0.0)):.1f})"
+            pz_id_ref = (pz_c or {}).get("zone_id") if isinstance(pz_c, dict) else None
+            act_id_ref = (main_z or {}).get("zone_id") if isinstance(main_z, dict) else None
+            bp_zid = best_p_c.get("zone_id")
+            if act_id_ref and bp_zid == act_id_ref:
+                p_origin_tag = "SELECTED PENDING | ACTIVE FOCUS"
+            elif pz_id_ref and bp_zid == pz_id_ref:
+                p_origin_tag = "SELECTED PENDING | PRIMARY ZONE"
+            else:
+                p_origin_tag = "SELECTED PENDING | NON-FOCUS ZONE"
+            bp_c_st = best_p_c.get("compact_status") or "READY | MT5 STATUS UNKNOWN"
+            bp_b_st = str(best_p_c.get("broker_order_status") or "UNKNOWN").upper()
             out.append("- Status Rencana   : READY (Pending Plan) | WAIT (Confirmed Entry)")
-            out.append(f"- Pending Plan     : READY — PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}; {best_p_c.get('zone_id', 'N/A')}]")
+            if bp_b_st in ("PLACED_VERIFIED", "PLACED_MISMATCH"):
+                out.append(f"- Pending Plan     : {bp_c_st} — SELECTED PENDING PLAN [{best_p_c['order_type']}; {best_p_c.get('zone_id', 'N/A')}]")
+                ent_note = f"Rencana {best_p_c['order_type']} — {bp_c_st}"
+            elif bp_b_st == "UNKNOWN":
+                out.append(f"- Pending Plan     : {bp_c_st} — SELECTED PENDING PLAN [{best_p_c['order_type']}; {best_p_c.get('zone_id', 'N/A')}]")
+                ent_note = f"Rencana {best_p_c['order_type']} — MT5 STATUS UNKNOWN"
+            else:
+                out.append(f"- Pending Plan     : {bp_c_st} — SELECTED PENDING PLAN (BELUM DIPASANG DI MT5) [{best_p_c['order_type']}; {best_p_c.get('zone_id', 'N/A')}]")
+                ent_note = f"Rencana {best_p_c['order_type']} — BELUM DIPASANG DI MT5; pasang limit manual hanya jika siap menanggung risiko"
+            out.append(f"- Pending Source   : {p_src_lbl} | {p_grd_str} [{p_origin_tag}]")
             out.append("- Confirmed Entry  : WAIT (Bukan sinyal entry terkonfirmasi; menunggu validasi M5 lengkap)")
-            out.append(f"- Entry Price    : {best_p_c['entry_price']:.2f} (Rencana {best_p_c['order_type']} — BELUM DIPASANG DI MT5; pasang limit manual hanya jika siap menanggung risiko)")
+            out.append(f"- Entry Price    : {best_p_c['entry_price']:.2f} ({ent_note})")
             out.append(f"- Stop Loss      : {best_p_c['sl']:.2f}")
             out.append(f"- Take Profit    : {tp_p_str}")
             out.append(f"- Risk/Reward    : 1:{best_p_c['rr']:.1f}")
+            alt_valid_p = [
+                ap for ap in ((early_setups or {}).get("all_setups") or [])
+                if isinstance(ap, dict)
+                and ap.get("valid")
+                and str(ap.get("status") or "READY").upper() == "READY"
+                and not ap.get("is_expired")
+                and ap.get("zone_id")
+                and ap.get("zone_id") != best_p_c.get("zone_id")
+            ]
+            if alt_valid_p:
+                ap0 = alt_valid_p[0]
+                ap0_zid = ap0.get("zone_id")
+                if act_id_ref and ap0_zid == act_id_ref:
+                    ap_role_tag = "ALT PENDING | ACTIVE FOCUS"
+                elif pz_id_ref and ap0_zid == pz_id_ref:
+                    ap_role_tag = "ALT PENDING | PRIMARY ZONE"
+                else:
+                    ap_role_tag = "ALT PENDING | NON-FOCUS ZONE"
+                ap_lbl = ap0.get("source_zone_label") or (
+                    f"{ap0.get('timeframe', 'N/A')} {ap0.get('zone_type', 'ZONE')} "
+                    f"{float(ap0.get('zone_low', 0.0)):.2f}-{float(ap0.get('zone_high', 0.0)):.2f}"
+                )
+                ap_grd = f"Grade {ap0.get('zone_grade', 'N/A')} ({float(ap0.get('zone_score', 0.0)):.1f})"
+                ap_extra = f" (+{len(alt_valid_p) - 1} lainnya)" if len(alt_valid_p) > 1 else ""
+                ap_c_st = ap0.get("compact_status") or "READY | MT5 STATUS UNKNOWN"
+                out.append(
+                    f"- Alt Pending    : {ap_lbl} | {ap_grd} [{ap0_zid} | {ap_role_tag}] "
+                    f"({ap_c_st}; RR 1:{float(ap0.get('rr', 0.0)):.1f}){ap_extra}"
+                )
         else:
             if status == "INVALID" or (best_p_c and best_p_c.get("status") == "INVALID" and not all_radar):
                 plan_st = "INVALID"
@@ -1357,8 +1470,30 @@ def format_scan_presentation(
     # A. EARLY PENDING PLAN
     out.append("A. EARLY PENDING PLAN (Strategi Agresif - Risiko Lebih Tinggi):")
     if best_p and best_p.get("valid") and h4_bias in ("BULLISH", "BEARISH") and not ctx.get("has_conflict") and m30_status not in ("CONFLICT", "INVALID", "WEAK"):
-        out.append("   * Status         : READY — PENDING PLAN (BELUM DIPASANG DI MT5)")
+        bp_det_compact = best_p.get("compact_status") or "READY | MT5 STATUS UNKNOWN"
+        bp_det_bst = str(best_p.get("broker_order_status") or "UNKNOWN").upper()
+        bp_det_recon = best_p.get("mt5_reconciliation") or {}
+        if bp_det_bst in ("PLACED_VERIFIED", "PLACED_MISMATCH", "UNKNOWN"):
+            out.append(f"   * Status         : {bp_det_compact}")
+        else:
+            out.append(f"   * Status         : {bp_det_compact} — PENDING PLAN (BELUM DIPASANG DI MT5)")
         out.append("   * EARLY_PENDING_STATUS : READY")
+        out.append(f"   * BROKER_ORDER_STATUS  : {bp_det_bst}")
+        out.append(f"   * MT5_RECONCILIATION   : {format_pending_reconciliation_evidence(bp_det_recon)}")
+        p_det_src = best_p.get("source_zone_label") or (
+            f"{best_p.get('timeframe', 'N/A')} {best_p.get('zone_type', 'ZONE')} "
+            f"{float(best_p.get('zone_low', 0.0)):.2f}-{float(best_p.get('zone_high', 0.0)):.2f}"
+        )
+        pz_det_id = (pz or {}).get("zone_id") if isinstance(pz, dict) else None
+        act_det_id = (dec.get("zone") or {}).get("zone_id") if isinstance(dec.get("zone"), dict) else None
+        bp_det_id = best_p.get("zone_id")
+        if act_det_id and bp_det_id == act_det_id:
+            p_det_origin = "SELECTED PENDING | ACTIVE FOCUS"
+        elif pz_det_id and bp_det_id == pz_det_id:
+            p_det_origin = "SELECTED PENDING | PRIMARY ZONE"
+        else:
+            p_det_origin = "SELECTED PENDING | NON-FOCUS ZONE"
+        out.append(f"   * Source Zone    : {p_det_src} | Grade {best_p.get('zone_grade', 'N/A')} ({float(best_p.get('zone_score', 0.0)):.1f}) [{best_p.get('zone_id', 'N/A')} | {p_det_origin}]")
         out.append(f"   * Order Type     : {best_p['order_type']}")
         out.append(f"   * Entry Price    : {best_p['entry_price']:.2f} ({best_p['entry_reason']})")
         out.append(f"   * Stop Loss      : {best_p['sl']:.2f} (Risk: {best_p['risk']:.2f} pt)")
@@ -1381,8 +1516,34 @@ def format_scan_presentation(
                     out.append(f"   * {el}")
                 else:
                     out.append(f"     {el}")
-        out.append("   * Keterangan     : BELUM DIPASANG DI MT5 (Rencana pending order agresif; eksekusi manual oleh trader).")
+        if bp_det_bst in ("PLACED_VERIFIED", "PLACED_MISMATCH"):
+            out.append(f"   * Keterangan     : {bp_det_compact} ({format_pending_reconciliation_evidence(bp_det_recon)}).")
+        elif bp_det_bst == "UNKNOWN":
+            out.append("   * Keterangan     : MT5 STATUS UNKNOWN (Verifikasi pending order MT5 belum dapat dilakukan).")
+        else:
+            out.append("   * Keterangan     : BELUM DIPASANG DI MT5 (Rencana pending order agresif; eksekusi manual oleh trader).")
         out.append("   * Peringatan     : Setup agresif sebelum konfirmasi M5; pasang limit manual hanya jika siap menanggung risiko.")
+        alt_det_list = [
+            ap for ap in ((early_setups or {}).get("all_setups") or [])
+            if isinstance(ap, dict)
+            and ap.get("valid")
+            and str(ap.get("status") or "READY").upper() == "READY"
+            and not ap.get("is_expired")
+            and ap.get("zone_id")
+            and ap.get("zone_id") != best_p.get("zone_id")
+        ]
+        for idx_ap, ap_det in enumerate(alt_det_list, start=1):
+            ap_det_src = ap_det.get("source_zone_label") or (
+                f"{ap_det.get('timeframe', 'N/A')} {ap_det.get('zone_type', 'ZONE')} "
+                f"{float(ap_det.get('zone_low', 0.0)):.2f}-{float(ap_det.get('zone_high', 0.0)):.2f}"
+            )
+            ap_det_recon = ap_det.get("mt5_reconciliation") or {}
+            out.append(
+                f"   * Alt Pending #{idx_ap} : {ap_det_src} | Grade {ap_det.get('zone_grade', 'N/A')} ({float(ap_det.get('zone_score', 0.0)):.1f}) "
+                f"[{ap_det.get('zone_id', 'N/A')}] -> {ap_det.get('compact_status', 'READY')} "
+                f"(SL {float(ap_det.get('sl', 0.0)):.2f} | TP1 {float(ap_det.get('tp1', 0.0)):.2f} | RR 1:{float(ap_det.get('rr', 0.0)):.1f})"
+            )
+            out.append(f"     - Alt MT5 Reconcile  : {format_pending_reconciliation_evidence(ap_det_recon)}")
         if detailed:
             out.append("   * Penjelasan Level:")
             out.append(f"     - Zone Boundary           : Area reaksi institusional ({best_p.get('zone_low', 0.0):.2f} - {best_p.get('zone_high', 0.0):.2f}) tempat order berpotensi terisi.")
@@ -1725,28 +1886,39 @@ def _extract_risk_monitor_snapshot(
         }
 
     available = (pos_list is not None) or (orders_list is not None)
+    orders_query_ok = orders_list is not None
+    raw_orders_fetched = None
     if pos_list is None or orders_list is None:
         try:
             import MetaTrader5 as mt5
             import modules.mt5_conn as _mt5_conn
 
-            is_conn = bool(getattr(_mt5_conn, "TERHUBUNG_MT5", False))
+            is_conn = bool(getattr(_mt5_conn, "MT5_TERHUBUNG", False) or getattr(_mt5_conn, "TERHUBUNG_MT5", False))
             if not is_conn:
                 try:
-                    is_conn = mt5.terminal_info() is not None
+                    is_conn = bool(_mt5_conn.pastikan_mt5_aktif() or mt5.terminal_info() is not None)
                 except Exception:
                     is_conn = False
             if is_conn:
-                if pos_list is None:
-                    pos_list = mt5.positions_get(symbol=SYMBOL) or ()
-                if orders_list is None:
-                    orders_list = mt5.orders_get(symbol=SYMBOL) or ()
-                available = True
+                pos_raw = mt5.positions_get(symbol=SYMBOL) if pos_list is None else pos_list
+                ord_raw = mt5.orders_get(symbol=SYMBOL) if orders_list is None else orders_list
+                if pos_list is None and pos_raw is not None:
+                    pos_list = pos_raw
+                if orders_list is None and ord_raw is not None:
+                    orders_list = ord_raw
+                    orders_query_ok = True
+                    raw_orders_fetched = ord_raw
+                available = (pos_list is not None) or (orders_list is not None)
         except Exception:
             pass
 
     positions = list(pos_list or ())
     orders = list(orders_list or ())
+    orders_snapshot = fetch_mt5_pending_orders_snapshot(
+        symbol=SYMBOL,
+        orders_override=orders if orders_query_ok else None,
+        allow_live_query=False,
+    )
 
     def _get_float(obj: Any, key: str) -> float:
         if isinstance(obj, dict):
@@ -1773,6 +1945,7 @@ def _extract_risk_monitor_snapshot(
         "pending_without_tp": ord_no_tp,
         "positions": positions,
         "orders": orders,
+        "orders_snapshot": orders_snapshot,
     }
 
 

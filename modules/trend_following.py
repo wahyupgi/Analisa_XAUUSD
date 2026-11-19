@@ -2173,6 +2173,11 @@ def validate_m5_entry_confirmation(
             return res
 
     k_ref = int(ev["k"]) if ev else (int(cisd_ev["k"]) if cisd_ev else int(rej["k"]))
+    m5_tz_tf = str((getattr(df_m5, "attrs", {}) or {}).get("time_tz", "WIB"))
+    trig_ts = format_wib_timestamp(df_m5.index[k_ref], default_now=False, source_tz=m5_tz_tf) or str(df_m5.index[k_ref])
+    cand_zid = candidate.get("zone_id")
+    cand_tf = str(candidate.get("timeframe") or "M30")
+    cand_zt = str(candidate.get("zone_type") or ("DEMAND" if direction == "BUY" else "SUPPLY")).upper()
     trig_msg = (
         f"{ev['tipe']} {ev['arah']} @ {ev['level']:.2f}"
         if ev
@@ -2180,7 +2185,16 @@ def validate_m5_entry_confirmation(
     )
     if rej and ev:
         trig_msg = f"{trig_msg} + {rej['label']}"
-    stages["structure_trigger"] = {"status": "CONFIRMED", "msg": trig_msg, "k": k_ref}
+    stages["structure_trigger"] = {
+        "status": "CONFIRMED",
+        "msg": trig_msg,
+        "k": k_ref,
+        "zone_id": cand_zid,
+        "timeframe": cand_tf,
+        "zone_type": cand_zt,
+        "zone_range": (round(lo, 2), round(hi, 2)),
+        "timestamp": trig_ts,
+    }
 
     # 4. Displacement M5
     k0 = max(first_touch_k, k_ref - 3)
@@ -2199,7 +2213,14 @@ def validate_m5_entry_confirmation(
         stages["displacement"] = {"status": "WEAK", "msg": f"Displacement M5 {disp_atr:.2f} ATR < {min_disp:.2f}", "atr": disp_atr}
         W.append(stages["displacement"]["msg"])
         return res
-    stages["displacement"] = {"status": "CONFIRMED", "msg": f"Displacement M5 {disp_atr:.2f} ATR", "atr": disp_atr}
+    stages["displacement"] = {
+        "status": "CONFIRMED",
+        "msg": f"Displacement M5 {disp_atr:.2f} ATR",
+        "atr": disp_atr,
+        "zone_id": cand_zid,
+        "timeframe": cand_tf,
+        "timestamp": trig_ts,
+    }
 
     if k_ref + 1 < n5:
         post_c = C[k_ref + 1 : n5]
@@ -2218,8 +2239,24 @@ def validate_m5_entry_confirmation(
         "rejection": rej["label"] if rej else None,
         "displacement_atr": disp_atr,
         "technical_confirmed": True,
+        "zone_id": cand_zid,
+        "timeframe": cand_tf,
+        "zone_type": cand_zt,
+        "zone_range": (round(lo, 2), round(hi, 2)),
+        "timestamp": trig_ts,
+        "confirmed_at": trig_ts,
     }
     res["m5"] = dict(m5_tech_payload)
+    res["m5_confirmation"] = {
+        "zone_id": cand_zid,
+        "timeframe": cand_tf,
+        "zone_type": cand_zt,
+        "zone_range": (round(lo, 2), round(hi, 2)),
+        "timestamp": trig_ts,
+        "status": "CONFIRMED",
+        "structure_event": trig_msg,
+        "displacement_atr": disp_atr,
+    }
 
     bars_since_trig = (n5 - 1) - k_ref
     chase_tol = max(1.0, 0.5 * atr5)

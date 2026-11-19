@@ -8,9 +8,17 @@ Dipindahkan apa adanya dari modules/unified_monitor.py (structural refactoring, 
 Modul ini tidak bergantung pada unified_monitor (dependency satu arah); unified_monitor
 mengimpor kembali seluruh nama publiknya agar caller lama tetap kompatibel.
 """
+from modules.mt5_conn import (
+    fetch_mt5_pending_orders_snapshot,
+    format_pending_compact_status,
+    format_pending_reconciliation_evidence,
+    reconcile_pending_plan_with_mt5,
+    reconcile_pending_plans_batch,
+)
 from modules.snr.data_provider import safe_float
+from modules.snr.entry_validator import _is_live_active_snr_zone, select_live_snr_focus
 from modules.utils import format_wib_timestamp
-from modules.zone_scanner import format_smc_zone_lines
+from modules.zone_scanner import format_smc_zone_lines, smc_zone_summary
 
 
 def format_account_monitor_section(acc_data):
@@ -69,7 +77,386 @@ def format_account_monitor_section(acc_data):
         "AUDIT MODE      : STRICTLY READ-ONLY (Dilarang auto-close / auto-modify / auto-trade)",
     ]
     return "\n".join(lines)
-    return "\n".join(lines)
+
+
+def _format_pending_compact_tag(item, active_zone_id=None, is_selected=True):
+    if not isinstance(item, dict):
+        return "WAIT"
+    plan_st = str(item.get("plan_status") or item.get("status") or "WAIT").strip()
+    if not plan_st.upper().startswith("READY"):
+        return plan_st
+    if item.get("compact_status"):
+        return str(item["compact_status"])
+    recon = item.get("mt5_reconciliation")
+    if isinstance(recon, dict):
+        return format_pending_compact_status(
+            "READY",
+            recon,
+            order_type=str(item.get("order_type") or ""),
+            entry_price=safe_float(item.get("entry"), 0.0),
+        )
+    return str(item.get("status") or "READY | MT5 STATUS UNKNOWN")
+
+
+def resolve_monitor_pending_plans(
+    decision,
+    scan,
+    active_zone,
+    tracker,
+    data_invalid,
+    completed_zone_id=None,
+    zone_usable_fn=None,
+    mt5_orders_snapshot=None,
+    symbol=None,
+):
+    """
+    Satu sumber otoritatif untuk Selected Pending Plan dan alternatif pending valid dalam 1 siklus monitor.
+    - Tidak mengubah ranking/strategi `detect_early_setups`.
+    - Memvalidasi setiap kandidat terhadap lifecycle live (`scan` + `ZoneTracker` + `completed_zone_id`).
+    - Memisahkan `plan_status` (READY/WAIT/INVALID/EXPIRED) dari `broker_order_status`
+      (NOT_PLACED/PLACED_VERIFIED/PLACED_MISMATCH/OTHER_ORDER_EXISTS/UNKNOWN) melalui rekonsiliasi MT5 read-only.
+    """
+    dec = decision if isinstance(decision, dict) else {}
+    sc = scan if isinstance(scan, dict) else {}
+    eff_symbol = symbol or sc.get("symbol") or dec.get("symbol")
+    ord_snap = (
+        mt5_orders_snapshot
+        if mt5_orders_snapshot is not None
+        else (sc.get("mt5_orders_snapshot") or dec.get("mt5_orders_snapshot"))
+    )
+    if not (isinstance(ord_snap, dict) and "query_ok" in ord_snap and "orders" in ord_snap):
+        ord_snap = fetch_mt5_pending_orders_snapshot(symbol=eff_symbol, orders_override=ord_snap)
+
+    early = dec.get("early_setup") if isinstance(dec.get("early_setup"), dict) else {}
+    best_raw = early.get("best_setup") if isinstance(early.get("best_setup"), dict) else None
+    all_raw = list(early.get("all_setups") or [])
+
+    raw_list = []
+    seen_keys = set()
+    for item in ([best_raw] if best_raw else []) + all_raw:
+        if not isinstance(item, dict):
+            continue
+        zid = str(item.get("zone_id") or item.get("source_zone_id") or "").strip()
+        key = zid or f"_anon_{len(raw_list)}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        raw_list.append(item)
+
+    live_by_id = {}
+    for z in (sc.get("active_zones") or []) + (sc.get("radar_zones") or []):
+        if isinstance(z, dict) and z.get("zone_id") and z["zone_id"] not in live_by_id:
+            live_by_id[str(z["zone_id"])] = z
+    rejected_ids = {
+        str(z.get("zone_id"))
+        for z in (sc.get("rejected_zones") or [])
+        if isinstance(z, dict) and z.get("zone_id") and str(z.get("zone_id")) not in live_by_id
+    }
+
+    r_prio = dec.get("radar_priority") or sc.get("radar_priority") or {}
+    prim_ref = r_prio.get("primary_directional_zone") or r_prio.get("primary_zone") or {}
+    primary_zid = str(prim_ref.get("zone_id") or "") if isinstance(prim_ref, dict) else ""
+    active_zid = str((active_zone or {}).get("zone_id") or "") if isinstance(active_zone, dict) else ""
+
+    valid_items = []
+    if not data_invalid:
+        for raw_p in raw_list:
+            if raw_p.get("valid") is False or raw_p.get("is_expired") or raw_p.get("is_expiration_error"):
+                continue
+            st_raw = str(raw_p.get("plan_status") or raw_p.get("early_pending_status") or raw_p.get("status") or "").upper()
+            if not st_raw.startswith("READY"):
+                continue
+            p_zid = str(raw_p.get("zone_id") or raw_p.get("source_zone_id") or "").strip()
+            live_z = None
+            if p_zid:
+                if completed_zone_id and p_zid == completed_zone_id:
+                    continue
+                if p_zid in rejected_ids:
+                    continue
+                live_z = live_by_id.get(p_zid)
+                if live_z is not None:
+                    if callable(zone_usable_fn) and not zone_usable_fn(live_z):
+                        continue
+                    if str(live_z.get("risk_tier") or "").upper() == "FAR_ZONE":
+                        continue
+                    if str(live_z.get("radar_eligibility") or "QUALIFIED").upper() == "NOT_QUALIFIED":
+                        continue
+                if tracker is not None and hasattr(tracker, "get_zone"):
+                    trk = tracker.get_zone(p_zid)
+                    trk_st = str((trk or {}).get("lifecycle_status") or (trk or {}).get("status") or "").upper()
+                    if trk_st in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN"):
+                        continue
+
+            order_type = str(raw_p.get("order_type") or "").upper()
+            p_dir = "BUY" if "BUY" in order_type else ("SELL" if "SELL" in order_type else "NONE")
+            entry_v = safe_float(raw_p.get("entry_price", raw_p.get("entry")), 0.0)
+            sl_v = safe_float(raw_p.get("sl"), 0.0)
+            tp1_v = safe_float(raw_p.get("tp1"), 0.0)
+            tp2_v = safe_float(raw_p.get("tp2"), 0.0)
+            if p_dir not in ("BUY", "SELL") or entry_v <= 0 or sl_v <= 0 or tp1_v <= 0:
+                continue
+            if p_dir == "BUY" and not (sl_v < entry_v < tp1_v):
+                continue
+            if p_dir == "SELL" and not (tp1_v < entry_v < sl_v):
+                continue
+
+            p_lo = safe_float(raw_p.get("zone_low", raw_p.get("price_low", (live_z or {}).get("price_low"))), 0.0)
+            p_hi = safe_float(raw_p.get("zone_high", raw_p.get("price_high", (live_z or {}).get("price_high"))), 0.0)
+            p_tf = str((live_z or {}).get("timeframe") or raw_p.get("timeframe") or raw_p.get("zone_timeframe") or "H1")
+            p_zt = str((live_z or {}).get("zone_type") or raw_p.get("zone_type") or ("DEMAND" if p_dir == "BUY" else ("SUPPLY" if p_dir == "SELL" else ""))).upper()
+            p_grade = str((live_z or {}).get("grade") or raw_p.get("zone_grade") or "N/A")
+            raw_sc = (live_z or {}).get("score") if (live_z and live_z.get("score") is not None) else raw_p.get("zone_score")
+            p_score = safe_float(raw_sc) if raw_sc is not None else None
+            is_active = bool(p_zid and active_zid and p_zid == active_zid)
+            is_prim = bool(p_zid and primary_zid and p_zid == primary_zid)
+            src_role = (
+                "ACTIVE_FOCUS" if is_active
+                else ("PRIMARY_ZONE" if is_prim else "NON_FOCUS_ZONE")
+            )
+            src_label = raw_p.get("source_zone_label") or (
+                f"{p_tf} {p_zt} {p_lo:.2f}-{p_hi:.2f}".strip() if (p_lo > 0 and p_hi > 0) else f"{p_tf} {p_zt}".strip()
+            )
+            synced_plan = dict(raw_p)
+            if live_z is not None:
+                synced_plan["zone_grade"] = p_grade
+                if p_score is not None:
+                    synced_plan["zone_score"] = p_score
+            item_struct = {
+                "setup_id": f"{p_zid}:{p_dir}:{raw_p.get('setup_type', 'PENDING')}" if p_zid else "N/A",
+                "zone_id": p_zid or "N/A",
+                "source_zone_id": p_zid or "N/A",
+                "source_zone_label": src_label,
+                "source_role": src_role,
+                "is_active_focus": is_active,
+                "is_primary_zone": is_prim,
+                "plan_role": "CANDIDATE",
+                "direction": p_dir,
+                "order_type": order_type or ("BUY LIMIT" if p_dir == "BUY" else ("SELL LIMIT" if p_dir == "SELL" else "NONE")),
+                "zone_type": p_zt,
+                "zone_range": (p_lo, p_hi),
+                "setup_type": str(raw_p.get("setup_type") or "PENDING"),
+                "timeframe": p_tf,
+                "zone_grade": p_grade,
+                "zone_score": p_score,
+                "entry": entry_v or None,
+                "sl": sl_v or None,
+                "tp1": tp1_v or None,
+                "tp2": tp2_v or None,
+                "rr": safe_float(raw_p.get("rr", raw_p.get("rr_tp1")), 0.0) or None,
+                "created_at": raw_p.get("created_at") or None,
+                "expires_at": raw_p.get("expires_at") or raw_p.get("suggested_expiration") or None,
+                "suggested_expiration": raw_p.get("suggested_expiration") or raw_p.get("expires_at") or None,
+                "remaining": raw_p.get("remaining") or None,
+                "snapshot_id": raw_p.get("snapshot_id") or sc.get("snapshot_id") or dec.get("snapshot_id"),
+                "snapshot_time": raw_p.get("snapshot_time") or sc.get("snapshot_time") or dec.get("snapshot_time"),
+                "plan_status": "READY",
+                "broker_order_status": "UNKNOWN",
+                "mt5_execution_state": "UNKNOWN",
+                "status": "READY",
+                "is_placed": False,
+                "raw_plan": synced_plan,
+            }
+            valid_items.append(item_struct)
+
+    if valid_items:
+        best_zid = str((best_raw or {}).get("zone_id") or (best_raw or {}).get("source_zone_id") or "").strip() if isinstance(best_raw, dict) else ""
+        selected = next((it for it in valid_items if best_zid and it.get("zone_id") == best_zid), valid_items[0])
+        selected["plan_role"] = "SELECTED_PENDING"
+        alternatives = []
+        for it in valid_items:
+            if it is selected or (selected.get("zone_id") != "N/A" and it.get("zone_id") == selected.get("zone_id")):
+                continue
+            it["plan_role"] = "ALT_PENDING"
+            alternatives.append(it)
+
+        ordered_plans = [selected, *alternatives]
+        reconcile_pending_plans_batch(ordered_plans, mt5_snapshot=ord_snap, symbol=eff_symbol)
+        for it_p in ordered_plans:
+            it_p["status"] = it_p.get("compact_status") or format_pending_compact_status(
+                it_p.get("plan_status", "READY"),
+                it_p.get("mt5_reconciliation"),
+                order_type=it_p.get("order_type", ""),
+                entry_price=safe_float(it_p.get("entry"), 0.0),
+            )
+            raw_ref = it_p.get("raw_plan")
+            if isinstance(raw_ref, dict):
+                raw_ref["plan_status"] = it_p["plan_status"]
+                raw_ref["broker_order_status"] = it_p["broker_order_status"]
+                raw_ref["mt5_execution_state"] = it_p["mt5_execution_state"]
+                raw_ref["is_placed"] = it_p["is_placed"]
+                raw_ref["sl_missing_high_risk"] = it_p.get("sl_missing_high_risk", False)
+                raw_ref["mt5_reconciliation"] = it_p.get("mt5_reconciliation")
+                raw_ref["compact_status"] = it_p["status"]
+
+        selected_setup = {k: v for k, v in selected.items() if k != "raw_plan"}
+        selected_setup["alternatives"] = [{k: v for k, v in alt.items() if k != "raw_plan"} for alt in alternatives]
+        return {
+            "selected_plan": selected["raw_plan"],
+            "pending_setup": selected_setup,
+            "alt_pending_setups": selected_setup["alternatives"],
+            "pending_status": selected_setup["status"],
+        }
+
+    empty_recon = reconcile_pending_plan_with_mt5({"plan_status": "WAIT"}, mt5_snapshot=ord_snap, symbol=eff_symbol)
+    empty_setup = {
+        "setup_id": "N/A",
+        "zone_id": "N/A",
+        "source_zone_id": "N/A",
+        "source_zone_label": "NONE",
+        "source_role": "NONE",
+        "direction": "NONE",
+        "order_type": "NONE",
+        "zone_type": "",
+        "zone_range": (0.0, 0.0),
+        "setup_type": "PENDING",
+        "timeframe": "N/A",
+        "zone_grade": "N/A",
+        "zone_score": None,
+        "entry": None,
+        "sl": None,
+        "tp1": None,
+        "tp2": None,
+        "rr": None,
+        "created_at": None,
+        "expires_at": None,
+        "suggested_expiration": None,
+        "remaining": None,
+        "snapshot_id": sc.get("snapshot_id") or dec.get("snapshot_id"),
+        "snapshot_time": sc.get("snapshot_time") or dec.get("snapshot_time"),
+        "plan_status": "WAIT",
+        "broker_order_status": empty_recon["broker_order_status"],
+        "mt5_execution_state": empty_recon["broker_order_status"],
+        "mt5_reconciliation": empty_recon,
+        "status": "WAIT",
+        "is_placed": False,
+        "alternatives": [],
+    }
+    return {
+        "selected_plan": {},
+        "pending_setup": empty_setup,
+        "alt_pending_setups": [],
+        "pending_status": "WAIT",
+    }
+
+
+def classify_monitor_alerts(alerts, risk_warnings=None, default_ts=None):
+    """
+    Pisahkan alert monitor ke 5 kategori tegas:
+    - RISK_ALERT      : critical risk warning (tanpa SL, MT5 disconnected, spread terlalu lebar, SNR critical).
+    - MARKET_ALERT    : breakdown, breakout, reclaim, retest, rejection, broken, sweep, touch/approaching aktif.
+    - ENTRY_ALERT     : pending ready, confirmed entry (BUY/SELL setup).
+    - ACCOUNT_ALERT   : posisi/order MT5 dan status fokus-posisi.
+    - HISTORICAL_INFO : event lama/historis, bukan current alert.
+    """
+    categorized = {
+        "risk": [],
+        "market": [],
+        "entry": [],
+        "account": [],
+        "historical": [],
+        "critical_risk": [],
+        "events": [],
+    }
+    seen = set()
+    raw_items = []
+    for item in (alerts or []):
+        raw_items.append((item, False))
+    for item in (risk_warnings or []):
+        raw_items.append((item, True))
+
+    for raw, from_risk in raw_items:
+        msg = str(raw or "").replace("\n", " ").strip()
+        if not msg or msg in seen:
+            continue
+        seen.add(msg)
+        up = msg.upper()
+        is_critical = bool(
+            from_risk
+            or "[RISK WARNING]" in up
+            or "TANPA STOP LOSS" in up
+            or "[SNR CRITICAL]" in up
+            or "MT5 DISCONNECTED" in up
+            or "RISK ALERT" in up
+            or "SPREAD TOO HIGH" in up
+        )
+
+        # 1. HISTORICAL_INFO (event lama — tidak pernah dipromosikan menjadi current alert)
+        if any(tok in up for tok in ("(HISTORIS)", "HISTORICAL", "PERNAH DISENTUH", "MARKET CLOSED")):
+            cat = "HISTORICAL_INFO"
+            prio = 10
+        # 2. RISK_ALERT (critical risk warning — wajib selalu dipertahankan)
+        elif is_critical:
+            cat = "RISK_ALERT"
+            prio = 88
+        # 3. ACCOUNT_ALERT (posisi/order MT5, fokus-posisi, koneksi/spread normal)
+        elif any(tok in up for tok in (
+            "[RISK", "[ACCOUNT RISK]", "[DATA]",
+            "POSISI MT5", "POSISI DIBUKA", "RUNNING: POSISI", "POSISI AMBIGU",
+            "TIDAK LAGI TERLIHAT", "BELUM ADA POSISI", "SEBELUM POSISI TERDETEKSI",
+            "HASIL BELUM DIPASTIKAN", "RIWAYAT TICK", "RIWAYAT TIDAK LENGKAP",
+            "MT5 RECONNECTED", "SPREAD NORMAL",
+            "DATA UNAVAILABLE", "RENCANA SL/TP1", "SL RENCANA", "TP1 RENCANA",
+        )):
+            cat = "ACCOUNT_ALERT"
+            prio = 30
+        # 4. ENTRY_ALERT (confirmed entry / pending ready)
+        elif any(tok in up for tok in (
+            "BUY SETUP", "SELL SETUP", "SETUP TERKONFIRMASI", "PENDING READY",
+            "READY UNTUK BUY", "READY UNTUK SELL", "[READY:",
+        )):
+            cat = "ENTRY_ALERT"
+            prio = 100 if any(tok in up for tok in ("CONFIRMED", "TERKONFIRMASI", "BUY SETUP", "SELL SETUP")) else 75
+        # 5. MARKET_ALERT (breakdown, breakout, reclaim, retest, rejection, broken, structure, touch)
+        elif any(tok in up for tok in (
+            "BREAKDOWN", "BREAKOUT", "RECLAIM", "RETEST", "REJECTION", "BROKEN", "DITEMBUS",
+            "CHOCH", "BOS M5", "LIQUIDITY SWEEP", "DISPLACEMENT",
+            "ZONE TOUCH", "HARGA DI ZONA", "HARGA DI SUPPORT", "HARGA DI RESISTANCE",
+            "HARGA DEKAT", "APPROACHING", "PERUBAHAN ZONA", "FOCUS CHANGED", "INVALID", "TERMITIGASI",
+        )):
+            cat = "MARKET_ALERT"
+            if any(tok in up for tok in ("BREAKDOWN", "BREAKOUT", "RECLAIM", "RETEST")):
+                prio = 95
+            elif any(tok in up for tok in ("REJECTION", "BROKEN", "DITEMBUS", "CHOCH", "BOS M5", "SWEEP", "DISPLACEMENT")):
+                prio = 90
+            elif any(tok in up for tok in ("INVALID", "TERMITIGASI")):
+                prio = 70
+            elif any(tok in up for tok in ("PERUBAHAN ZONA", "FOCUS CHANGED")):
+                prio = 65
+            else:
+                prio = 60
+        else:
+            cat = "ACCOUNT_ALERT"
+            prio = 25
+
+        source = (
+            "SNR" if up.startswith("[SNR") else
+            "SMC" if up.startswith("[SMC") else
+            "RISK" if (from_risk or is_critical or up.startswith("[RISK") or up.startswith("[ACCOUNT")) else
+            "DATA" if up.startswith("[DATA") else
+            "MONITOR"
+        )
+        ev = {
+            "category": cat,
+            "priority": prio,
+            "is_critical": is_critical,
+            "source": source,
+            "timestamp": str(default_ts) if default_ts else None,
+            "message": msg,
+        }
+        categorized["events"].append(ev)
+        if cat == "RISK_ALERT":
+            categorized["risk"].append(msg)
+            categorized["critical_risk"].append(msg)
+        elif cat == "MARKET_ALERT":
+            categorized["market"].append(msg)
+        elif cat == "ENTRY_ALERT":
+            categorized["entry"].append(msg)
+        elif cat == "ACCOUNT_ALERT":
+            categorized["account"].append(msg)
+        else:
+            categorized["historical"].append(msg)
+
+    return categorized
 
 
 def _as_monitor_zone(zone):
@@ -80,6 +467,43 @@ def _as_monitor_zone(zone):
         converted = to_dict()
         return converted if isinstance(converted, dict) else {}
     return {}
+
+
+def _m5_stages_match_zone(decision, zone):
+    """True hanya jika hasil evaluasi/konfirmasi M5 pada decision benar-benar milik zone target."""
+    if not isinstance(decision, dict) or not isinstance(zone, dict):
+        return False
+    target_zid = str(zone.get("zone_id") or "").strip()
+    if not target_zid or target_zid in ("N/A", "NONE"):
+        return False
+    if str(zone.get("source") or "SMC").strip().upper() == "SNR":
+        return False
+    stages = decision.get("m5_stages") or decision.get("stages") or {}
+    trig = stages.get("structure_trigger") if isinstance(stages.get("structure_trigger"), dict) else {}
+    m5_conf = decision.get("m5_confirmation") if isinstance(decision.get("m5_confirmation"), dict) else {}
+    m5_obj = decision.get("m5") if isinstance(decision.get("m5"), dict) else {}
+    dec_zone = decision.get("zone") if isinstance(decision.get("zone"), dict) else {}
+    origin_zid = str(
+        decision.get("m5_stages_zone_id")
+        or m5_conf.get("zone_id")
+        or trig.get("zone_id")
+        or m5_obj.get("zone_id")
+        or dec_zone.get("zone_id")
+        or ""
+    ).strip()
+    if not origin_zid or origin_zid != target_zid:
+        return False
+    origin_tf = str(
+        m5_conf.get("timeframe")
+        or trig.get("timeframe")
+        or m5_obj.get("timeframe")
+        or dec_zone.get("timeframe")
+        or ""
+    ).strip().upper()
+    target_tf = str(zone.get("timeframe") or "").strip().upper()
+    if origin_tf and target_tf and origin_tf != target_tf:
+        return False
+    return True
 
 
 def _calc_zone_touch(z, p, stages_dict, trk_rec, life_st):
@@ -130,12 +554,23 @@ def _smart_monitor_context(cycle_result):
     snr_decision = snr.get("decision") if isinstance(snr.get("decision"), dict) else {}
 
     def _zone_is_usable(candidate):
-        if not isinstance(candidate, dict) or candidate.get("is_valid") is False or candidate.get("is_active") is False:
+        if (
+            not isinstance(candidate, dict)
+            or candidate.get("is_valid") is False
+            or candidate.get("is_active") is False
+            or candidate.get("is_broken") is True
+            or candidate.get("is_invalidated") is True
+            or str(candidate.get("grade") or "").upper() == "REJECTED"
+        ):
             return False
         status = str(candidate.get("lifecycle_status") or candidate.get("status") or "ACTIVE").upper()
         freshness_status = str(candidate.get("freshness") or candidate.get("freshness_status") or "FRESH").upper()
         return (
-            status not in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN")
+            status not in (
+                "INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN",
+                "RECLAIMED", "RECLAIM_PENDING", "RETEST",
+                "BREAKDOWN_PENDING", "BREAKOUT_PENDING", "HISTORICAL", "UNCONFIRMED",
+            )
             and freshness_status not in ("INVALIDATED", "EXPIRED", "MITIGATED", "STALE", "INVALID")
         )
 
@@ -190,13 +625,6 @@ def _smart_monitor_context(cycle_result):
                     zone["zone_type"] = zone["type"]
                 break
 
-    pending = decision.get("early_setup") or {}
-    if not isinstance(pending, dict):
-        pending = {}
-    plan = pending.get("best_setup") or {}
-    if not isinstance(plan, dict):
-        plan = {}
-
     price = safe_float(snapshot.get("snapshot_price", snapshot.get("bid")), 0.0)
     lo = safe_float(zone.get("price_low", zone.get("low")), 0.0)
     hi = safe_float(zone.get("price_high", zone.get("high")), 0.0)
@@ -227,14 +655,21 @@ def _smart_monitor_context(cycle_result):
         "lifecycle_status": str(zone.get("lifecycle_status") or zone.get("status") or "RADAR").upper(),
     })
 
-    snr_bias = str((snr_scan.get("market_bias") or {}).get("overall_bias") or "").upper()
+    snr_mb = snr_scan.get("market_bias") if isinstance(snr_scan.get("market_bias"), dict) else {}
+    snr_h4_bias = str(snr_mb.get("h4") or "").upper()
+    snr_overall_bias = str(snr_mb.get("overall_bias") or "").upper()
+    snr_bias = snr_h4_bias if snr_h4_bias in ("BULLISH", "BEARISH") else snr_overall_bias
     snr_zones = snr_scan.get("ranked_zones") or {}
-    snr_zone = (
+    live_snr_sel = select_live_snr_focus(snr_zones, snr_mb, price)
+    active_sups = [z for z in live_snr_sel["active_supports"] if _zone_is_usable(z)]
+    active_ress = [z for z in live_snr_sel["active_resistances"] if _zone_is_usable(z)]
+    raw_snr_target = (
         snr_decision.get("target_zone")
         or (snr_scan.get("entry_validation") or {}).get("target_zone")
         or snr_decision.get("trend_entry_zone")
         or {}
     )
+    snr_zone = raw_snr_target
     def _same_snr_identity(z1, z2):
         if not isinstance(z1, dict) or not isinstance(z2, dict):
             return False
@@ -269,6 +704,10 @@ def _smart_monitor_context(cycle_result):
         snr_pool = (
             list(snr_zones.get("active_supports") or [])
             + list(snr_zones.get("active_resistances") or [])
+            + list(snr_zones.get("pending_break_zones") or [])
+            + list(snr_zones.get("broken_zones") or [])
+            + list(snr_zones.get("reclaimed_zones") or [])
+            + list(snr_zones.get("historical_zones") or [])
             + list(snr_zones.get("all_zones") or [])
         )
         matched_snr = next((cand for cand in snr_pool if _same_snr_identity(snr_zone, cand)), None)
@@ -277,32 +716,235 @@ def _smart_monitor_context(cycle_result):
             for meta_key in (
                 "grade", "score", "rank_label", "zone_type", "timeframe", "source",
                 "confirmed_time", "confirmation_time", "formation_time", "risk_tier", "distance", "distance_points",
+                "lifecycle_status", "status", "is_broken", "is_invalidated", "is_active", "breakout_info",
             ):
                 if meta_key in matched_snr and matched_snr.get(meta_key) is not None:
                     enriched_snr[meta_key] = matched_snr.get(meta_key)
             snr_zone = enriched_snr
-    snr_zone_direction = (
-        str(snr_decision.get("signal")).upper() if snr_decision.get("signal") in ("BUY", "SELL")
-        else "SELL" if snr_zone.get("zone_type") == "RESISTANCE" or "R" in str(snr_zone.get("rank_label", "")).upper()
-        else "BUY" if snr_zone.get("zone_type") == "SUPPORT" or "S" in str(snr_zone.get("rank_label", "")).upper() else "NONE"
-    )
-    if not snr_zone and snr_bias == "BEARISH":
-        choices = snr_zones.get("active_resistances") or []
-        if choices:
-            snr_zone, snr_zone_direction = choices[0], "SELL"
-    elif not snr_zone and snr_bias == "BULLISH":
-        choices = snr_zones.get("active_supports") or []
-        if choices:
-            snr_zone, snr_zone_direction = choices[0], "BUY"
-    if not snr_zone and h4_bias_ctx not in ("BULLISH", "BEARISH"):
-        choices = snr_zones.get("active_supports") or []
-        snr_zone = choices[0] if choices else {}
-        snr_zone_direction = "BUY" if snr_zone else "NONE"
-    if not snr_zone and h4_bias_ctx not in ("BULLISH", "BEARISH"):
-        choices = snr_zones.get("active_resistances") or []
-        snr_zone = choices[0] if choices else {}
-        snr_zone_direction = "SELL" if snr_zone else "NONE"
 
+    snr_live_sig_pre = str(snr_decision.get("signal") or "WAIT").upper()
+    live_focus_cand = live_snr_sel.get("focus_zone")
+    live_focus_usable = bool(isinstance(live_focus_cand, dict) and _zone_is_usable(live_focus_cand))
+
+    def _snr_side_valid_for_live_price(cand_z):
+        if not _zone_is_usable(cand_z):
+            return False
+        rk = str(cand_z.get("rank_label") or "").upper()
+        zt = str(
+            cand_z.get("zone_type")
+            or ("RESISTANCE" if rk.startswith("R") else ("SUPPORT" if rk.startswith("S") else ""))
+        ).upper()
+        if zt in ("SUPPORT", "RESISTANCE"):
+            return _is_live_active_snr_zone(cand_z, zt, price)
+        return True
+
+    snr_overridden = False
+    # Pertahankan target_zone jika SNR sedang menerbitkan sinyal entry live terkonfirmasi (BUY/SELL) pada zona valid;
+    # selain itu gunakan satu sumber kebenaran `select_live_snr_focus` agar konsisten dengan `scan snr` & harga live.
+    if snr_live_sig_pre in ("BUY", "SELL") and _snr_side_valid_for_live_price(snr_zone):
+        pass
+    elif live_focus_usable:
+        if not isinstance(snr_zone, dict) or snr_zone.get("zone_id") != live_focus_cand.get("zone_id"):
+            snr_overridden = bool(raw_snr_target)
+        snr_zone = dict(live_focus_cand)
+    elif not _snr_side_valid_for_live_price(snr_zone):
+        snr_zone = {}
+        snr_overridden = bool(raw_snr_target)
+
+    # Propagasikan status breakdown / breakout / reclaim SNR terbaru ke Smart Monitor (informational, independen dari SMC)
+    snr_breakout_watch = ""
+    snr_historical_watch = ""
+    historical_events_meta = []
+    if snr.get("status") == "OK":
+        def _is_nearby_watch(z_item):
+            if not isinstance(z_item, dict) or z_item.get("is_distant_historical"):
+                return False
+            d_atr = safe_float(z_item.get("distance_atr"), 0.0)
+            if d_atr > 12.0:
+                return False
+            bo_i = z_item.get("breakout_info") if isinstance(z_item.get("breakout_info"), dict) else {}
+            if bo_i.get("is_historical_break") and d_atr > 6.0:
+                return False
+            return True
+
+        def _is_current_watch(z_item):
+            if not _is_nearby_watch(z_item):
+                return False
+            if z_item.get("lifecycle_is_historical"):
+                return False
+            st_up = str(z_item.get("lifecycle_status") or z_item.get("status") or "").upper()
+            bars_ago = int(safe_float(z_item.get("lifecycle_bars_ago"), 0))
+            if st_up == "RECLAIMED" and bars_ago > 1:
+                return False
+            bo_i = z_item.get("breakout_info") if isinstance(z_item.get("breakout_info"), dict) else {}
+            if bo_i.get("is_historical_break"):
+                return False
+            return True
+
+        pend_watch = [z for z in (snr_zones.get("pending_break_zones") or []) if _is_current_watch(z)]
+        recl_pool = [z for z in (snr_zones.get("reclaimed_zones") or []) if isinstance(z, dict)]
+        recl_watch = [z for z in recl_pool if _is_current_watch(z)]
+        recl_hist = [z for z in recl_pool if not _is_current_watch(z)]
+        recl_hist.sort(
+            key=lambda item: (
+                str(item.get("lifecycle_event_time") or (item.get("breakout_info") or {}).get("breakout_bar_time") or ""),
+                str(item.get("zone_id") or ""),
+            ),
+            reverse=True,
+        )
+        brok_watch = [
+            z for z in (snr_zones.get("broken_zones") or [])
+            if _is_current_watch(z) and str(z.get("lifecycle_status") or z.get("status") or "").upper() in ("BROKEN", "RETEST")
+        ]
+        if pend_watch:
+            pw = pend_watch[0]
+            p_zt = str(pw.get("zone_type") or "").upper()
+            p_tag = "POTENTIAL BREAKDOWN" if p_zt == "SUPPORT" else "POTENTIAL BREAKOUT"
+            snr_breakout_watch = f"{p_tag} ({pw.get('timeframe', '')} {p_zt} {safe_float(pw.get('low')):.2f}-{safe_float(pw.get('high')):.2f})".replace("  ", " ")
+        elif recl_watch:
+            rw = recl_watch[0]
+            r_st = str(rw.get("lifecycle_status") or "RECLAIMED").upper().replace("_", " ")
+            r_zt = str(rw.get("zone_type") or "").upper()
+            snr_breakout_watch = f"{r_st} ({rw.get('timeframe', '')} {r_zt} {safe_float(rw.get('low')):.2f}-{safe_float(rw.get('high')):.2f})".replace("  ", " ")
+        elif brok_watch:
+            bw = brok_watch[0]
+            b_zt = str(bw.get("zone_type") or "").upper()
+            b_tag = "SUPPORT BROKEN" if b_zt == "SUPPORT" else "RESISTANCE BROKEN"
+            snr_breakout_watch = f"{b_tag} ({bw.get('timeframe', '')} {safe_float(bw.get('low')):.2f}-{safe_float(bw.get('high')):.2f})".replace("  ", " ")
+        else:
+            snr_pa = snr_scan.get("price_action") or {}
+            pa_code = str(snr_pa.get("breakout_code") or "NO_BREAKOUT").upper()
+            if pa_code in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION") and not snr_pa.get("breakout_is_historical"):
+                pa_bt = str(snr_pa.get("break_type") or pa_code).replace("_", " ")
+                pa_lbl = str(snr_pa.get("breakout_zone_label") or "").strip()
+                snr_breakout_watch = f"{pa_bt} ({pa_lbl})" if pa_lbl and pa_lbl != "NONE" else pa_bt
+        for rh in recl_hist[:5]:
+            rh_st = str(rh.get("lifecycle_status") or "RECLAIMED").upper()
+            rh_zt = str(rh.get("zone_type") or "").upper()
+            rh_ts = str(rh.get("lifecycle_event_time") or (rh.get("breakout_info") or {}).get("breakout_bar_time") or "").strip()
+            rh_ts_short = rh_ts[:16] if len(rh_ts) >= 16 else rh_ts
+            rh_ts_part = f" | {rh_ts_short}" if rh_ts_short else ""
+            rh_lbl = f"SNR {rh_st.replace('_', ' ')} HISTORICAL ({rh.get('timeframe', '')} {rh_zt} {safe_float(rh.get('low')):.2f}-{safe_float(rh.get('high')):.2f}{rh_ts_part})".replace("  ", " ")
+            historical_events_meta.append({
+                "zone_id": rh.get("zone_id"),
+                "timeframe": rh.get("timeframe"),
+                "zone_type": rh_zt,
+                "event_type": str(rh.get("lifecycle_event") or rh_st).upper(),
+                "lifecycle_status": rh_st,
+                "timestamp": rh_ts or None,
+                "label": rh_lbl,
+            })
+        # Pertahankan event historis SNR yang relevan (mis. rejection / breakout / retest lama)
+        # terpisah dari current alerts, terdedup dengan (zone_id, event_type, timestamp).
+        seen_hist_keys = {
+            (
+                str(ev.get("zone_id") or "").upper(),
+                str(ev.get("event_type") or "").upper(),
+                str(ev.get("timestamp") or "").strip(),
+            )
+            for ev in historical_events_meta
+        }
+        snr_pa_hist = snr_scan.get("price_action") if isinstance(snr_scan.get("price_action"), dict) else {}
+        rej_det_h = snr_pa_hist.get("rejection_detail") if isinstance(snr_pa_hist.get("rejection_detail"), dict) else {}
+        if rej_det_h.get("confirmed") and bool(snr_pa_hist.get("rejection_is_historical") or rej_det_h.get("is_historical")):
+            r_ev_type = str(rej_det_h.get("status") or snr_pa_hist.get("rejection_code") or "REJECTION").upper()
+            r_ts = str(rej_det_h.get("bar_time") or "").strip()
+            r_zid = rej_det_h.get("zone_id")
+            r_key = (str(r_zid or "").upper(), r_ev_type, r_ts)
+            if r_key not in seen_hist_keys:
+                seen_hist_keys.add(r_key)
+                r_ts_short = r_ts[:16] if len(r_ts) >= 16 else r_ts
+                r_z_lbl = str(rej_det_h.get("zone_label") or snr_pa_hist.get("rejection_zone_label") or "SNR").strip()
+                r_ts_part = f" | {r_ts_short}" if r_ts_short else ""
+                historical_events_meta.append({
+                    "zone_id": r_zid,
+                    "timeframe": rej_det_h.get("timeframe"),
+                    "zone_type": str(rej_det_h.get("zone_type") or "").upper(),
+                    "event_type": r_ev_type,
+                    "lifecycle_status": "HISTORICAL",
+                    "timestamp": r_ts or None,
+                    "label": f"SNR {r_ev_type.replace('_', ' ')} HISTORICAL ({r_z_lbl}{r_ts_part})",
+                })
+        for hev in (snr.get("historical_events") or []):
+            if not isinstance(hev, dict):
+                continue
+            h_zid = hev.get("zone_id")
+            h_ev = str(hev.get("event_type") or "HISTORICAL").upper()
+            h_ts = str(hev.get("timestamp") or "").strip()
+            h_key = (str(h_zid or "").upper(), h_ev, h_ts)
+            if h_key in seen_hist_keys:
+                continue
+            seen_hist_keys.add(h_key)
+            h_msg = str(hev.get("message") or "").strip()
+            if h_msg:
+                historical_events_meta.append({
+                    "zone_id": h_zid,
+                    "timeframe": None,
+                    "zone_type": None,
+                    "event_type": h_ev,
+                    "lifecycle_status": "HISTORICAL",
+                    "timestamp": h_ts or None,
+                    "label": h_msg,
+                })
+        if historical_events_meta:
+            snr_historical_watch = historical_events_meta[0]["label"]
+    if not snr_zone and snr_bias == "BEARISH":
+        if active_ress:
+            snr_zone = dict(active_ress[0])
+            snr_overridden = True
+    elif not snr_zone and snr_bias == "BULLISH":
+        if active_sups:
+            snr_zone = dict(active_sups[0])
+            snr_overridden = True
+    if not snr_zone and (active_sups or active_ress):
+        pool_fb = active_sups + active_ress
+        if price > 0:
+            snr_zone = dict(min(
+                pool_fb,
+                key=lambda z: (
+                    0.0 if safe_float(z.get("low"), 0.0) <= price <= safe_float(z.get("high"), 0.0)
+                    else min(abs(price - safe_float(z.get("low"), price)), abs(price - safe_float(z.get("high"), price)))
+                ),
+            ))
+        else:
+            snr_zone = dict(pool_fb[0])
+        snr_overridden = True
+
+    snr_zt_eff = str(snr_zone.get("zone_type") or "").upper()
+    snr_rk_eff = str(snr_zone.get("rank_label") or "").upper()
+    snr_zone_direction = (
+        str(snr_decision.get("signal")).upper() if snr_decision.get("signal") in ("BUY", "SELL") and not snr_overridden
+        else "SELL" if snr_zt_eff == "RESISTANCE" or snr_rk_eff.startswith("R")
+        else "BUY" if snr_zt_eff == "SUPPORT" or snr_rk_eff.startswith("S")
+        else ("SELL" if snr_zone and any(snr_zone.get("zone_id") == r.get("zone_id") and r.get("zone_id") for r in active_ress) or snr_zone in active_ress
+              else "BUY" if snr_zone and (any(snr_zone.get("zone_id") == s.get("zone_id") and s.get("zone_id") for s in active_sups) or snr_zone in active_sups)
+              else "NONE")
+    )
+
+    snr_lo_sel = safe_float(snr_zone.get("low", snr_zone.get("price_low")), 0.0)
+    snr_hi_sel = safe_float(snr_zone.get("high", snr_zone.get("price_high")), 0.0)
+    snr_inside_sel = bool(price > 0 and snr_lo_sel > 0 and snr_lo_sel <= price <= snr_hi_sel)
+    raw_sel_reason = "" if snr_overridden else str(
+        snr_decision.get("focus_selection_reason")
+        or (snr_scan.get("entry_validation") or {}).get("focus_selection_reason")
+        or ""
+    ).strip()
+    if snr_bias == "BEARISH" and snr_zone_direction == "BUY":
+        snr_reason_short = "PRICE AT SUPPORT" if snr_inside_sel else "NO ACTIVE RESISTANCE"
+    elif snr_bias == "BULLISH" and snr_zone_direction == "SELL":
+        snr_reason_short = "PRICE AT RESISTANCE" if snr_inside_sel else "NO ACTIVE SUPPORT"
+    elif snr_zone_direction in ("BUY", "SELL"):
+        snr_reason_short = (
+            "TREND ALIGNED"
+            if (snr_bias == "BEARISH" and snr_zone_direction == "SELL") or (snr_bias == "BULLISH" and snr_zone_direction == "BUY")
+            else "NEAREST ACTIVE SNR"
+        )
+    else:
+        snr_reason_short = "NONE"
+    snr_selection_reason = raw_sel_reason or (live_snr_sel.get("focus_selection_reason") if live_focus_usable else "") or snr_reason_short
+
+    # Preserve independent SMC candidate reference before any SNR display fallback
+    smc_zone_ref = dict(zone) if (isinstance(zone, dict) and safe_float(zone.get("price_low", zone.get("low")), 0.0) > 0 and str(zone.get("source") or "SMC").upper() != "SNR") else {}
     # If SMC zone was not found, fall back to directional SNR zone for active setup display
     if (not zone or safe_float(zone.get("price_low", zone.get("low")), 0.0) <= 0) and snr_zone and _is_actionable_monitor_candidate(snr_zone):
         s_lo = safe_float(snr_zone.get("low", snr_zone.get("price_low")), 0.0)
@@ -343,44 +985,13 @@ def _smart_monitor_context(cycle_result):
                 "score": safe_float(zone.get("score")) if zone.get("score") is not None else None,
             })
 
-    smc_zone_usable = _zone_is_usable(zone)
+    smc_zone_usable = _zone_is_usable(smc_zone_ref) if smc_zone_ref else (zone.get("source") != "SNR" and _zone_is_usable(zone))
     snr_zone_usable = _zone_is_usable(snr_zone)
+    smc_comp_lo = safe_float(smc_zone_ref.get("price_low", smc_zone_ref.get("low")), 0.0) if smc_zone_ref else (lo if zone.get("source") != "SNR" else 0.0)
+    smc_comp_hi = safe_float(smc_zone_ref.get("price_high", smc_zone_ref.get("high")), 0.0) if smc_zone_ref else (hi if zone.get("source") != "SNR" else 0.0)
+    smc_comp_zt = str((smc_zone_ref or zone).get("zone_type") or (smc_zone_ref or zone).get("type") or "").upper()
+    smc_comp_dir = "BUY" if smc_comp_zt in ("DEMAND", "SUPPORT") else ("SELL" if smc_comp_zt in ("SUPPLY", "RESISTANCE") else direction)
     priority_ctx = decision.get("radar_priority") or scan.get("radar_priority") or {}
-    aligned_ctx = sorted(
-        (priority_ctx.get("aligned_zones") or []),
-        key=lambda item: safe_float((item or {}).get("distance"), 9999.0),
-    )
-    radar_pool = [
-        decision.get("nearest_valid_zone"),
-        priority_ctx.get("best_high_risk"),
-        priority_ctx.get("nearest_radar_zone"),
-        priority_ctx.get("best_medium_risk"),
-        decision.get("next_radar_zone"),
-        *aligned_ctx,
-    ]
-    radar_candidate = None
-    for cand in radar_pool:
-        cz = _as_monitor_zone(cand)
-        if not cz or not _zone_is_usable(cz):
-            continue
-        r_lo = safe_float(cz.get("price_low", cz.get("low")), 0.0)
-        r_hi = safe_float(cz.get("price_high", cz.get("high")), 0.0)
-        if r_lo <= 0 or r_hi < r_lo:
-            continue
-        if str(cz.get("radar_eligibility") or "QUALIFIED").upper() != "QUALIFIED":
-            continue
-        if str(cz.get("risk_tier") or "").upper() == "FAR_ZONE":
-            continue
-        cz_type = str(cz.get("zone_type") or "").upper()
-        if h4_bias_ctx in ("BULLISH", "BEARISH") and cz_type != ("DEMAND" if h4_bias_ctx == "BULLISH" else "SUPPLY"):
-            continue
-        cz_id = str(cz.get("zone_id") or "")
-        if smc_zone_usable and cz_id and cz_id == z_id and not ((cycle.get("focus_detail") or {}).get("SMC") or {}).get("historical_touch"):
-            continue
-        radar_candidate = dict(cz)
-        if price > 0 and radar_candidate.get("distance") is None:
-            radar_candidate["distance"] = 0.0 if r_lo <= price <= r_hi else (r_lo - price if r_lo > price else price - r_hi)
-        break
     expected_h4_dir = "BUY" if h4_bias_ctx == "BULLISH" else ("SELL" if h4_bias_ctx == "BEARISH" else "")
     expected_h1_dir = "BUY" if h1_bias_ctx == "BULLISH" else ("SELL" if h1_bias_ctx == "BEARISH" else "")
     is_counter_htf = bool(
@@ -390,22 +1001,191 @@ def _smart_monitor_context(cycle_result):
             or (expected_h1_dir and direction != expected_h1_dir)
         )
     )
+
+    # Pisahkan directional confluence terhadap zona entry SMC vs lokasi harga live di support/resistance terdekat.
+    # Pisahkan tegas SNR FOCUS (snr_zone: zona terdekat harga) dari SNR CONFLUENCE SOURCE (zona directional yang benar-benar overlap SMC).
+    snr_live_signal = str(snr_decision.get("signal") or "WAIT").upper()
+    directional_snr_zone = None
+    snr_confluence_source = None
+    snr_confluence_overlap_pts = 0.0
+    snr_confluence_source_display = "NONE"
+    snr_price_proximity = ""
+    confluence_display = ""
+
+    def _zones_overlap_points(lo_a, hi_a, lo_b, hi_b):
+        if not (lo_a > 0 and hi_a >= lo_a and lo_b > 0 and hi_b >= lo_b):
+            return 0.0
+        ov = min(hi_a, hi_b) - max(lo_a, lo_b)
+        if ov > 0.0:
+            return ov
+        if (hi_a == lo_a and lo_b <= lo_a <= hi_b) or (hi_b == lo_b and lo_a <= lo_b <= hi_a):
+            return 1e-6
+        return 0.0
+
+    def _snr_pool_key(cand_z):
+        zid_c = str(cand_z.get("zone_id") or "").strip().upper()
+        lo_c = round(safe_float(cand_z.get("low", cand_z.get("price_low")), 0.0), 4)
+        hi_c = round(safe_float(cand_z.get("high", cand_z.get("price_high")), 0.0), 4)
+        return (zid_c, lo_c, hi_c)
+
+    if smc_zone_usable and smc_comp_dir in ("BUY", "SELL"):
+        dir_pool = []
+        seen_dir_keys = set()
+        for cand in list(active_ress if smc_comp_dir == "SELL" else active_sups):
+            if not _zone_is_usable(cand):
+                continue
+            ck = _snr_pool_key(cand)
+            if ck not in seen_dir_keys:
+                seen_dir_keys.add(ck)
+                dir_pool.append(cand)
+        opp_pool = [z for z in (active_sups if smc_comp_dir == "SELL" else active_ress) if _zone_is_usable(z)]
+        trend_z_cand = live_snr_sel.get("trend_entry_zone") or snr_decision.get("trend_entry_zone")
+        if isinstance(trend_z_cand, dict) and _snr_side_valid_for_live_price(trend_z_cand):
+            tz_type = str(trend_z_cand.get("zone_type") or "").upper()
+            want_tz = "RESISTANCE" if smc_comp_dir == "SELL" else "SUPPORT"
+            if tz_type == want_tz:
+                ck = _snr_pool_key(trend_z_cand)
+                if ck not in seen_dir_keys:
+                    seen_dir_keys.add(ck)
+                    dir_pool.insert(0, trend_z_cand)
+        if snr_zone_usable and snr_zone_direction == smc_comp_dir and _snr_side_valid_for_live_price(snr_zone):
+            ck = _snr_pool_key(snr_zone)
+            if ck not in seen_dir_keys:
+                seen_dir_keys.add(ck)
+                dir_pool.insert(0, snr_zone)
+
+        overlapping_dir = None
+        best_dir_key = None
+        for idx_c, cand in enumerate(dir_pool):
+            c_lo = safe_float(cand.get("low", cand.get("price_low")), 0.0)
+            c_hi = safe_float(cand.get("high", cand.get("price_high")), 0.0)
+            ov_pts = _zones_overlap_points(smc_comp_lo, smc_comp_hi, c_lo, c_hi)
+            if ov_pts > 0.0:
+                rank_key = (ov_pts, safe_float(cand.get("score"), 0.0), -idx_c)
+                if best_dir_key is None or rank_key > best_dir_key:
+                    best_dir_key = rank_key
+                    overlapping_dir = cand
+                    snr_confluence_overlap_pts = ov_pts
+        snr_confluence_source = overlapping_dir
+        directional_snr_zone = snr_confluence_source or (dir_pool[0] if dir_pool else None)
+
+        overlapping_opp = None
+        opp_overlap_pts = 0.0
+        for cand in opp_pool:
+            o_lo_c = safe_float(cand.get("low", cand.get("price_low")), 0.0)
+            o_hi_c = safe_float(cand.get("high", cand.get("price_high")), 0.0)
+            ov_opp = _zones_overlap_points(smc_comp_lo, smc_comp_hi, o_lo_c, o_hi_c)
+            if ov_opp > opp_overlap_pts:
+                opp_overlap_pts = ov_opp
+                overlapping_opp = cand
+        near_opp = opp_pool[0] if opp_pool else None
+        price_at_opp = bool(
+            near_opp and price > 0
+            and safe_float(near_opp.get("low", near_opp.get("price_low")), 0.0) <= price <= safe_float(near_opp.get("high", near_opp.get("price_high")), 0.0)
+        )
+        if not price_at_opp and snr_zone_usable and snr_zone_direction != smc_comp_dir and snr_inside_sel:
+            near_opp = snr_zone
+            price_at_opp = True
+        if price_at_opp and near_opp:
+            opp_lbl = str(near_opp.get("rank_label") or ("S1" if smc_comp_dir == "SELL" else "R1")).strip()
+            opp_lo = safe_float(near_opp.get("low", near_opp.get("price_low")), 0.0)
+            opp_hi = safe_float(near_opp.get("high", near_opp.get("price_high")), 0.0)
+            opp_kind = "Support" if smc_comp_dir == "SELL" else "Resistance"
+            snr_price_proximity = f"PRICE AT {opp_lbl}"
+            snr_proximity_detail = f"harga saat ini di {opp_kind} terdekat {opp_lbl} ({opp_lo:.2f}-{opp_hi:.2f})"
+        else:
+            snr_proximity_detail = ""
+    else:
+        overlapping_opp = None
+        opp_overlap_pts = 0.0
+        snr_proximity_detail = ""
+
     if smc.get("status") != "OK" or snr.get("status") != "OK":
         confluence = "UNAVAILABLE"
+        confluence_reason = "Salah satu scanner (SMC/SNR) tidak berstatus OK"
     elif not smc_zone_usable and not snr_zone_usable:
         confluence = "UNAVAILABLE"
+        confluence_reason = "Belum ada zona aktif SMC maupun SNR"
     elif is_counter_htf:
         confluence = "COUNTERTREND"
-    elif zone.get("source") == "SNR":
+        confluence_reason = f"Setup {direction} berlawanan dengan bias HTF (H4={h4_bias_ctx or 'N/A'}, H1={h1_bias_ctx or 'N/A'})"
+    elif not smc_zone_usable or smc_comp_dir not in ("BUY", "SELL"):
         confluence = "PARTIAL"
-    elif not smc_zone_usable or not snr_zone_usable or direction not in ("BUY", "SELL") or snr_zone_direction == "NONE":
-        confluence = "PARTIAL"
-    elif direction != snr_zone_direction:
+        confluence_reason = "Hanya satu sisi zona aktif valid (SMC tidak lengkap)"
+    elif snr_live_signal in ("BUY", "SELL") and snr_live_signal != smc_comp_dir:
         confluence = "CONFLICT"
+        confluence_reason = f"Sinyal live SNR ({snr_live_signal}) bertentangan dengan setup SMC ({smc_comp_dir})"
+    elif overlapping_opp is not None:
+        o_lbl = str(overlapping_opp.get("rank_label") or overlapping_opp.get("zone_type") or "SNR").strip()
+        o_lo = safe_float(overlapping_opp.get("low", overlapping_opp.get("price_low")), 0.0)
+        o_hi = safe_float(overlapping_opp.get("high", overlapping_opp.get("price_high")), 0.0)
+        confluence = "CONFLICT"
+        confluence_reason = (
+            f"Zona entry SMC {smc_comp_dir} ({smc_comp_lo:.2f}-{smc_comp_hi:.2f}) overlap langsung "
+            f"dengan zona SNR lawan {o_lbl} ({o_lo:.2f}-{o_hi:.2f}, {opp_overlap_pts:.2f} pt)"
+        )
+        snr_confluence_source_display = f"CONFLICT ({o_lbl} {o_lo:.2f}-{o_hi:.2f} overlap lawan {opp_overlap_pts:.2f} pt)"
+    elif (
+        snr_zone_usable
+        and snr_zone_direction in ("BUY", "SELL")
+        and snr_zone_direction != smc_comp_dir
+        and (
+            (smc_comp_dir == "SELL" and snr_bias == "BULLISH")
+            or (smc_comp_dir == "BUY" and snr_bias == "BEARISH")
+        )
+    ):
+        confluence = "CONFLICT"
+        confluence_reason = f"Bias & fokus SNR ({snr_bias} / {snr_zone_direction}) bertentangan dengan setup SMC ({smc_comp_dir})"
+    elif snr_confluence_source is not None:
+        d_lo = safe_float(snr_confluence_source.get("low", snr_confluence_source.get("price_low")), 0.0)
+        d_hi = safe_float(snr_confluence_source.get("high", snr_confluence_source.get("price_high")), 0.0)
+        d_lbl = str(snr_confluence_source.get("rank_label") or snr_confluence_source.get("zone_type") or "SNR").strip()
+        d_tf = str(snr_confluence_source.get("timeframe") or "").strip()
+        d_grd = str(snr_confluence_source.get("grade") or "N/A").strip()
+        d_tag = f"{d_lbl} {d_tf}".strip()
+        confluence = "ALIGNED"
+        snr_confluence_source_display = f"{d_tag} {d_lo:.2f} - {d_hi:.2f} (Grade {d_grd} | overlap {snr_confluence_overlap_pts:.2f} pt)"
+        base_c_reason = (
+            f"Directional {smc_comp_dir}: zona SMC {smc_comp_lo:.2f}-{smc_comp_hi:.2f} "
+            f"overlap dengan SNR {d_lbl} {d_lo:.2f}-{d_hi:.2f} ({snr_confluence_overlap_pts:.2f} pt)"
+        )
+        if snr_proximity_detail:
+            confluence_reason = f"{base_c_reason}; {snr_proximity_detail} (bukan konflik setup {smc_comp_dir})"
+            confluence_display = f"{confluence} ({d_lbl} {d_lo:.2f}-{d_hi:.2f} overlap {snr_confluence_overlap_pts:.2f} pt | {snr_price_proximity})"
+        else:
+            confluence_reason = base_c_reason
+            confluence_display = f"{confluence} ({d_lbl} {d_lo:.2f}-{d_hi:.2f} overlap {snr_confluence_overlap_pts:.2f} pt)"
+    elif directional_snr_zone is not None:
+        d_lo = safe_float(directional_snr_zone.get("low", directional_snr_zone.get("price_low")), 0.0)
+        d_hi = safe_float(directional_snr_zone.get("high", directional_snr_zone.get("price_high")), 0.0)
+        d_lbl = str(directional_snr_zone.get("rank_label") or directional_snr_zone.get("zone_type") or "SNR").strip()
+        gap_pts = (smc_comp_lo - d_hi) if smc_comp_lo > d_hi else max(0.0, d_lo - smc_comp_hi)
+        confluence = "PARTIAL"
+        snr_confluence_source_display = f"NONE (searah terdekat {d_lbl} {d_lo:.2f}-{d_hi:.2f} tidak overlap SMC, jarak {gap_pts:.2f} pt)"
+        base_c_reason = (
+            f"Directional {smc_comp_dir}: searah SNR {d_lbl} {d_lo:.2f}-{d_hi:.2f}, "
+            f"rentang SMC {smc_comp_lo:.2f}-{smc_comp_hi:.2f} tidak overlap (jarak {gap_pts:.2f} pt)"
+        )
+        if snr_proximity_detail:
+            confluence_reason = f"{base_c_reason}; {snr_proximity_detail} (bukan konflik setup {smc_comp_dir})"
+            confluence_display = f"{confluence} (no overlap vs {d_lbl} {d_lo:.2f}-{d_hi:.2f} | {snr_price_proximity})"
+        else:
+            confluence_reason = base_c_reason
+            confluence_display = f"{confluence} (no overlap vs {d_lbl} {d_lo:.2f}-{d_hi:.2f})"
+    elif snr_proximity_detail:
+        confluence = "PARTIAL"
+        opp_sig = "BUY" if smc_comp_dir == "SELL" else "SELL"
+        confluence_reason = (
+            f"Tidak ada konflik {smc_comp_dir}: {snr_proximity_detail} tanpa sinyal {opp_sig} terkonfirmasi; "
+            f"belum ada zona SNR aktif searah {smc_comp_dir}"
+        )
+        confluence_display = f"{confluence} (NO DIR. SNR | {snr_price_proximity})"
     else:
-        snr_lo = safe_float(snr_zone.get("low"), 0.0)
-        snr_hi = safe_float(snr_zone.get("high"), 0.0)
-        confluence = "ALIGNED" if max(lo, snr_lo) <= min(hi, snr_hi) else "PARTIAL"
+        confluence = "PARTIAL"
+        confluence_reason = "Hanya satu sisi zona aktif valid (SMC atau SNR tidak lengkap)"
+
+    if not confluence_display:
+        confluence_display = confluence
 
     tracker = decision.get("zone_tracker")
     tracked = tracker.get_zone(str(zone.get("zone_id"))) if tracker and zone.get("zone_id") and hasattr(tracker, "get_zone") else None
@@ -427,14 +1207,39 @@ def _smart_monitor_context(cycle_result):
     if monitor_state == "IN_ZONE":
         monitor_state = "AWAITING_CONFIRMATION"
 
-    stages = decision.get("m5_stages") or decision.get("stages") or {}
+    raw_stages = decision.get("m5_stages") or decision.get("stages") or {}
+    m5_bound = _m5_stages_match_zone(decision, zone)
+    stages = raw_stages if m5_bound else {}
     touch_status, touch_display = _calc_zone_touch(zone, price, stages, tracked, lifecycle)
 
-    trigger_stage = stages.get("structure_trigger") or {}
-    trigger = str(
-        (trigger_stage.get("status") if isinstance(trigger_stage, dict) else trigger_stage)
-        or summary.get("choch_bos") or "WAIT"
-    ).upper()
+    if m5_bound:
+        trigger_stage = stages.get("structure_trigger") or {}
+        trigger = str(
+            (trigger_stage.get("status") if isinstance(trigger_stage, dict) else trigger_stage)
+            or summary.get("choch_bos") or "WAIT"
+        ).upper()
+        raw_m5_conf = decision.get("m5_confirmation") if isinstance(decision.get("m5_confirmation"), dict) else None
+        if raw_m5_conf and str(raw_m5_conf.get("zone_id") or "") == str(zone.get("zone_id") or ""):
+            m5_confirmation = dict(raw_m5_conf)
+        elif trigger == "CONFIRMED":
+            m5_obj_ref = decision.get("m5") if isinstance(decision.get("m5"), dict) else {}
+            m5_confirmation = {
+                "zone_id": zone.get("zone_id"),
+                "timeframe": zone.get("timeframe"),
+                "zone_type": zone.get("zone_type"),
+                "zone_range": (lo, hi),
+                "timestamp": (
+                    (trigger_stage.get("timestamp") if isinstance(trigger_stage, dict) else None)
+                    or m5_obj_ref.get("timestamp")
+                    or m5_obj_ref.get("confirmed_at")
+                ),
+                "status": "CONFIRMED",
+            }
+        else:
+            m5_confirmation = None
+    else:
+        trigger = "NOT_CHECKED"
+        m5_confirmation = None
 
     snapshot_status = str(snapshot.get("snapshot_status") or snapshot.get("data_status") or "UNKNOWN").upper()
     freshness = str(snapshot.get("data_freshness") or (snapshot.get("data_freshness_info") or {}).get("status") or "UNKNOWN").upper()
@@ -446,42 +1251,85 @@ def _smart_monitor_context(cycle_result):
         or smc.get("status") == "ERROR"
     )
     validation_price = safe_float(decision.get("snapshot_price") or decision.get("current_price"), 0.0)
-    needs_revalidation = validation_price > 0 and abs(validation_price - price) > 1e-8
+    is_tick_only = cycle.get("focus_validation_fresh") is False
+    needs_revalidation = (not is_tick_only) and validation_price > 0 and abs(validation_price - price) > 1e-8
     if needs_revalidation:
         data_invalid = True
-    if data_invalid:
-        radar_candidate = None
 
-    # 1. Pending Plan evaluation (Section 6)
-    p_status_raw = str(plan.get("status") or "WAIT").upper()
-    if data_invalid:
-        p_status = "WAIT"
-    elif p_status_raw in ("NONE", "NOT ACTIVE"):
-        p_status = "WAIT"
-    elif p_status_raw == "READY":
-        p_status = "READY (NOT PLACED)"
-    else:
-        p_status = p_status_raw
+    # 1. Authoritative Pending Plan Resolution (single source of truth per monitor cycle)
+    completed_smc_id = ((cycle.get("completed_focus") or {}).get("SMC") or {}).get("zone_id")
+    acc_ctx = cycle.get("account") if isinstance(cycle.get("account"), dict) else {}
+    mt5_ord_snap = (
+        acc_ctx.get("orders_snapshot")
+        if acc_ctx.get("orders_snapshot") is not None
+        else snapshot.get("mt5_orders_snapshot")
+    )
+    sym_ctx = snapshot.get("symbol") or acc_ctx.get("symbol") or scan.get("symbol")
+    pending_res = resolve_monitor_pending_plans(
+        decision=decision,
+        scan=scan,
+        active_zone=zone,
+        tracker=tracker,
+        data_invalid=data_invalid,
+        completed_zone_id=completed_smc_id,
+        zone_usable_fn=_zone_is_usable,
+        mt5_orders_snapshot=mt5_ord_snap,
+        symbol=sym_ctx,
+    )
+    plan = pending_res["selected_plan"]
+    pending_setup = pending_res["pending_setup"]
+    alt_pending_setups = pending_res["alt_pending_setups"]
+    p_status = pending_res["pending_status"]
+    p_zid = str(pending_setup.get("zone_id") or "")
+    if p_zid == "N/A":
+        p_zid = ""
+    pending_display = _format_pending_compact_tag(pending_setup, z_id, is_selected=True)
+    alt_pending_display = ""
+    if alt_pending_setups:
+        alt_first = _format_pending_compact_tag(alt_pending_setups[0], z_id, is_selected=False)
+        if len(alt_pending_setups) > 1:
+            alt_first = f"{alt_first} (+{len(alt_pending_setups) - 1})"
+        alt_pending_display = alt_first
 
-    p_zid = str(plan.get("zone_id") or "")
-    p_lo = safe_float(plan.get("zone_low", plan.get("price_low")), 0.0)
-    p_hi = safe_float(plan.get("zone_high", plan.get("price_high")), 0.0)
-    p_dir = "BUY" if "BUY" in str(plan.get("order_type", "")).upper() else ("SELL" if "SELL" in str(plan.get("order_type", "")).upper() else "NONE")
-    pending_setup = {
-        "setup_id": f"{p_zid}:{p_dir}:{plan.get('setup_type', 'PENDING')}" if p_zid else "N/A",
-        "zone_id": p_zid or "N/A",
-        "direction": p_dir,
-        "zone_range": (p_lo, p_hi),
-        "setup_type": str(plan.get("setup_type") or "PENDING"),
-        "timeframe": str(plan.get("timeframe") or "H1"),
-        "status": p_status,
-        "is_placed": False,
-    }
-    if p_status.startswith("READY") and p_zid and z_id != "N/A" and p_zid != z_id:
-        p_label = f"[{p_lo:.2f}-{p_hi:.2f}]" if (p_lo > 0 and p_hi > 0) else f"[{p_zid}]"
-        pending_display = f"{p_status} {p_label}"
-    else:
-        pending_display = p_status
+    # Radar Candidate: alternatif intraday yang BUKAN Active Focus dan BUKAN Selected Pending Plan
+    aligned_ctx = sorted(
+        (priority_ctx.get("aligned_zones") or []),
+        key=lambda item: safe_float((item or {}).get("distance"), 9999.0),
+    )
+    radar_pool = [
+        decision.get("nearest_valid_zone"),
+        priority_ctx.get("best_high_risk"),
+        priority_ctx.get("nearest_radar_zone"),
+        priority_ctx.get("best_medium_risk"),
+        decision.get("next_radar_zone"),
+        *aligned_ctx,
+    ]
+    radar_candidate = None
+    if not data_invalid:
+        for cand in radar_pool:
+            cz = _as_monitor_zone(cand)
+            if not cz or not _zone_is_usable(cz):
+                continue
+            r_lo = safe_float(cz.get("price_low", cz.get("low")), 0.0)
+            r_hi = safe_float(cz.get("price_high", cz.get("high")), 0.0)
+            if r_lo <= 0 or r_hi < r_lo:
+                continue
+            if str(cz.get("radar_eligibility") or "QUALIFIED").upper() != "QUALIFIED":
+                continue
+            if str(cz.get("risk_tier") or "").upper() == "FAR_ZONE":
+                continue
+            cz_type = str(cz.get("zone_type") or "").upper()
+            if h4_bias_ctx in ("BULLISH", "BEARISH") and cz_type != ("DEMAND" if h4_bias_ctx == "BULLISH" else "SUPPLY"):
+                continue
+            cz_id = str(cz.get("zone_id") or "")
+            if smc_zone_usable and cz_id and cz_id == z_id and not ((cycle.get("focus_detail") or {}).get("SMC") or {}).get("historical_touch"):
+                continue
+            if p_status.startswith("READY") and p_zid and cz_id and cz_id == p_zid:
+                continue
+            radar_candidate = dict(cz)
+            if price > 0 and radar_candidate.get("distance") is None:
+                radar_candidate["distance"] = 0.0 if r_lo <= price <= r_hi else (r_lo - price if r_lo > price else price - r_hi)
+            break
 
     # 2. Confirmed Entry validation (Section 5)
     dec_status = str(decision.get("status") or "").upper()
@@ -492,6 +1340,7 @@ def _smart_monitor_context(cycle_result):
         dec_status == "VALID"
         and dec_dir in ("BUY", "SELL")
         and not data_invalid
+        and not is_tick_only
         and bool(conf_plan)
         and bool(zone.get("zone_id"))
         and (not conf_plan.get("zone_id") or conf_plan.get("zone_id") == zone.get("zone_id"))
@@ -519,7 +1368,7 @@ def _smart_monitor_context(cycle_result):
     snr_sig = str(snr_decision.get("signal", "WAIT")).upper()
     snr_confirmed = (
         snr.get("status") == "OK" and snr_sig in ("BUY", "SELL")
-        and snr_decision.get("entry") is not None and not data_invalid
+        and snr_decision.get("entry") is not None and not data_invalid and not is_tick_only
     )
     if not is_valid_confirmed:
         if snr_confirmed:
@@ -600,15 +1449,20 @@ def _smart_monitor_context(cycle_result):
 
         if act_item.get("touched"):
             monitor_state = "ZONE_TOUCHED"
-            touch_status = "TOUCHED_PREVIOUSLY"
-            touch_display = f"{active_method} ZONE TOUCHED"
-            reason = f"{active_method} ZONE TOUCHED; ENTRY BELUM DIKONFIRMASI"
-            next_action = "PERIKSA RIWAYAT DAN MT5" if act_item.get("uncertain") else "PANTAU KONFIRMASI M5"
+            touch_status = "IN_ZONE" if (lo > 0 and hi >= lo and price > 0 and lo <= price <= hi) else "TOUCHED_PREVIOUSLY"
+            touch_display = "IN ZONE" if touch_status == "IN_ZONE" else f"{active_method} ZONE TOUCHED"
+            dec_reasons_touch = [str(r).strip() for r in (decision.get("reasons") or []) if str(r).strip()]
+            if active_method == "SMC" and m5_bound and trigger == "CONFIRMED" and dec_reasons_touch:
+                reason = dec_reasons_touch[0]
+                next_action = "PERIKSA RIWAYAT DAN MT5" if act_item.get("uncertain") else "CHECK VALIDATION"
+            else:
+                reason = f"{active_method} ZONE TOUCHED; ENTRY BELUM DIKONFIRMASI"
+                next_action = "PERIKSA RIWAYAT DAN MT5" if act_item.get("uncertain") else "PANTAU KONFIRMASI M5"
             final_signal = "WAIT"
         elif has_active_zone and monitor_state in ("APPROACHING", "AWAITING_CONFIRMATION", "IN_ZONE"):
             # Pertahankan status radar / approaching / inside zone dari active setup
             pass
-        elif has_active_zone and not act_item.get("historical_touch"):
+        elif has_active_zone:
             # Zona aktif sedang menunggu pullback (RADAR)
             monitor_state = "RADAR"
             touch_status = "NOT_TOUCHED"
@@ -629,6 +1483,19 @@ def _smart_monitor_context(cycle_result):
             zone_type = str(zone.get("zone_type") or zone.get("type") or "").upper()
             direction = "BUY" if zone_type in ("DEMAND", "SUPPORT") else ("SELL" if zone_type in ("SUPPLY", "RESISTANCE") else direction)
             z_id = str(zone.get("zone_id") or "N/A")
+            if pending_setup.get("zone_id") and pending_setup.get("zone_id") != "N/A":
+                pending_setup["is_active_focus"] = (pending_setup["zone_id"] == z_id)
+                pending_setup["source_role"] = (
+                    "ACTIVE_FOCUS" if pending_setup["is_active_focus"]
+                    else ("PRIMARY_ZONE" if pending_setup.get("is_primary_zone") else "NON_FOCUS_ZONE")
+                )
+            for alt_item in alt_pending_setups:
+                if alt_item.get("zone_id") and alt_item.get("zone_id") != "N/A":
+                    alt_item["is_active_focus"] = (alt_item["zone_id"] == z_id)
+                    alt_item["source_role"] = (
+                        "ACTIVE_FOCUS" if alt_item["is_active_focus"]
+                        else ("PRIMARY_ZONE" if alt_item.get("is_primary_zone") else "NON_FOCUS_ZONE")
+                    )
             active_setup.update({
                 "setup_id": f"{z_id}:{direction}:{setup_type}" if z_id != "N/A" else "N/A",
                 "zone_id": z_id,
@@ -645,6 +1512,16 @@ def _smart_monitor_context(cycle_result):
             reason = f"RADAR: Menunggu pullback ke {r_desc}"
             next_action = "WAIT PULLBACK"
             final_signal = "WAIT"
+            if not _m5_stages_match_zone(decision, zone):
+                trigger = "NOT_CHECKED"
+                m5_confirmation = None
+            pending_display = _format_pending_compact_tag(pending_setup, z_id, is_selected=True)
+            if alt_pending_setups:
+                alt_first = _format_pending_compact_tag(alt_pending_setups[0], z_id, is_selected=False)
+                if len(alt_pending_setups) > 1:
+                    alt_first = f"{alt_first} (+{len(alt_pending_setups) - 1})"
+                alt_pending_display = alt_first
+            radar_candidate = None
         elif act_item.get("historical_touch"):
             monitor_state = "HISTORICAL_TOUCH"
             touch_status = "TOUCHED_PREVIOUSLY"
@@ -683,13 +1560,73 @@ def _smart_monitor_context(cycle_result):
                 reason, next_action, final_signal = "FOKUS TERKUNCI: RIWAYAT BELUM PASTI", "PERIKSA RIWAYAT DAN MT5", "WAIT"
 
     account = cycle.get("account") if isinstance(cycle.get("account"), dict) else {}
-    warnings = list(account.get("risk_warnings") or [])
-    warnings.extend(cycle.get("risk_warnings") or [])
-    alerts = list(cycle.get("alerts") or [])
-    if warnings:
-        alerts.extend(warnings)
+    warnings = []
+    for raw_w in list(account.get("risk_warnings") or []) + list(cycle.get("risk_warnings") or []):
+        w_str = str(raw_w or "").strip()
+        if w_str and w_str not in warnings:
+            warnings.append(w_str)
+    focus_det_map = cycle.get("focus_detail") or {}
+    has_pending_waiting = any(
+        isinstance(it, dict) and it.get("plan_status") == "READY" and it.get("is_placed")
+        for it in ([pending_setup] + list(alt_pending_setups or []))
+    )
+    ever_taken_any = any(
+        isinstance(fd, dict) and (fd.get("ever_taken") or fd.get("account_status") in ("RUNNING", "POSITION NOT OBSERVED"))
+        for fd in focus_det_map.values()
+    )
+    raw_alerts = [
+        al for al in (cycle.get("alerts") or [])
+        if not (
+            "BELUM ADA POSISI MT5 YANG COCOK DENGAN ZONA" in str(al).upper()
+            and (has_pending_waiting or not ever_taken_any)
+        )
+    ]
+    sl_missing_tickets = []
+    for p_chk in ([pending_setup] + list(alt_pending_setups or [])):
+        if isinstance(p_chk, dict) and p_chk.get("sl_missing_high_risk"):
+            recon_p = p_chk.get("mt5_reconciliation") or {}
+            tkts_p = [f"#{t}" for t in (recon_p.get("matched_tickets") or []) if t is not None]
+            for t_str in tkts_p:
+                if t_str not in sl_missing_tickets:
+                    sl_missing_tickets.append(t_str)
+            tkt_lbl = ", ".join(tkts_p) if tkts_p else str(p_chk.get("zone_id") or "PENDING")
+            risk_msg = f"[RISK WARNING] Pending order cocok ({tkt_lbl}) TANPA Stop Loss — SL MISSING HIGH RISK!"
+            if risk_msg not in warnings:
+                warnings.append(risk_msg)
+    alerts = list(raw_alerts)
+    for w_item in warnings:
+        if w_item not in alerts:
+            alerts.append(w_item)
 
-    # Clean alert display resolution:
+    categorized = classify_monitor_alerts(
+        raw_alerts,
+        risk_warnings=warnings,
+        default_ts=cycle.get("snapshot_time") or snapshot.get("snapshot_time"),
+    )
+    for hev_m in historical_events_meta:
+        h_lbl_m = str(hev_m.get("label") or "").strip()
+        if h_lbl_m and h_lbl_m not in categorized["historical"]:
+            categorized["historical"].append(h_lbl_m)
+    if snr_historical_watch and snr_historical_watch not in categorized["historical"]:
+        categorized["historical"].append(snr_historical_watch)
+    if not historical_event and categorized["historical"]:
+        historical_event = categorized["historical"][0]
+
+    def _clean_alert_label(raw_txt):
+        txt = str(raw_txt or "").replace("\n", " ").strip()
+        for prefix in ("[SMC] ", "[SNR] ", "[ALERT] ", "[ACCOUNT RISK] "):
+            if txt.startswith(prefix):
+                txt = txt[len(prefix):].strip()
+        if "TERKONFIRMASI" in txt:
+            txt = txt.replace("TERKONFIRMASI", "CONFIRMED")
+        if "PERUBAHAN ZONA FOKUS -> " in txt:
+            txt = "FOCUS CHANGED [" + txt.replace("PERUBAHAN ZONA FOKUS -> ", "").strip() + "]"
+        return txt
+
+    # Clean priority-based alert display resolution:
+    # - Prioritaskan current MARKET_ALERT / ENTRY_ALERT tanpa menghilangkan critical RISK_ALERT.
+    # - RISK_ALERT ditampilkan terpisah di baris RISK ALERT agar tidak tertutup maupun terduplikasi.
+    # - HISTORICAL_INFO tidak pernah dipromosikan menjadi current ALERT.
     if is_valid_confirmed and not is_entry_stale:
         alert_display = f"{dec_dir} CONFIRMED"
     elif is_entry_stale:
@@ -697,34 +1634,44 @@ def _smart_monitor_context(cycle_result):
     elif monitor_state == "INVALIDATED" or touch_status == "INVALIDATED":
         alert_display = "ZONE INVALIDATED"
     else:
-        best_al = "NONE"
-        for al in alerts:
-            al_str = str(al).replace("\n", " ").strip()
-            if any(k in al_str for k in ("CONFIRMED", "TERKONFIRMASI")):
-                best_al = al_str
-                break
-            elif any(k in al_str for k in ("INVALID", "BATAL")):
-                best_al = al_str
-                break
-            elif any(k in al_str for k in ("FOCUS CHANGED", "PERUBAHAN ZONA")):
-                best_al = al_str
-                break
-            elif any(k in al_str for k in ("TOUCH", "MENYENTUH", "DISENTUH", "HARGA DEKAT", "APPROACHING")):
-                best_al = al_str
-                break
-        if best_al == "NONE" and alerts:
-            best_al = str(alerts[0]).replace("\n", " ").strip()
-        if best_al.startswith("[SMC] "):
-            best_al = best_al[6:].strip()
-        elif best_al.startswith("[SNR] "):
-            best_al = best_al[6:].strip()
-        elif best_al.startswith("[ALERT] "):
-            best_al = best_al[8:].strip()
-        if "TERKONFIRMASI" in best_al:
-            best_al = best_al.replace("TERKONFIRMASI", "CONFIRMED")
-        if "PERUBAHAN ZONA FOKUS -> " in best_al:
-            best_al = "FOCUS CHANGED [" + best_al.replace("PERUBAHAN ZONA FOKUS -> ", "").strip() + "]"
+        non_hist_non_risk = [
+            ev for ev in categorized["events"]
+            if ev.get("category") not in ("HISTORICAL_INFO", "RISK_ALERT")
+        ]
+        if non_hist_non_risk:
+            top_ev = max(non_hist_non_risk, key=lambda ev: int(ev.get("priority", 0)))
+            best_al = _clean_alert_label(top_ev.get("message", ""))
+            other_important = [
+                ev for ev in non_hist_non_risk
+                if ev is not top_ev and ev.get("category") in ("MARKET_ALERT", "ENTRY_ALERT")
+            ]
+            if best_al and other_important:
+                best_al = f"{best_al} (+{len(other_important)})"
+        else:
+            best_al = "NONE"
         alert_display = best_al if best_al else "NONE"
+
+    critical_risk_display = ""
+    if categorized["risk"]:
+        p_nosl_cnt = int(safe_float(account.get("position_without_sl"), 0))
+        o_nosl_cnt = int(safe_float(account.get("pending_without_sl"), 0))
+        first_risk = _clean_alert_label(categorized["risk"][0])
+        if (p_nosl_cnt > 0 or o_nosl_cnt > 0 or sl_missing_tickets) and any(
+            k in first_risk.upper() for k in ("TANPA STOP LOSS", "TANPA SL", "SL MISSING", "[RISK WARNING]")
+        ):
+            parts_nosl = []
+            if p_nosl_cnt > 0:
+                parts_nosl.append(f"{p_nosl_cnt} posisi")
+            if o_nosl_cnt > 0 or sl_missing_tickets:
+                tkt_part = f" ({', '.join(sl_missing_tickets)})" if sl_missing_tickets else ""
+                cnt_p = o_nosl_cnt if o_nosl_cnt > 0 else len(sl_missing_tickets)
+                parts_nosl.append(f"{cnt_p} pending{tkt_part}")
+            critical_risk_display = f"{' + '.join(parts_nosl)} tanpa SL — SL MISSING (HIGH RISK)"
+        else:
+            if first_risk.startswith("[RISK WARNING] "):
+                first_risk = first_risk[len("[RISK WARNING] "):].strip()
+            critical_risk_display = first_risk
+
     return {
         "snapshot": snapshot,
         "smc": smc,
@@ -734,24 +1681,38 @@ def _smart_monitor_context(cycle_result):
         "summary": summary,
         "snr_scan": snr_scan,
         "snr_decision": snr_decision,
+        "smc_zone": smc_zone_ref,
         "snr_zone": snr_zone,
+        "snr_focus_zone": snr_zone,
+        "directional_snr_zone": directional_snr_zone,
+        "snr_confluence_source": snr_confluence_source,
+        "snr_confluence_overlap_points": round(snr_confluence_overlap_pts, 2),
+        "snr_confluence_source_display": snr_confluence_source_display,
         "snr_zone_direction": snr_zone_direction,
+        "snr_selection_reason": snr_selection_reason,
+        "snr_selection_reason_short": snr_reason_short,
+        "snr_price_proximity": snr_price_proximity,
         "zone": zone,
         "plan": plan,
         "price": price,
         "distance": distance,
         "direction": direction,
         "confluence": confluence,
+        "confluence_display": confluence_display,
+        "confluence_reason": confluence_reason,
         "lifecycle": lifecycle,
         "monitor_state": monitor_state,
         "touch": touch_display,
         "touch_status": touch_status,
         "touch_display": touch_display,
         "trigger": trigger,
+        "m5_confirmation": m5_confirmation,
         "confirmed": confirmed_status,
         "confirmed_display": confirmed_display,
         "pending_status": p_status,
         "pending_display": pending_display,
+        "alt_pending_setups": alt_pending_setups,
+        "alt_pending_display": alt_pending_display,
         "signal": final_signal,
         "signal_display": final_signal,
         "data_invalid": data_invalid,
@@ -761,10 +1722,19 @@ def _smart_monitor_context(cycle_result):
         "next_action": next_action,
         "alerts": alerts,
         "alert_display": alert_display,
+        "critical_risk_display": critical_risk_display,
+        "categorized_alerts": categorized,
+        "risk_alerts": categorized["risk"],
+        "market_alerts": categorized["market"],
+        "entry_alerts": categorized["entry"],
+        "account_alerts": categorized["account"],
+        "historical_info": categorized["historical"],
+        "historical_events_meta": historical_events_meta,
         "account": account,
         "active_setup": active_setup,
         "radar_candidate": radar_candidate,
         "historical_event": historical_event,
+        "snr_breakout_watch": snr_breakout_watch,
         "pending_setup": pending_setup,
         "confirmed_setup": confirmed_setup,
     }
@@ -809,7 +1779,8 @@ def format_smart_monitor_report(cycle_result):
             return lbl
         return f"SNR {lbl}"
 
-    snr_z = data.get("snr_zone") or {}
+    snr_z = data.get("snr_focus_zone") or data.get("snr_zone") or {}
+    confl_snr_z = data.get("snr_confluence_source")
     z_tf = str(zone.get("timeframe") or "").strip()
     z_type = str(zone.get("zone_type") or zone.get("type") or "").strip()
     z_src = str(zone.get("source") or "SMC").strip().upper()
@@ -818,10 +1789,10 @@ def format_smart_monitor_report(cycle_result):
     if z_src == "SNR":
         src_part = _format_snr_source_part(z_rank)
         tag_inner = f"{base_tag} | {src_part}".strip(" |")
-    elif data.get("confluence") == "ALIGNED" and snr_z:
-        c_tf = str(snr_z.get("timeframe") or "").strip()
-        c_zt = str(snr_z.get("zone_type") or "").strip().upper()
-        c_lbl = str(snr_z.get("rank_label") or "").strip()
+    elif data.get("confluence") == "ALIGNED" and isinstance(confl_snr_z, dict):
+        c_tf = str(confl_snr_z.get("timeframe") or "").strip()
+        c_zt = str(confl_snr_z.get("zone_type") or "").strip().upper()
+        c_lbl = str(confl_snr_z.get("rank_label") or "").strip()
         snr_desc = " ".join(part for part in (c_tf, c_zt, _format_snr_source_part(c_lbl)) if part)
         tag_inner = f"{base_tag} + {snr_desc}".strip(" +")
     else:
@@ -840,13 +1811,36 @@ def format_smart_monitor_report(cycle_result):
 
     snr_lo = safe_float(snr_z.get("low", snr_z.get("price_low")), 0.0)
     snr_hi = safe_float(snr_z.get("high", snr_z.get("price_high")), 0.0)
-    snr_zone_line = None
-    if snr_lo > 0 and snr_hi > 0 and (abs(snr_lo - lo) > 0.01 or abs(snr_hi - hi) > 0.01):
+    snr_focus_line = None
+    if snr_lo > 0 and snr_hi > 0 and (z_src != "SNR" or abs(snr_lo - lo) > 0.01 or abs(snr_hi - hi) > 0.01):
         s_lbl = str(snr_z.get("rank_label") or "SNR").strip()
         s_tf = str(snr_z.get("timeframe") or "").strip()
         s_grd = str(snr_z.get("grade") or "N/A").strip()
+        s_life = str(snr_z.get("lifecycle_status") or snr_z.get("status") or "ACTIVE").upper()
+        s_state_tag = f" | {s_life.replace('_', ' ')}" if s_life not in ("ACTIVE", "TOUCHED", "SWEEP", "RADAR", "") else ""
         s_tag = f"{s_lbl} {s_tf}".strip()
-        snr_zone_line = f"SNR ZONE    : {snr_lo:.2f} - {snr_hi:.2f} ({s_tag} | Grade {s_grd})"
+        s_rsn_short = str(data.get("snr_selection_reason_short") or "").strip()
+        s_rsn_tag = (
+            f" | {s_rsn_short}"
+            if s_rsn_short in ("PRICE AT SUPPORT", "NO ACTIVE RESISTANCE", "PRICE AT RESISTANCE", "NO ACTIVE SUPPORT")
+            else ""
+        )
+        snr_focus_line = f"SNR FOCUS   : {snr_lo:.2f} - {snr_hi:.2f} ({s_tag} | Grade {s_grd}{s_state_tag}{s_rsn_tag})"
+
+    snr_confl_source_line = None
+    if z_src != "SNR" and lo > 0 and hi > 0:
+        confl_src_disp = str(data.get("snr_confluence_source_display") or "NONE").strip()
+        snr_confl_source_line = f"SNR CONFLUENCE SOURCE : {confl_src_disp}"
+
+    smc_z = data.get("smc_zone") or {}
+    smc_lo = safe_float(smc_z.get("price_low", smc_z.get("low")), 0.0)
+    smc_hi = safe_float(smc_z.get("price_high", smc_z.get("high")), 0.0)
+    smc_zone_line = None
+    if z_src == "SNR" and smc_lo > 0 and smc_hi > 0 and (abs(smc_lo - lo) > 0.01 or abs(smc_hi - hi) > 0.01):
+        m_tf = str(smc_z.get("timeframe") or "").strip()
+        m_zt = str(smc_z.get("zone_type") or "").strip()
+        m_grd = str(smc_z.get("grade") or "N/A").strip()
+        smc_zone_line = f"SMC ZONE    : {smc_lo:.2f} - {smc_hi:.2f} ({m_tf} {m_zt} | Grade {m_grd})".replace("  ", " ")
 
     pending_disp = data.get("pending_display", data.get("pending_status", "WAIT"))
     confirmed_disp = data.get("confirmed_display", data.get("confirmed", "WAIT"))
@@ -856,14 +1850,10 @@ def format_smart_monitor_report(cycle_result):
     status_text = "WAIT" if data["data_invalid"] and data["monitor_state"] not in focused_states else data["monitor_state"]
     alert_text = data.get("alert_display", "NONE")
     alert_text = str(alert_text).replace("\n", " ").strip()
-    if len(alert_text) > 60:
-        alert_text = alert_text[:57].rstrip() + "..."
     signal = data.get("signal_display", data.get("signal", "WAIT"))
     main_reason = str(data["reason"] or summary.get("main_reason") or "N/A").replace("\n", " ").strip()
     if data["reason"] == "WAITING FOR ZONE PULLBACK" and summary.get("main_reason"):
         main_reason = str(summary["main_reason"]).replace("\n", " ").strip()
-    if len(main_reason) > 60:
-        main_reason = main_reason[:57].rstrip() + "..."
 
     smc_focus = zone or data["decision"].get("primary_zone") or {}
     smc_block = format_smc_zone_lines(
@@ -889,7 +1879,7 @@ def format_smart_monitor_report(cycle_result):
         )
         radar_lines = [
             "RADAR CANDIDATE",
-            f"RADAR       : {r_lo:.2f} - {r_hi:.2f} ({r_tf} {r_zt} | Grade {r_grd} {r_sc_txt} | Dist {r_dist:.2f} pt | Status: RADAR)",
+            f"RADAR       : {r_lo:.2f} - {r_hi:.2f} ({r_tf} {r_zt} | Grade {r_grd} {r_sc_txt} | Dist {r_dist:.2f} pt | RADAR ALT)",
         ]
 
     lines = [
@@ -904,25 +1894,41 @@ def format_smart_monitor_report(cycle_result):
         "ACTIVE SETUP",
         "------------------------------------------",
         *zone_lines,
-        *( [snr_zone_line] if snr_zone_line else [] ),
-        f"CONFLUENCE  : {data['confluence']}",
+        *( [smc_zone_line] if smc_zone_line else [] ),
+        *( [snr_focus_line] if snr_focus_line else [] ),
+        *( [snr_confl_source_line] if snr_confl_source_line else [] ),
+        f"CONFLUENCE  : {data.get('confluence_display', data['confluence'])}",
         f"SMC + SNR   : {data['confluence']}",
         *radar_lines,
         "ENTRY STATUS",
         f"PENDING     : {pending_disp}",
+        *( [f"ALT PENDING : {data['alt_pending_display']}"] if data.get("alt_pending_display") else [] ),
         f"CONFIRMED   : {confirmed_disp}",
         f"TOUCH       : {touch_disp}",
         f"TRIGGER     : {trigger_disp}",
         "SMART MONITOR",
         f"STATE       : {status_text}",
-        *( [f"HIST. EVENT : {data['historical_event']}"] if data.get("historical_event") else [] ),
+        *( [f"SNR WATCH   : {data['snr_breakout_watch']}"] if data.get("snr_breakout_watch") else [] ),
+        *( [f"HIST. EVENT : {data['historical_event']}"] if data.get("historical_event") and status_text == "HISTORICAL_TOUCH" else [] ),
         f"NEXT        : {data['next_action']}",
         f"ALERT       : {alert_text}",
+        *(
+            [f"RISK ALERT  : {data['critical_risk_display']}"]
+            if data.get("critical_risk_display") else []
+        ),
         "FINAL",
         f"SIGNAL      : {signal}",
         f"REASON      : {main_reason}",
         "==========================================",
     ]
+    news_summary = str((cycle_result or {}).get("news_summary") or "").strip() if isinstance(cycle_result, dict) else ""
+    if news_summary and len(lines) < 36:
+        compact_news = news_summary.replace("NEWS RISK : ", "").replace(" | NEXT EVENT : ", " | ")
+        lines.insert(-1, f"US NEWS     : {compact_news}")
+    gold_summary = str((cycle_result or {}).get("gold_news_summary") or "").strip() if isinstance(cycle_result, dict) else ""
+    if gold_summary and len(lines) < 38:
+        compact_gold = gold_summary.replace("GOLD NEWS : ", "")
+        lines.insert(-1, f"GOLD NEWS   : {compact_gold}")
     if not snapshot.get("snapshot_status") and data["price"] <= 0:
         lines[3] = "PRICE       : N/A"
     return "\n".join(lines)
@@ -936,7 +1942,16 @@ def format_smart_monitor_detail(cycle_result):
     snapshot = data["snapshot"]
     decision = data["decision"]
     summary = data["summary"]
-    stages = decision.get("m5_stages") or decision.get("stages") or {}
+    raw_stages = decision.get("m5_stages") or decision.get("stages") or {}
+    stages = raw_stages if _m5_stages_match_zone(decision, zone) else {}
+    m5_conf_det = data.get("m5_confirmation") if isinstance(data.get("m5_confirmation"), dict) else None
+    struct_det_line = data["trigger"]
+    if m5_conf_det and data["trigger"] == "CONFIRMED":
+        m5_tf_d = str(m5_conf_det.get("timeframe") or "").strip()
+        m5_ts_d = str(m5_conf_det.get("timestamp") or "").strip()
+        m5_meta_parts = [p for p in (m5_tf_d, m5_ts_d) if p]
+        if m5_meta_parts:
+            struct_det_line = f"{data['trigger']} ({' @ '.join(m5_meta_parts)})"
     active_setup = data.get("active_setup") or {}
     zone_id = str(active_setup.get("zone_id") or zone.get("zone_id") or "N/A")
     setup_type = str(active_setup.get("setup_type") or decision.get("setup_type") or plan.get("setup_type") or "N/A")
@@ -947,8 +1962,81 @@ def format_smart_monitor_detail(cycle_result):
         blockers.insert(0, str(snapshot.get("error_reason") or f"Data freshness: {data['freshness']}"))
     if not blockers:
         blockers = [str(summary.get("main_reason") or "N/A")]
-    pending_status = str(plan.get("status") or "WAIT").upper()
-    exp = plan.get("suggested_expiration") or plan.get("expires_at") or "N/A"
+    pending_setup = data.get("pending_setup") or {}
+    pending_status = str(data.get("pending_status") or "WAIT").upper()
+    plan_st_det = str(pending_setup.get("plan_status") or ("READY" if pending_status.startswith("READY") else pending_status)).upper()
+    broker_st_det = str(pending_setup.get("broker_order_status") or "UNKNOWN").upper()
+    exp = pending_setup.get("suggested_expiration") or pending_setup.get("expires_at") or "N/A"
+    p_det_lines = [
+        f"PENDING PLAN (PLAN: {plan_st_det} | MT5: {broker_st_det})",
+        f"PLAN STATUS : {plan_st_det}",
+        f"MT5 STATUS  : {broker_st_det}",
+        f"STATUS      : {pending_status}",
+    ]
+    if pending_status.startswith("READY") and pending_setup.get("zone_id") and pending_setup.get("zone_id") != "N/A":
+        p_det_lines.append(
+            f"ZONE ID     : {pending_setup['zone_id']} ({pending_setup.get('source_zone_label', 'N/A')} | "
+            f"{pending_setup.get('plan_role', 'SELECTED_PENDING')} | {pending_setup.get('source_role', 'N/A')})"
+        )
+        if pending_setup.get("entry") and pending_setup.get("sl") and pending_setup.get("tp1"):
+            rr_det = f"1:{safe_float(pending_setup.get('rr')):.2f}" if pending_setup.get("rr") else "N/A"
+            p_det_lines.append(
+                f"LEVELS      : {pending_setup.get('order_type', '')} {safe_float(pending_setup['entry']):.2f} | "
+                f"SL {safe_float(pending_setup['sl']):.2f} | TP1 {safe_float(pending_setup['tp1']):.2f} | RR {rr_det}"
+            )
+        p_recon = pending_setup.get("mt5_reconciliation")
+        if isinstance(p_recon, dict):
+            p_det_lines.append(f"MT5 EVIDENCE: {format_pending_reconciliation_evidence(p_recon)}")
+    p_det_lines.append(f"EXPIRATION  : {exp}")
+    for alt_p in (data.get("alt_pending_setups") or [])[:2]:
+        alt_rr = f"1:{safe_float(alt_p.get('rr')):.2f}" if alt_p.get("rr") else "N/A"
+        alt_lvls = ""
+        if alt_p.get("entry") and alt_p.get("sl") and alt_p.get("tp1"):
+            alt_lvls = (
+                f" | {alt_p.get('order_type', '')} {safe_float(alt_p['entry']):.2f} "
+                f"/ SL {safe_float(alt_p['sl']):.2f} / TP1 {safe_float(alt_p['tp1']):.2f}"
+            )
+        alt_plan_st = str(alt_p.get("plan_status") or "READY").upper()
+        alt_brk_st = str(alt_p.get("broker_order_status") or "UNKNOWN").upper()
+        p_det_lines.append(
+            f"ALT PENDING : {alt_p.get('zone_id', 'N/A')} ({alt_p.get('source_zone_label', 'N/A')} | "
+            f"{alt_p.get('plan_role', 'ALT_PENDING')} | {alt_p.get('source_role', 'N/A')} | "
+            f"PLAN: {alt_plan_st} | MT5: {alt_brk_st} | RR {alt_rr}{alt_lvls})"
+        )
+        alt_recon = alt_p.get("mt5_reconciliation")
+        if isinstance(alt_recon, dict):
+            p_det_lines.append(f"ALT MT5     : {format_pending_reconciliation_evidence(alt_recon)}")
+    if zone_id and zone_id != "N/A" and str(zone.get("source") or "SMC").upper() != "SNR":
+        focus_sum = smc_zone_summary(zone, decision, allow_plan=not data["data_invalid"])
+        if focus_sum.get("entry", 0.0) <= 0:
+            p_det_lines.append(
+                f"FOCUS PLAN  : {zone_id} (ACTIVE_FOCUS | SL/TP1 N/A — {focus_sum.get('note', 'PLAN UNAVAILABLE')})"
+            )
+    snr_z_det = data.get("snr_focus_zone") or data.get("snr_zone") or {}
+    snr_z_det_lo = safe_float(snr_z_det.get("low", snr_z_det.get("price_low")), 0.0)
+    snr_z_det_hi = safe_float(snr_z_det.get("high", snr_z_det.get("price_high")), 0.0)
+    if snr_z_det_lo > 0 and snr_z_det_hi > 0:
+        snr_z_det_sc = f"{safe_float(snr_z_det.get('score')):.2f}" if snr_z_det.get("score") is not None else "N/A"
+        snr_det_line = (
+            f"{snr_z_det.get('rank_label', 'SNR')} {snr_z_det.get('timeframe', '')} "
+            f"{snr_z_det_lo:.2f}-{snr_z_det_hi:.2f} | Grade {snr_z_det.get('grade', 'N/A')} ({snr_z_det_sc}) | "
+            f"{data.get('snr_selection_reason', 'N/A')}"
+        ).replace("  ", " ")
+    else:
+        snr_det_line = f"NONE ({data.get('snr_selection_reason', 'N/A')})"
+    snr_confl_det = data.get("snr_confluence_source")
+    if isinstance(snr_confl_det, dict):
+        c_det_lo = safe_float(snr_confl_det.get("low", snr_confl_det.get("price_low")), 0.0)
+        c_det_hi = safe_float(snr_confl_det.get("high", snr_confl_det.get("price_high")), 0.0)
+        c_det_sc = f"{safe_float(snr_confl_det.get('score')):.2f}" if snr_confl_det.get("score") is not None else "N/A"
+        c_det_ov = safe_float(data.get("snr_confluence_overlap_points"), 0.0)
+        snr_confl_det_line = (
+            f"{snr_confl_det.get('rank_label', 'SNR')} {snr_confl_det.get('timeframe', '')} "
+            f"{c_det_lo:.2f}-{c_det_hi:.2f} | Grade {snr_confl_det.get('grade', 'N/A')} ({c_det_sc}) | "
+            f"overlap {c_det_ov:.2f} pt"
+        ).replace("  ", " ")
+    else:
+        snr_confl_det_line = str(data.get("snr_confluence_source_display") or "NONE")
     lines = [
         format_smart_monitor_report(cycle_result),
         "",
@@ -957,22 +2045,23 @@ def format_smart_monitor_detail(cycle_result):
         f"ZONE STATUS : {data['lifecycle']}",
         f"MONITOR     : {data['monitor_state']}",
         f"SIGNAL      : {summary.get('signal_status', 'NO SETUP')}",
+        f"SNR FOCUS   : {snr_det_line}",
+        f"SNR CONFLUENCE SOURCE : {snr_confl_det_line}",
+        f"CONFLUENCE  : {data['confluence']} ({data.get('confluence_reason', 'N/A')})",
         "",
         "VALIDATION",
         f"H4 / H1     : {summary.get('h4_bias', 'N/A')} / {summary.get('h1_bias', 'N/A')}",
         f"M30         : {summary.get('m30_bias', 'N/A')}",
         f"ZONE TOUCH  : {data.get('touch_display', data['touch'])}",
-        f"SWEEP       : {_stage_status(stages.get('liquidity_sweep'), summary.get('liquidity_sweep', 'WAIT'))}",
-        f"STRUCTURE   : {data['trigger']}",
-        f"DISPLACEMENT: {_stage_status(stages.get('displacement'), summary.get('displacement', 'WAIT'))}",
-        f"R:R CHECK   : {_stage_status(stages.get('risk_reward'), summary.get('rr_stage', 'WAIT'))}",
+        f"SWEEP       : {_stage_status(stages.get('liquidity_sweep'), 'NOT_CHECKED' if not stages else summary.get('liquidity_sweep', 'WAIT'))}",
+        f"STRUCTURE   : {struct_det_line}",
+        f"DISPLACEMENT: {_stage_status(stages.get('displacement'), 'NOT_CHECKED' if not stages else summary.get('displacement', 'WAIT'))}",
+        f"R:R CHECK   : {_stage_status(stages.get('risk_reward'), 'NOT_CHECKED' if not stages else summary.get('rr_stage', 'WAIT'))}",
         f"SPREAD      : {safe_float(snapshot.get('spread'), 0.0):.2f}" if snapshot.get("spread") is not None else "SPREAD      : N/A",
         f"FRESHNESS   : {data['freshness']} | CONNECTION: {snapshot.get('connection_status', 'UNKNOWN')}",
         f"LAST M5     : {(snapshot.get('last_candle_times') or {}).get('M5', snapshot.get('last_closed_m5', 'N/A'))}",
         "",
-        "PENDING PLAN (NOT PLACED)",
-        f"STATUS      : {pending_status}",
-        f"EXPIRATION  : {exp}",
+        *p_det_lines,
         "",
         "BLOCKERS",
     ]
@@ -982,6 +2071,37 @@ def format_smart_monitor_detail(cycle_result):
         f"SMC + SNR   : {data['confluence']} (informational only)",
         f"NEXT ACTION : {data['next_action']}",
     ])
+    cat_al = data.get("categorized_alerts") or {}
+    if any(cat_al.get(k) for k in ("risk", "market", "entry", "account", "historical")):
+        lines.extend(["", "ALERT PRIORITY BREAKDOWN"])
+        for cat_key, cat_lbl in (
+            ("risk", "RISK ALERT"),
+            ("market", "MARKET ALERT"),
+            ("entry", "ENTRY ALERT"),
+            ("account", "ACCOUNT ALERT"),
+            ("historical", "HISTORICAL INFO"),
+        ):
+            for item_msg in (cat_al.get(cat_key) or []):
+                lines.append(f"  [{cat_lbl}] {item_msg}")
+    news_sum_det = str((cycle_result or {}).get("news_summary") or "").strip() if isinstance(cycle_result, dict) else ""
+    gold_sum_det = str((cycle_result or {}).get("gold_news_summary") or "").strip() if isinstance(cycle_result, dict) else ""
+    news_al_det = list((cycle_result or {}).get("news_alerts") or []) if isinstance(cycle_result, dict) else []
+    gold_arts_det = list(((cycle_result or {}).get("news") or {}).get("gold_articles") or []) if isinstance(cycle_result, dict) else []
+    if news_sum_det or gold_sum_det or news_al_det or gold_arts_det:
+        lines.extend(["", "US NEWS RADAR & GOLD MARKET NEWS"])
+        if news_sum_det:
+            lines.append(news_sum_det)
+        if gold_sum_det:
+            lines.append(gold_sum_det)
+        for ga in gold_arts_det[:3]:
+            if isinstance(ga, dict) and ga.get("headline"):
+                g_sent = str((ga.get("sentiment") or {}).get("direction") or "UNCONFIRMED")
+                g_hl = str(ga.get("headline") or "").strip()
+                if len(g_hl) > 90:
+                    g_hl = g_hl[:87].rstrip() + "..."
+                lines.append(f"  - [{ga.get('topic', 'Gold')} | {g_sent}] {g_hl} ({ga.get('publisher', 'N/A')})")
+        for na in news_al_det:
+            lines.append(na)
     smc_detail = (data["smc"].get("formatted_section") or "").strip()
     snr_detail = (data["snr"].get("formatted_section") or "").strip()
     if smc_detail:

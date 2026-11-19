@@ -15,6 +15,7 @@ from modules.sinyal_jurnal import (
     _migrasi_header_jurnal,
     evaluasi_dan_perbarui_jurnal_sinyal,
 )
+from modules.terminal_ui import print_terminal
 
 
 def _format_label_diambil(raw_diambil):
@@ -102,15 +103,15 @@ def tampilkan_rekap():
     lengkap dengan win-rate, total R, serta ringkasan per kelas risiko & model AI."""
     rows, mt5_aktif = evaluasi_dan_perbarui_jurnal_sinyal()
     if not rows:
-        print("\n   Belum ada sinyal tercatat di jurnal CSV.")
+        print_terminal("\n   Belum ada sinyal tercatat di jurnal CSV.")
         return
 
     lebar_garis = 138
-    print("\n" + "=" * lebar_garis)
-    print("📖 JURNAL SINYAL & EVALUASI ZONA (ACUAN HASIL HIT TP vs HIT SL + PENANDA ZONA YANG DIAMBIL)")
-    print("=" * lebar_garis)
-    print(f"{'#':<3} | {'Waktu Lokal':<16} | {'Arah':<4} | {'Zona Entry':<19} | {'SL':<8} | {'TP1 / TP2':<19} | {'Diambil?':<14} | {'Status Hasil':<16} | {'Hasil R':<8} | {'Setup / Keterangan'}")
-    print("-" * lebar_garis)
+    print_terminal("\n" + "=" * lebar_garis)
+    print_terminal("📖 JURNAL SINYAL & EVALUASI ZONA (ACUAN HASIL HIT TP vs HIT SL + PENANDA ZONA YANG DIAMBIL)")
+    print_terminal("=" * lebar_garis)
+    print_terminal(f"{'#':<3} | {'Waktu Lokal':<16} | {'Arah':<4} | {'Zona Entry':<19} | {'SL':<8} | {'TP1 / TP2':<19} | {'Diambil?':<14} | {'Status Hasil':<16} | {'Hasil R':<8} | {'Setup / Keterangan'}")
+    print_terminal("-" * lebar_garis)
 
     tot_sinyal = len(rows)
     tot_trade = 0
@@ -220,44 +221,44 @@ def tampilkan_rekap():
         r_display = f"{r_val_str:>7}" if r_val_str else "      -"
         ambil_col = "✅ DIAMBIL" if is_diambil else ("📌 LIMIT" if "LIMIT" in lbl_ambil else "⚪ -")
 
-        print(f"{idx:>3} | {wkt_str:<16} | {arah:<4} | {zona_str:<19} | {sl:>8.2f} | {tp_str:<19} | {ambil_col:<13} | {ikon_st:<16} | {r_display} | {ket_pendek}")
+        print_terminal(f"{idx:>3} | {wkt_str:<16} | {arah:<4} | {zona_str:<19} | {sl:>8.2f} | {tp_str:<19} | {ambil_col:<13} | {ikon_st:<16} | {r_display} | {ket_pendek}")
 
-    print("=" * lebar_garis)
+    print_terminal("=" * lebar_garis)
     wr_total = f"{(tot_menang / tot_trade * 100):.1f}%" if tot_trade > 0 else "-"
     exp_total = f"{(tot_r / tot_trade):+.2f}R" if tot_trade > 0 else "-"
-    print("📊 RINGKASAN PERFORMA JURNAL SINYAL (SEMUA SINYAL):")
-    print(f"• Total Sinyal Tercatat : {tot_sinyal} sinyal")
-    print(f"• Selesai (Trade Closed): {tot_trade} trade (🟢 Menang: {tot_menang} | 🔴 Kalah: {tot_kalah})")
-    print(f"• Win-Rate Keseluruhan  : {wr_total}")
-    print(f"• Akumulasi Profit/Loss : {tot_r:+.2f}R")
-    print(f"• Expectancy per Trade  : {exp_total} / trade")
-    print(f"• Posisi Berjalan/Wait  : {tot_running} Running | {tot_terlewat} Terlewat/Belum Terisi")
+    print_terminal("📊 RINGKASAN PERFORMA JURNAL SINYAL (SEMUA SINYAL):")
+    print_terminal(f"• Total Sinyal Tercatat : {tot_sinyal} sinyal")
+    print_terminal(f"• Selesai (Trade Closed): {tot_trade} trade (🟢 Menang: {tot_menang} | 🔴 Kalah: {tot_kalah})")
+    print_terminal(f"• Win-Rate Keseluruhan  : {wr_total}")
+    print_terminal(f"• Akumulasi Profit/Loss : {tot_r:+.2f}R")
+    print_terminal(f"• Expectancy per Trade  : {exp_total} / trade")
+    print_terminal(f"• Posisi Berjalan/Wait  : {tot_running} Running | {tot_terlewat} Terlewat/Belum Terisi")
 
-    print("-" * lebar_garis)
+    print_terminal("-" * lebar_garis)
     wr_ambil = f"{(ambil_menang / ambil_trade * 100):.1f}%" if ambil_trade > 0 else "-"
     daftar_ambil_str = ", ".join(ambil_nomor_list) if ambil_nomor_list else "Belum ada zona yang ditandai diambil"
-    print("🎯 RINGKASAN KHUSUS ZONA YANG ANDA AMBIL (✅ DIAMBIL):")
-    print(f"• Zona Diambil Tercatat : {ambil_n} zona -> {daftar_ambil_str}")
-    print(f"• Hasil Eksekusi Anda   : Selesai {ambil_trade} trade (🟢 Menang: {ambil_menang} | 🔴 Kalah: {ambil_kalah}) | Win-Rate Anda: {wr_ambil} | Total Hasil: {ambil_r:+.2f}R")
-    print("  💡 Cara Menandai Manual: Ketik 'ambil <nomor>' (contoh: ambil 7 atau ambil 7,8,20) untuk menandai zona yang Anda ambil,")
-    print("                          atau ketik 'skip <nomor>' (contoh: skip 9) untuk menghapus tanda diambil.")
+    print_terminal("🎯 RINGKASAN KHUSUS ZONA YANG ANDA AMBIL (✅ DIAMBIL):")
+    print_terminal(f"• Zona Diambil Tercatat : {ambil_n} zona -> {daftar_ambil_str}")
+    print_terminal(f"• Hasil Eksekusi Anda   : Selesai {ambil_trade} trade (🟢 Menang: {ambil_menang} | 🔴 Kalah: {ambil_kalah}) | Win-Rate Anda: {wr_ambil} | Total Hasil: {ambil_r:+.2f}R")
+    print_terminal("  💡 Cara Menandai Manual: Ketik 'ambil <nomor>' (contoh: ambil 7 atau ambil 7,8,20) untuk menandai zona yang Anda ambil,")
+    print_terminal("                          atau ketik 'skip <nomor>' (contoh: skip 9) untuk menghapus tanda diambil.")
     if not mt5_aktif:
-        print("  *(MT5 saat ini offline; status di atas diambil dari riwayat jurnal tersimpan terakhir)*")
+        print_terminal("  *(MT5 saat ini offline; status di atas diambil dari riwayat jurnal tersimpan terakhir)*")
 
-    print("-" * lebar_garis)
-    print("BREAKDOWN PER KELAS RISIKO:")
+    print_terminal("-" * lebar_garis)
+    print_terminal("BREAKDOWN PER KELAS RISIKO:")
     for nama_k, stat_k in sorted(kelas_stat.items()):
         tr_k = stat_k["menang"] + stat_k["kalah"]
         wr_k = f"{(stat_k['menang'] / tr_k * 100):.0f}%" if tr_k > 0 else "-"
         ex_k = f"{(stat_k['total_r'] / tr_k):+.2f}R" if tr_k > 0 else "-"
-        print(f"• {nama_k:<12} : {stat_k['n']:>2} sinyal | Selesai {tr_k:>2} (Menang {stat_k['menang']}, Kalah {stat_k['kalah']}) | Win-Rate {wr_k} | Total {stat_k['total_r']:+.2f}R | Exp {ex_k}/tr | Running {stat_k['running']}")
+        print_terminal(f"• {nama_k:<12} : {stat_k['n']:>2} sinyal | Selesai {tr_k:>2} (Menang {stat_k['menang']}, Kalah {stat_k['kalah']}) | Win-Rate {wr_k} | Total {stat_k['total_r']:+.2f}R | Exp {ex_k}/tr | Running {stat_k['running']}")
 
     if len(model_stat) > 1 or any(k != "TIDAK DIKETAHUI" for k in model_stat):
-        print("-" * lebar_garis)
-        print("BREAKDOWN PER MODEL AI:")
+        print_terminal("-" * lebar_garis)
+        print_terminal("BREAKDOWN PER MODEL AI:")
         for nama_m, stat_m in sorted(model_stat.items()):
             tr_m = stat_m["menang"] + stat_m["kalah"]
             wr_m = f"{(stat_m['menang'] / tr_m * 100):.0f}%" if tr_m > 0 else "-"
             ex_m = f"{(stat_m['total_r'] / tr_m):+.2f}R" if tr_m > 0 else "-"
-            print(f"• {nama_m:<25} : {stat_m['n']:>2} sinyal | Selesai {tr_m:>2} (Menang {stat_m['menang']}, Kalah {stat_m['kalah']}) | Win-Rate {wr_m} | Total {stat_m['total_r']:+.2f}R | Exp {ex_m}/tr")
-    print("=" * lebar_garis)
+            print_terminal(f"• {nama_m:<25} : {stat_m['n']:>2} sinyal | Selesai {tr_m:>2} (Menang {stat_m['menang']}, Kalah {stat_m['kalah']}) | Win-Rate {wr_m} | Total {stat_m['total_r']:+.2f}R | Exp {ex_m}/tr")
+    print_terminal("=" * lebar_garis)

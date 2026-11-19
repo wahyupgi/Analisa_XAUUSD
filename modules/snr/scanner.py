@@ -106,7 +106,7 @@ def _zone_brief(zone):
     return f"{label} {zone.get('timeframe', '')} {safe_float(zone.get('low')):.2f}-{safe_float(zone.get('high')):.2f}".strip()
 
 
-def _track_snr_focus(focus_zone, ranked_zones):
+def _track_snr_focus(focus_zone, ranked_zones, selection_reason=None):
     """Persist the focused SNR zone and explain a focus change; non-critical, never blocks a scan."""
     if not isinstance(focus_zone, dict) or not focus_zone.get("zone_id"):
         return None
@@ -134,7 +134,8 @@ def _track_snr_focus(focus_zone, ranked_zones):
                 if status not in ("ACTIVE", "TOUCHED", "SWEEP"):
                     reason = f"PREVIOUS ZONE {status}"
                 elif saved["zone_id"] in active_ids:
-                    reason = "FOCUS RANKING OR SETUP CHANGED"
+                    sel_head = str(selection_reason or "").split(" (", 1)[0].strip()
+                    reason = sel_head if sel_head else "FOCUS RANKING OR SETUP CHANGED"
                 else:
                     reason = "PREVIOUS ZONE NOT IN ACTIVE RANKING"
             else:
@@ -222,15 +223,64 @@ def _build_snr_provisional_plan(entry_validation, ranked_zones, market_bias, cur
     return plan
 
 
-def _apply_saved_lifecycle(zone, saved):
+def _is_valid_saved_breakout(saved_bo, tf, clean_df=None):
+    """Verify persisted breakout_info matches the zone's own timeframe and is a confirmed break."""
+    if not isinstance(saved_bo, dict):
+        return True
+    tf_up = str(tf or "").upper()
+    eval_tf = str(saved_bo.get("eval_timeframe") or "").upper()
+    if eval_tf and tf_up and eval_tf != tf_up:
+        return False
+    bo_status = str(saved_bo.get("status") or "").upper()
+    if bo_status == "BREAKOUT_PENDING_CONFIRMATION" and not bool(saved_bo.get("reclaim_detected")):
+        return False
+    bo_time = str(saved_bo.get("breakout_bar_time") or "").strip()
+    if tf_up != "M5" and bo_time and clean_df is not None and not clean_df.empty and "Time" in clean_df.columns:
+        bar_times = [str(v) for v in clean_df["Time"].tolist()]
+        if bar_times and bar_times[0] <= bo_time <= bar_times[-1] and bo_time not in bar_times:
+            return False
+    return True
+
+
+def _apply_saved_lifecycle(zone, saved, clean_df=None):
     saved_status = str((saved or {}).get("lifecycle_status", "")).upper()
     broken_states = ("BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED")
-    if saved_status not in broken_states + ("INVALIDATED", "BREAKDOWN_PENDING", "UNCONFIRMED"):
+    pending_states = ("BREAKDOWN_PENDING", "BREAKOUT_PENDING")
+    if saved_status not in broken_states + ("INVALIDATED", "UNCONFIRMED") + pending_states:
+        return
+    z_type = str(zone.get("zone_type", "")).upper()
+    tf = str(zone.get("timeframe", "")).upper()
+    # Pending states bersifat sementara (bukan terminal): jangan pernah menurunkan zona yang sudah BROKEN/INVALIDATED
+    # maupun memaksakan arah pending yang tidak cocok (mis. BREAKDOWN_PENDING pada RESISTANCE).
+    if saved_status in pending_states:
+        expected_pend = "BREAKDOWN_PENDING" if z_type == "SUPPORT" else ("BREAKOUT_PENDING" if z_type == "RESISTANCE" else "")
+        saved_bo = (saved or {}).get("breakout_info")
+        if (
+            saved_status == expected_pend
+            and str(zone.get("lifecycle_status", "")).upper() == expected_pend
+            and isinstance(saved_bo, dict)
+            and str(saved_bo.get("zone_type", z_type)).upper() == z_type
+            and str(saved_bo.get("eval_timeframe", tf)).upper() == tf
+        ):
+            zone["lifecycle_breakout_info"] = saved_bo
         return
     current_status = str(zone.get("lifecycle_status", "")).upper()
     if saved_status == "UNCONFIRMED" and current_status != "UNCONFIRMED":
         return
     if current_status == "INVALIDATED" and saved_status != "INVALIDATED":
+        return
+
+    saved_bo = (saved or {}).get("breakout_info")
+    if isinstance(saved_bo, dict) and str(saved_bo.get("zone_type", z_type)).upper() not in ("", z_type):
+        saved_bo = None
+    if (
+        saved_status in broken_states
+        and isinstance(saved_bo, dict)
+        and not _is_valid_saved_breakout(saved_bo, tf, clean_df=clean_df)
+        and not zone.get("is_broken")
+        and not zone.get("is_invalidated")
+    ):
+        # Tolak restore state RECLAIM_PENDING/BROKEN yang berasal dari artefak sub-TF (mis. M5) / belum terkonfirmasi di TF zona.
         return
 
     touch = dict(zone.get("touch_analysis") or {})
@@ -262,9 +312,10 @@ def _apply_saved_lifecycle(zone, saved):
         "is_invalidated": saved_status == "INVALIDATED",
         "is_active": saved_status in ("TOUCHED", "SWEEP", "ACTIVE"),
         "touch_analysis": touch,
-        "lifecycle_breakout_info": (saved or {}).get("breakout_info"),
+        "lifecycle_breakout_info": saved_bo,
         "lifecycle_retest_origin": (saved or {}).get("retest_origin"),
         "lifecycle_event": (saved or {}).get("lifecycle_event", saved_status),
+        "lifecycle_event_time": (saved or {}).get("lifecycle_event_time"),
         "reclaim_status": (saved or {}).get("reclaim_status", "WAIT"),
     })
 
@@ -278,19 +329,33 @@ def _evaluate_post_break_state(zone, df, breakout_info, config, fallback_status=
         "reclaim_status": "WAIT",
         "retest_status": "WAIT",
         "retest_origin": "FROM_BELOW" if z_type == "SUPPORT" else "FROM_ABOVE",
+        "event_time": None,
     }
     clean_df, _ = prepare_snr_frame(df, has_unclosed_last_bar=False)
-    if clean_df.empty or not breakout_info:
+    if clean_df.empty:
         result["reclaim_status"] = "UNCONFIRMED"
         return result
 
-    break_time = str(breakout_info.get("breakout_bar_time") or "")
     bar_times = [str(value) for value in clean_df["Time"].tolist()]
-    try:
-        break_idx = bar_times.index(break_time)
-    except ValueError:
-        result["reclaim_status"] = "UNCONFIRMED"
-        return result
+    break_time = str((breakout_info or {}).get("breakout_bar_time") or "").strip()
+    break_idx = None
+    if break_time:
+        try:
+            break_idx = bar_times.index(break_time)
+        except ValueError:
+            if bar_times and break_time < bar_times[0]:
+                # Historical break occurred before the current lookback window -> all bars in clean_df are post-break
+                break_idx = -1
+            else:
+                result["reclaim_status"] = "UNCONFIRMED"
+                return result
+    else:
+        ta_idx = (zone.get("touch_analysis") or {}).get("first_break_index")
+        if isinstance(ta_idx, int) and 0 <= ta_idx < len(clean_df):
+            break_idx = ta_idx
+        else:
+            result["reclaim_status"] = "UNCONFIRMED"
+            return result
 
     post_break = clean_df.iloc[break_idx + 1:].reset_index(drop=True)
     if post_break.empty:
@@ -301,6 +366,7 @@ def _evaluate_post_break_state(zone, df, breakout_info, config, fallback_status=
     high = safe_float(zone.get("high"), low)
     last = post_break.iloc[-1]
     last_close = safe_float(last.get("Close"), 0.0)
+    result["event_time"] = str(last.get("Time") or "") or None
     overlap = (
         (post_break["High"] >= low) & (post_break["Low"] <= high)
     ).any()
@@ -331,6 +397,8 @@ def _evaluate_post_break_state(zone, df, breakout_info, config, fallback_status=
             result["lifecycle_event"] = "RECLAIMED"
             result["reclaim_status"] = "CONFIRMED"
             result["retest_status"] = "CONFIRMED"
+            if reclaim.get("breakout_bar_time"):
+                result["event_time"] = str(reclaim.get("breakout_bar_time"))
         else:
             result["lifecycle_status"] = "RECLAIM_PENDING"
             result["reclaim_status"] = "PENDING"
@@ -338,6 +406,10 @@ def _evaluate_post_break_state(zone, df, breakout_info, config, fallback_status=
         result["lifecycle_status"] = "RETEST"
         result["lifecycle_event"] = "RETEST"
         result["retest_status"] = result["retest_origin"]
+    else:
+        result["lifecycle_status"] = "BROKEN"
+        result["lifecycle_event"] = "BROKEN"
+        result["reclaim_status"] = "WAIT"
     return result
 
 
@@ -386,8 +458,9 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
             "reason": "Belum ada pola rejection.",
         }
 
-    # Cek juga apakah ada broken zone yang sedang mengalami breakout valid / retest aktif
-    # (Jangan mengambil FALSE_BREAKOUT dari zona lain ke fokus zona aktif agar status PA tidak rancu)
+    # Cek juga apakah ada zona yang baru mengalami potensi breakdown/breakout (pending_break_zones)
+    # atau broken_zones dengan breakout valid / retest aktif di dekat harga.
+    # JANGAN mengambil FALSE_BREAKOUT dari zona lain ke fokus zona aktif agar status PA tidak rancu.
     focus_label = (
         f"{focus_zone.get('rank_label', focus_zone.get('zone_type', 'FOCUS'))} "
         f"({focus_zone.get('low', 0):.2f}-{focus_zone.get('high', 0):.2f})"
@@ -397,18 +470,41 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
     bo_zone_label = focus_label
     rt_zone_label = focus_label
     rej_zone_label = focus_label
+    pending_zones = (ranked_zones or {}).get("pending_break_zones") or (ranked_zones or {}).get("unconfirmed_zones") or []
     broken_zones = (ranked_zones or {}).get("broken_zones") or []
-    if focus_zone is None and bo_res.get("status") == "NO_BREAKOUT" and broken_zones and eval_df is not None:
-        bz0 = broken_zones[0]
-        bz_label = f"{bz0.get('rank_label', bz0.get('zone_type', 'BROKEN'))} ({bz0.get('low', 0):.2f}-{bz0.get('high', 0):.2f})"
-        bo_bz = detect_zone_breakout(bz0, eval_df, momentum_result=m5_mom, config=cfg)
-        rt_bz = detect_zone_retest(bz0, eval_df, breakout_result=bo_bz, config=cfg)
-        if bo_bz.get("status") in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION"):
-            bo_res = bo_bz
-            bo_zone_label = bz_label
-            if rt_bz.get("status") in ("RETEST_CONFIRMED", "RETEST_IN_PROGRESS", "RETEST_FAILED"):
-                rt_res = rt_bz
-                rt_zone_label = bz_label
+    if bo_res.get("status") == "NO_BREAKOUT" and eval_df is not None:
+        bo_candidates = []
+        seen_cids = set()
+        for cand in list(pending_zones[:3]) + list(broken_zones[:3]):
+            if not isinstance(cand, dict):
+                continue
+            cid = cand.get("zone_id") or id(cand)
+            if cid in seen_cids:
+                continue
+            seen_cids.add(cid)
+            bo_candidates.append(cand)
+        n_eval = len(eval_df)
+        for cand in bo_candidates:
+            c_label = f"{cand.get('rank_label', cand.get('zone_type', 'BROKEN'))} ({cand.get('low', 0):.2f}-{cand.get('high', 0):.2f})"
+            bo_cand = detect_zone_breakout(cand, eval_df, momentum_result=m5_mom, config=cfg)
+            if bo_cand.get("status") not in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION"):
+                continue
+            c_bar_idx = bo_cand.get("breakout_bar_index")
+            c_bars_ago = (n_eval - 1 - int(c_bar_idx)) if (c_bar_idx is not None and n_eval > 0) else 999
+            c_is_hist = bool(bo_cand.get("is_historical_break")) or safe_float(cand.get("distance_atr"), 0.0) > 12.0
+            rt_cand = detect_zone_retest(cand, eval_df, breakout_result=bo_cand, config=cfg)
+            is_active_retest = rt_cand.get("status") in ("RETEST_CONFIRMED", "RETEST_IN_PROGRESS", "RETEST_FAILED")
+            if c_is_hist and not is_active_retest:
+                continue
+            # Promosikan jika fresh/recent breakout/breakdown (<= 6 bar M5) atau sedang retest aktif,
+            # atau jika memang belum ada focus_zone aktif (selama bukan event historis/jauh).
+            if (focus_zone is None and not c_is_hist) or c_bars_ago <= 6 or is_active_retest:
+                bo_res = bo_cand
+                bo_zone_label = c_label
+                if is_active_retest:
+                    rt_res = rt_cand
+                    rt_zone_label = c_label
+                break
 
     # Pastikan koherensi breakout vs retest pada zona yang sama
     if bo_res.get("status") == "FALSE_BREAKOUT" and bo_zone_label == rt_zone_label and rt_res.get("status") == "RETEST_IN_PROGRESS":
@@ -420,7 +516,11 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
     bo_bar_idx = bo_res.get("breakout_bar_index")
     bo_bars_ago = (n_bars - 1 - int(bo_bar_idx)) if (bo_bar_idx is not None and n_bars > 0) else 999
     # Breakout dianggap historical jika terjadi lebih dari 1 candle yang lalu atau berasal dari zona broken lama
-    bo_is_historical = bool(bo_bars_ago > 1 or (bo_zone_label != focus_label and bo_bars_ago > 0))
+    bo_is_historical = bool(
+        bo_res.get("is_historical_break")
+        or bo_bars_ago > 1
+        or (bo_zone_label != focus_label and bo_bars_ago > 1)
+    )
     bo_detail = dict(bo_res)
     bo_detail["bars_ago"] = bo_bars_ago
     bo_detail["is_historical"] = bo_is_historical
@@ -436,8 +536,22 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
     rej_detail = dict(rej_res)
     rej_bar_idx = rej_detail.get("bar_index")
     rej_bars_ago = (n_bars - 1 - int(rej_bar_idx)) if (rej_bar_idx is not None and n_bars > 0) else 999
-    rej_detail["is_historical"] = rej_bars_ago > 2
+    # Confirmed rejection pada bar k dikonfirmasi oleh candle k+1; hanya bar k = n_bars-2 (bars_ago == 1)
+    # yang baru saja terkonfirmasi pada candle closed terakhir. Lebih lama dari itu bersifat historis.
+    rej_is_historical = bool(rej_bars_ago > 1)
+    rej_detail["bars_ago"] = rej_bars_ago
+    rej_detail["is_historical"] = rej_is_historical
     rej_detail["zone_label"] = rej_zone_label
+    if (
+        rej_bar_idx is not None
+        and eval_df is not None
+        and "Time" in eval_df.columns
+        and 0 <= int(rej_bar_idx) + 1 < n_bars
+    ):
+        rej_detail["confirm_bar_time"] = str(eval_df["Time"].iloc[int(rej_bar_idx) + 1])
+    rej_summary = rej_res.get("summary_status", "NOT CONFIRMED")
+    if rej_detail.get("confirmed") and rej_is_historical:
+        rej_summary = f"HISTORICAL ({rej_summary})"
 
     return {
         "focus_zone_label": focus_label,
@@ -445,6 +559,11 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
         "retest_zone_label": rt_zone_label,
         "rejection_zone_label": rej_zone_label,
         "breakout_code": bo_res.get("status", "NO_BREAKOUT"),
+        "break_type": bo_res.get("break_type", "NONE"),
+        "potential_breakdown": bool(bo_res.get("potential_breakdown", False)),
+        "potential_breakout": bool(bo_res.get("potential_breakout", False)),
+        "reclaim_detected": bool(bo_res.get("reclaim_detected", False)),
+        "zone_failed": bool(bo_res.get("zone_failed", False)),
         "breakout_direction": bo_res.get("direction", "NONE"),
         "breakout_summary": bo_res.get("summary_status", "NOT CONFIRMED"),
         "breakout_is_historical": bo_is_historical,
@@ -456,7 +575,8 @@ def _build_price_action_summary(focus_zone, ranked_zones, m5_df, frames_dict, mo
         "retest_detail": rt_detail,
         "rejection_code": rej_res.get("status", "NONE"),
         "rejection_direction": rej_res.get("direction", "NONE"),
-        "rejection_summary": rej_res.get("summary_status", "NOT CONFIRMED"),
+        "rejection_summary": rej_summary,
+        "rejection_is_historical": rej_is_historical,
         "rejection_detail": rej_detail,
         "momentum_code": m5_mom.get("direction", "NEUTRAL"),
         "momentum_strength": m5_mom.get("strength", "WEAK"),
@@ -505,10 +625,16 @@ def run_snr_scan(
     validated_zones_by_tf = {}
     momentum_by_tf = {}
     lifecycle_state = _load_snr_lifecycle_state()
+    m5_df_ref = prepared_frames.get("M5")
+    m5_mom_ref = (
+        analyze_momentum(m5_df_ref, timeframe="M5", config=cfg, has_unclosed_last_bar=False)
+        if (m5_df_ref is not None and not getattr(m5_df_ref, "empty", True))
+        else None
+    )
 
     for tf in SNR_TIMEFRAMES:
         df_tf = prepared_frames.get(tf)
-        mom_tf = analyze_momentum(df_tf, timeframe=tf, config=cfg, has_unclosed_last_bar=False)
+        mom_tf = m5_mom_ref if (tf == "M5" and m5_mom_ref is not None) else analyze_momentum(df_tf, timeframe=tf, config=cfg, has_unclosed_last_bar=False)
         momentum_by_tf[tf] = mom_tf
 
         sw_tf = detect_swings(df_tf, timeframe=tf, config=cfg, has_unclosed_last_bar=False)
@@ -525,6 +651,10 @@ def run_snr_scan(
         all_clust_tf = clust_sup + clust_res
         clustered_zones_by_tf[tf] = all_clust_tf
 
+        clean_df_tf, _ = prepare_snr_frame(df_tf, has_unclosed_last_bar=False)
+        tf_bar_times = [str(v) for v in clean_df_tf["Time"].tolist()] if (not clean_df_tf.empty and "Time" in clean_df_tf.columns) else []
+        tf_last_bar_time = tf_bar_times[-1] if tf_bar_times else None
+
         val_tf_list = []
         for cz in all_clust_tf:
             cz["time_tz"] = str((getattr(df_tf, "attrs", {}) or {}).get("time_tz", "WIB"))
@@ -539,10 +669,19 @@ def run_snr_scan(
             validated.setdefault("symbol", market_data.get("symbol", symbol or cfg.get("symbol", "")))
             lifecycle_key = _snr_lifecycle_key(validated)
             saved_lifecycle = lifecycle_state.get(lifecycle_key) or {}
-            _apply_saved_lifecycle(validated, saved_lifecycle)
+            _apply_saved_lifecycle(validated, saved_lifecycle, clean_df=clean_df_tf)
             bo_z = detect_zone_breakout(validated, df_tf, momentum_result=mom_tf, config=cfg)
+            bo_z["eval_timeframe"] = tf
             rt_z = detect_zone_retest(validated, df_tf, breakout_result=bo_z, config=cfg)
             rej_z = detect_zone_rejection(validated, df_tf, config=cfg)
+            n_tf_bars = len(clean_df_tf)
+            rej_z_idx = rej_z.get("bar_index")
+            rej_z_ago = (n_tf_bars - 1 - int(rej_z_idx)) if (rej_z_idx is not None and n_tf_bars > 0) else 999
+            rej_z["bars_ago"] = rej_z_ago
+            rej_z["is_historical"] = bool(rej_z_ago > 1)
+            z_type_cur = str(validated.get("zone_type", "")).upper()
+            pend_state = "BREAKDOWN_PENDING" if z_type_cur == "SUPPORT" else "BREAKOUT_PENDING"
+            pending_states = ("BREAKDOWN_PENDING", "BREAKOUT_PENDING")
             current_lifecycle = str(validated.get("lifecycle_status", "ACTIVE")).upper()
             current_side = (
                 "BELOW" if current_price < safe_float(validated.get("low"), 0.0)
@@ -551,10 +690,12 @@ def run_snr_scan(
             )
             breakout_confirmed = (
                 bo_z.get("status") == "VALID_BREAKOUT"
-                or bool(bo_z.get("prior_confirmed_breakout"))
+                or bool(bo_z.get("reclaim_detected"))
             )
             locked_states = ("BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED")
-            breakout_side = "BELOW" if str(validated.get("zone_type", "")).upper() == "SUPPORT" else "ABOVE"
+            breakout_side = "BELOW" if z_type_cur == "SUPPORT" else "ABOVE"
+            valid_side = "ABOVE" if z_type_cur == "SUPPORT" else "BELOW"
+
             if (
                 breakout_confirmed
                 and current_lifecycle in ("RETEST", "RECLAIM_PENDING")
@@ -575,22 +716,56 @@ def run_snr_scan(
                 touch = dict(validated.get("touch_analysis") or {})
                 touch["classification"] = "BROKEN"
                 touch["is_broken"] = True
-                touch["reason"] = "Breakout terkonfirmasi oleh candle close dan validasi momentum."
+                touch["reason"] = (
+                    "Support breakdown terkonfirmasi oleh candle close dan validasi momentum."
+                    if z_type_cur == "SUPPORT"
+                    else "Resistance breakout terkonfirmasi oleh candle close dan validasi momentum."
+                )
                 validated["touch_analysis"] = touch
                 current_lifecycle = "BROKEN"
             elif bo_z.get("status") == "BREAKOUT_PENDING_CONFIRMATION" and current_lifecycle not in locked_states + ("INVALIDATED",):
-                validated["lifecycle_status"] = "BREAKDOWN_PENDING"
-                validated["status"] = "BREAKDOWN_PENDING"
+                validated["lifecycle_status"] = pend_state
+                validated["status"] = pend_state
                 validated["is_active"] = False
-                current_lifecycle = "BREAKDOWN_PENDING"
+                validated["break_event"] = "POTENTIAL_BREAKDOWN" if z_type_cur == "SUPPORT" else "POTENTIAL_BREAKOUT"
+                current_lifecycle = pend_state
+
+            # Deteksi dini potensi breakdown Support / breakout Resistance pada candle M5 closed
+            # sebelum candle HTF selesai. M5 TIDAK boleh mengunci zona HTF sebagai BROKEN/RECLAIM_PENDING
+            # tanpa breakdown terkonfirmasi di timeframe zona sendiri.
+            bo_m5 = None
+            if (
+                tf != "M5"
+                and current_lifecycle not in locked_states + ("INVALIDATED",)
+                and m5_df_ref is not None
+                and not getattr(m5_df_ref, "empty", True)
+            ):
+                bo_m5 = detect_zone_breakout(validated, m5_df_ref, momentum_result=m5_mom_ref, config=cfg)
+                bo_m5["eval_timeframe"] = "M5"
+                validated["m5_breakout_info"] = bo_m5
+                if (
+                    bo_m5.get("status") in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION")
+                    and bool(bo_m5.get("close_outside_zone"))
+                ):
+                    validated["lifecycle_status"] = pend_state
+                    validated["status"] = pend_state
+                    validated["is_active"] = False
+                    validated["break_event"] = "POTENTIAL_BREAKDOWN" if z_type_cur == "SUPPORT" else "POTENTIAL_BREAKOUT"
+                    current_lifecycle = pend_state
+                elif bo_m5.get("reclaim_detected") and not validated.get("is_broken"):
+                    validated["break_event"] = "FALSE_BREAKDOWN" if z_type_cur == "SUPPORT" else "FALSE_BREAKOUT"
+
+            saved_bo_valid = saved_lifecycle.get("breakout_info") or validated.get("lifecycle_breakout_info")
+            if isinstance(saved_bo_valid, dict) and not _is_valid_saved_breakout(saved_bo_valid, tf, clean_df=clean_df_tf):
+                saved_bo_valid = None
 
             breakout_info = (
                 bo_z if breakout_confirmed
                 else (
                     bo_z
-                    if current_lifecycle == "BREAKDOWN_PENDING"
+                    if current_lifecycle in pending_states
                     and bo_z.get("status") in ("FALSE_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION")
-                    else saved_lifecycle.get("breakout_info") or validated.get("lifecycle_breakout_info")
+                    else saved_bo_valid
                 )
             )
             post_break_state = None
@@ -601,7 +776,8 @@ def run_snr_scan(
                         "lifecycle_event": "RECLAIMED",
                         "reclaim_status": "CONFIRMED",
                         "retest_status": "CONFIRMED",
-                        "retest_origin": "FROM_BELOW" if str(validated.get("zone_type")).upper() == "SUPPORT" else "FROM_ABOVE",
+                        "retest_origin": "FROM_BELOW" if z_type_cur == "SUPPORT" else "FROM_ABOVE",
+                        "event_time": saved_lifecycle.get("lifecycle_event_time"),
                     }
                 else:
                     post_break_state = _evaluate_post_break_state(
@@ -615,24 +791,45 @@ def run_snr_scan(
                     validated["status"] = post_break_state["lifecycle_status"]
                     validated["is_active"] = False
                     current_lifecycle = post_break_state["lifecycle_status"]
-            elif current_lifecycle == "BREAKDOWN_PENDING" and breakout_info:
-                returned_to_zone = (
-                    current_side != "BELOW"
-                    if str(validated.get("zone_type", "")).upper() == "SUPPORT"
-                    else current_side != "ABOVE"
-                )
-                if returned_to_zone or bo_z.get("status") == "FALSE_BREAKOUT":
-                    post_break_state = _evaluate_post_break_state(
-                        validated,
-                        df_tf,
-                        breakout_info,
-                        cfg,
-                        fallback_status="BREAKDOWN_PENDING",
+            elif current_lifecycle in pending_states:
+                is_clean_false_break = (
+                    not validated.get("is_broken")
+                    and current_side == valid_side
+                    and (
+                        (bo_z.get("status") == "FALSE_BREAKOUT" and not bo_z.get("reclaim_detected"))
+                        or (
+                            bo_m5 is not None
+                            and bo_m5.get("status") == "FALSE_BREAKOUT"
+                            and bo_z.get("status") in ("NO_BREAKOUT", "FALSE_BREAKOUT")
+                            and not bo_z.get("reclaim_detected")
+                        )
                     )
-                    validated["lifecycle_status"] = post_break_state["lifecycle_status"]
-                    validated["status"] = post_break_state["lifecycle_status"]
-                    validated["is_active"] = False
-                    current_lifecycle = post_break_state["lifecycle_status"]
+                )
+                if is_clean_false_break:
+                    # False breakout / false breakdown murni (belum pernah confirmed broken di TF zona):
+                    # zona tetap bertahan, dibedakan eksplisit dari reclaim zona yang sudah gagal.
+                    fb_evt = "FALSE_BREAKDOWN" if z_type_cur == "SUPPORT" else "FALSE_BREAKOUT"
+                    validated["lifecycle_status"] = "ACTIVE"
+                    validated["status"] = "ACTIVE"
+                    validated["is_active"] = True
+                    validated["lifecycle_event"] = fb_evt
+                    validated["break_event"] = fb_evt
+                    validated["reclaim_status"] = "WAIT"
+                    current_lifecycle = "ACTIVE"
+                elif breakout_info and (current_side != breakout_side or bo_z.get("status") == "FALSE_BREAKOUT"):
+                    # Jika sempat ada break terkonfirmasi di TF zona sebelum kembali -> evaluasi reclaim (tetap non-aktif)
+                    if breakout_info.get("reclaim_detected") or breakout_info.get("status") == "VALID_BREAKOUT":
+                        post_break_state = _evaluate_post_break_state(
+                            validated,
+                            df_tf,
+                            breakout_info,
+                            cfg,
+                            fallback_status=pend_state,
+                        )
+                        validated["lifecycle_status"] = post_break_state["lifecycle_status"]
+                        validated["status"] = post_break_state["lifecycle_status"]
+                        validated["is_active"] = False
+                        current_lifecycle = post_break_state["lifecycle_status"]
 
             retest_origin = validated.get("lifecycle_retest_origin") or saved_lifecycle.get("retest_origin")
             if post_break_state and post_break_state.get("retest_origin"):
@@ -643,15 +840,14 @@ def run_snr_scan(
             ):
                 retest_origin = rt_z.get("retest_origin")
             if current_lifecycle in locked_states:
-                z_type = str(validated.get("zone_type", "")).upper()
                 previous_side = str(saved_lifecycle.get("last_side", "")).upper()
-                if not retest_origin and z_type == "SUPPORT" and previous_side == "BELOW" and current_side != "BELOW":
+                if not retest_origin and z_type_cur == "SUPPORT" and previous_side == "BELOW" and current_side != "BELOW":
                     retest_origin = "FROM_BELOW"
-                elif not retest_origin and z_type == "RESISTANCE" and previous_side == "ABOVE" and current_side != "ABOVE":
+                elif not retest_origin and z_type_cur == "RESISTANCE" and previous_side == "ABOVE" and current_side != "ABOVE":
                     retest_origin = "FROM_ABOVE"
-                elif not retest_origin and bo_z.get("prior_confirmed_breakout") and current_side != "BELOW" and z_type == "SUPPORT":
+                elif not retest_origin and (bo_z.get("reclaim_detected") or bo_z.get("prior_confirmed_breakout")) and current_side != "BELOW" and z_type_cur == "SUPPORT":
                     retest_origin = "FROM_BELOW"
-                elif not retest_origin and bo_z.get("prior_confirmed_breakout") and current_side != "ABOVE" and z_type == "RESISTANCE":
+                elif not retest_origin and (bo_z.get("reclaim_detected") or bo_z.get("prior_confirmed_breakout")) and current_side != "ABOVE" and z_type_cur == "RESISTANCE":
                     retest_origin = "FROM_ABOVE"
                 if retest_origin:
                     rt_z["retest_origin"] = retest_origin
@@ -661,9 +857,47 @@ def run_snr_scan(
                     validated["reclaim_status"] = post_break_state["reclaim_status"]
                     validated["retest_status"] = post_break_state["retest_status"]
             else:
-                validated["lifecycle_event"] = validated.get("lifecycle_event", current_lifecycle)
+                if bo_z.get("status") == "FALSE_BREAKOUT" and not bo_z.get("reclaim_detected"):
+                    validated["lifecycle_event"] = "FALSE_BREAKDOWN" if z_type_cur == "SUPPORT" else "FALSE_BREAKOUT"
+                else:
+                    validated["lifecycle_event"] = validated.get("lifecycle_event", current_lifecycle)
                 validated["reclaim_status"] = validated.get("reclaim_status", "WAIT")
                 validated["retest_status"] = "WAIT"
+
+            final_life_st = str(validated.get("lifecycle_status", "ACTIVE")).upper()
+            final_life_ev = str(validated.get("lifecycle_event", final_life_st)).upper()
+            prev_life_st = str(saved_lifecycle.get("lifecycle_status", "")).upper()
+            prev_life_ev = str(saved_lifecycle.get("lifecycle_event", "")).upper()
+            prev_ev_time = saved_lifecycle.get("lifecycle_event_time")
+            if prev_life_st == final_life_st and prev_life_ev == final_life_ev and prev_ev_time:
+                life_ev_time = str(prev_ev_time)
+            else:
+                life_ev_time = (
+                    (post_break_state.get("event_time") if post_break_state else None)
+                    or (bo_z.get("breakout_bar_time") if final_life_st in ("BROKEN", "BREAKDOWN_PENDING", "BREAKOUT_PENDING") and bo_z.get("breakout_bar_time") else None)
+                    or ((validated.get("touch_analysis") or {}).get("lifecycle_event_time"))
+                    or (
+                        (breakout_info.get("breakout_bar_time") if isinstance(breakout_info, dict) else None)
+                        or validated.get("confirmed_time")
+                        or validated.get("formation_time")
+                        if final_life_st == "RECLAIMED" and prev_life_st == "RECLAIMED"
+                        else tf_last_bar_time
+                    )
+                )
+            life_bars_ago = 0
+            if life_ev_time and tf_bar_times:
+                if life_ev_time in tf_bar_times:
+                    life_bars_ago = (len(tf_bar_times) - 1) - tf_bar_times.index(life_ev_time)
+                elif life_ev_time < tf_bar_times[0]:
+                    life_bars_ago = len(tf_bar_times)
+            life_is_historical = bool(
+                (final_life_st in locked_states and life_bars_ago > 1)
+                or (final_life_st == "RECLAIMED" and prev_life_st == "RECLAIMED")
+                or (final_life_st == "BROKEN" and isinstance(breakout_info, dict) and breakout_info.get("is_historical_break"))
+            )
+            validated["lifecycle_event_time"] = life_ev_time
+            validated["lifecycle_bars_ago"] = int(life_bars_ago)
+            validated["lifecycle_is_historical"] = life_is_historical
 
             validated["breakout_info"] = bo_z
             validated["retest_info"] = rt_z
@@ -675,6 +909,7 @@ def run_snr_scan(
                 "breakout_info": breakout_info,
                 "retest_origin": retest_origin,
                 "lifecycle_event": validated.get("lifecycle_event", "ACTIVE"),
+                "lifecycle_event_time": life_ev_time,
                 "reclaim_status": validated.get("reclaim_status", "WAIT"),
             }
             val_tf_list.append(validated)
@@ -788,7 +1023,11 @@ def run_snr_scan(
         entry_validation, ranked_zones, market_bias, current_price, symbol_spec, cfg, blocked=blocked_plan,
     )
     if live and mkt_status == "OPEN":
-        entry_validation["focus_change"] = _track_snr_focus(entry_validation.get("target_zone"), ranked_zones)
+        entry_validation["focus_change"] = _track_snr_focus(
+            entry_validation.get("target_zone"),
+            ranked_zones,
+            selection_reason=entry_validation.get("focus_selection_reason"),
+        )
 
     # Perbarui label M5 pada market_bias hanya ketika market OPEN dan entry_validation mengonfirmasi arah BUY/SELL
     if mkt_status == "OPEN":
@@ -825,8 +1064,15 @@ def run_snr_scan(
     # Sinkronkan summary price action jika entry_validation sudah mengonfirmasi rejection/retest
     if entry_validation.get("setup_type") in ("SUPPORT_REJECTION", "RESISTANCE_REJECTION"):
         rej_det = dict(price_action.get("rejection_detail") or {})
-        rej_det.update(entry_validation.get("rejection_detail") or {})
+        ev_rej = entry_validation.get("rejection_detail") or {}
+        rej_det.update(ev_rej)
+        n_m5 = len(entry_df) if (entry_df is not None and not getattr(entry_df, "empty", True)) else 0
+        if rej_det.get("bar_index") is not None and n_m5 > 0:
+            ev_ago = n_m5 - 1 - int(rej_det["bar_index"])
+            rej_det["bars_ago"] = ev_ago
+            rej_det["is_historical"] = bool(ev_ago > 1)
         price_action["rejection_code"] = rej_det.get("status", price_action["rejection_code"])
+        price_action["rejection_is_historical"] = bool(rej_det.get("is_historical"))
         price_action["rejection_summary"] = rej_det.get("summary_status", "CONFIRMED")
         price_action["rejection_detail"] = rej_det
     elif entry_validation.get("setup_type") in ("RESISTANCE_BREAKOUT_RETEST", "SUPPORT_BREAKDOWN_RETEST"):

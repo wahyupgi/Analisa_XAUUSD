@@ -97,6 +97,8 @@ def analyze_zone_touches(
     is_broken = False
     is_invalidated = False
     unconfirmed_break = False
+    unconfirmed_break_bars = 0
+    false_break_detected = False
     first_break_index = None
     consecutive_beyond = 0
     price_left_zone_since_last_touch = True
@@ -124,18 +126,30 @@ def analyze_zone_touches(
             # Hanya close candle yang dapat mengubah lifecycle; wick tetap sekadar interaksi.
             if unconfirmed_break:
                 if b_close < z_low:
+                    unconfirmed_break_bars += 1
                     penetration_atr = (z_low - b_close) / b_atr
                     consecutive_beyond = consecutive_beyond + 1 if penetration_atr >= broken_close_atr else 0
-                    if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid:
+                    if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid or unconfirmed_break_bars >= consec_invalid:
                         is_broken = True
-                        is_invalidated = True
+                        if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid:
+                            is_invalidated = True
                     elif penetration_atr >= broken_close_atr:
                         is_broken = True
+                    continue
                 else:
                     consecutive_beyond = 0
-                continue
+                    # Bedakan FALSE BREAKDOWN (hanya 1 bar tipis belum confirmed broken lalu langsung balik di atas support)
+                    # vs zona yang SUDAH BROKEN (tidak pernah kembali dianggap fresh active!).
+                    if not is_broken and not is_invalidated and unconfirmed_break_bars == 1 and b_close > z_high:
+                        unconfirmed_break = False
+                        unconfirmed_break_bars = 0
+                        false_break_detected = True
+                        last_lifecycle_event = "FALSE_BREAKDOWN"
+                        last_lifecycle_event_time = str(times[k])
+                    continue
             if b_close < z_low:
                 unconfirmed_break = True
+                unconfirmed_break_bars = 1
                 if first_break_index is None:
                     first_break_index = int(k)
                 penetration_atr = (z_low - b_close) / b_atr
@@ -205,18 +219,30 @@ def analyze_zone_touches(
 
             if unconfirmed_break:
                 if b_close > z_high:
+                    unconfirmed_break_bars += 1
                     penetration_atr = (b_close - z_high) / b_atr
                     consecutive_beyond = consecutive_beyond + 1 if penetration_atr >= broken_close_atr else 0
-                    if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid:
+                    if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid or unconfirmed_break_bars >= consec_invalid:
                         is_broken = True
-                        is_invalidated = True
+                        if penetration_atr >= invalid_close_atr or consecutive_beyond >= consec_invalid:
+                            is_invalidated = True
                     elif penetration_atr >= broken_close_atr:
                         is_broken = True
+                    continue
                 else:
                     consecutive_beyond = 0
-                continue
+                    # Bedakan FALSE BREAKOUT (hanya 1 bar tipis belum confirmed broken lalu langsung balik di bawah resistance)
+                    # vs zona yang SUDAH BROKEN (tidak pernah kembali dianggap fresh active!).
+                    if not is_broken and not is_invalidated and unconfirmed_break_bars == 1 and b_close < z_low:
+                        unconfirmed_break = False
+                        unconfirmed_break_bars = 0
+                        false_break_detected = True
+                        last_lifecycle_event = "FALSE_BREAKOUT"
+                        last_lifecycle_event_time = str(times[k])
+                    continue
             if b_close > z_high:
                 unconfirmed_break = True
+                unconfirmed_break_bars = 1
                 if first_break_index is None:
                     first_break_index = int(k)
                 penetration_atr = (b_close - z_high) / b_atr
@@ -302,7 +328,7 @@ def analyze_zone_touches(
     elif is_broken:
         lifecycle_status = "BROKEN"
     elif unconfirmed_break:
-        lifecycle_status = "BREAKDOWN_PENDING"
+        lifecycle_status = "BREAKDOWN_PENDING" if z_type == "SUPPORT" else "BREAKOUT_PENDING"
     elif not history_sufficient:
         lifecycle_status = "UNCONFIRMED"
     else:
@@ -393,6 +419,7 @@ def analyze_zone_touches(
         "is_broken": bool(is_broken),
         "is_invalidated": bool(is_invalidated),
         "unconfirmed_break": bool(unconfirmed_break and not is_broken and not is_invalidated),
+        "false_break_detected": bool(false_break_detected),
         "lifecycle_status": lifecycle_status,
         "lifecycle_event": last_lifecycle_event,
         "lifecycle_event_time": last_lifecycle_event_time,

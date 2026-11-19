@@ -57,9 +57,11 @@ def detect_zone_breakout(
     """
     cfg = config or get_snr_config()
     bo_cfg = cfg.get("breakout", {})
+    touch_cfg = cfg.get("touch", {})
 
     valid_pen_atr = safe_float(bo_cfg.get("valid_close_penetration_atr", 0.15), 0.15)
     strong_pen_atr = safe_float(bo_cfg.get("strong_close_penetration_atr", 0.28), 0.28)
+    invalid_pen_atr = safe_float(touch_cfg.get("invalidation_close_beyond_atr", 0.42), 0.42)
     min_body_atr = safe_float(bo_cfg.get("min_breakout_body_atr", 0.42), 0.42)
     min_body_ratio = safe_float(bo_cfg.get("min_breakout_body_ratio", 0.48), 0.48)
     vol_mult = safe_float(bo_cfg.get("volume_confirm_mult", 1.05), 1.05)
@@ -79,6 +81,11 @@ def detect_zone_breakout(
             "timeframe": tf,
             "zone_type": z_type,
             "status": "NO_BREAKOUT",
+            "break_type": "NONE",
+            "potential_breakdown": False,
+            "potential_breakout": False,
+            "reclaim_detected": False,
+            "zone_failed": False,
             "label": "NO BREAKOUT",
             "summary_status": "NOT CONFIRMED",
             "direction": "NONE",
@@ -210,12 +217,18 @@ def detect_zone_breakout(
                 last_w.get("closed_below_zone", False) or last_w.get("closed_above_zone", False)
             )
             if is_deep_trap:
+                false_bt = "FALSE_BREAKOUT" if z_type == "RESISTANCE" else "FALSE_BREAKDOWN"
                 return {
                     "zone_id": zone.get("zone_id", "UNKNOWN"),
                     "timeframe": tf,
                     "zone_type": z_type,
                     "status": "FALSE_BREAKOUT",
-                    "label": "FALSE BREAKOUT",
+                    "break_type": false_bt,
+                    "potential_breakdown": False,
+                    "potential_breakout": False,
+                    "reclaim_detected": False,
+                    "zone_failed": False,
+                    "label": "FALSE BREAKOUT" if z_type == "RESISTANCE" else "FALSE BREAKDOWN",
                     "summary_status": "FALSE BREAKOUT",
                     "direction": expected_dir,
                     "breakout_bar_index": last_w["bar_index"],
@@ -231,7 +244,7 @@ def detect_zone_breakout(
                     "pre_breakout_structure": "WICK_SWEEP_TRAP",
                     "quality_score_15": 4.0,
                     "reason": (
-                        f"False breakout (wick trap): ekor menembus {overshoot:.2f} ATR melewati {z_type} "
+                        f"False {'breakout' if z_type == 'RESISTANCE' else 'breakdown'} (wick trap): ekor menembus {overshoot:.2f} ATR melewati {z_type} "
                         "tetapi gagal close di luar zona dan berbalik arah."
                     ),
                 }
@@ -241,6 +254,11 @@ def detect_zone_breakout(
                 "timeframe": tf,
                 "zone_type": z_type,
                 "status": "NO_BREAKOUT",
+                "break_type": "NONE",
+                "potential_breakdown": False,
+                "potential_breakout": False,
+                "reclaim_detected": False,
+                "zone_failed": False,
                 "label": "NO BREAKOUT",
                 "summary_status": "NOT CONFIRMED",
                 "direction": "NONE",
@@ -267,6 +285,11 @@ def detect_zone_breakout(
             "timeframe": tf,
             "zone_type": z_type,
             "status": "NO_BREAKOUT",
+            "break_type": "NONE",
+            "potential_breakdown": False,
+            "potential_breakout": False,
+            "reclaim_detected": False,
+            "zone_failed": False,
             "label": "NO BREAKOUT",
             "summary_status": "NOT CONFIRMED",
             "direction": "NONE",
@@ -338,6 +361,19 @@ def detect_zone_breakout(
             and float(event["body_ratio"]) >= min_body_ratio
             for event in breakout_events
         )
+        max_consec_outside = 0
+        run_out = 0
+        prev_idx = None
+        for event in breakout_events:
+            cur_i = int(event["bar_index"])
+            if prev_idx is not None and cur_i == prev_idx + 1:
+                run_out += 1
+            else:
+                run_out = 1
+            prev_idx = cur_i
+            if run_out > max_consec_outside:
+                max_consec_outside = run_out
+
         if not prior_confirmed_breakout:
             for idx_event in range(1, len(breakout_events)):
                 previous = breakout_events[idx_event - 1]
@@ -356,17 +392,50 @@ def detect_zone_breakout(
                 ):
                     prior_confirmed_breakout = True
                     break
+
+        max_pen_out = max((float(event["penetration_atr"]) for event in breakout_events), default=0.0)
+        already_broken_zone = bool(zone.get("is_broken")) or str(zone.get("lifecycle_status", "")).upper() in (
+            "BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED"
+        )
+        # Bedakan FALSE BREAKOUT/BREAKDOWN (1 bar trap dangkal yang langsung gagal) vs
+        # RECLAIM (harga sempat menerima/menembus kuat di luar zona lalu kembali mereclaim).
+        reclaim_detected = bool(
+            already_broken_zone
+            or (prior_confirmed_breakout and (max_consec_outside >= 2 or max_pen_out >= invalid_pen_atr))
+        )
+        if reclaim_detected:
+            bt_label = "RECLAIM_AFTER_BREAKOUT" if z_type == "RESISTANCE" else "RECLAIM_AFTER_BREAKDOWN"
+            disp_lbl = "RECLAIM AFTER BREAKOUT" if z_type == "RESISTANCE" else "RECLAIM AFTER BREAKDOWN"
+            reason_txt = (
+                f"Reclaim pasca-{'breakout' if z_type == 'RESISTANCE' else 'breakdown'} pada {z_type}: "
+                f"zona sempat ditembus kuat ({ref_bo['close']:.2f}, max {max_pen_out:.2f} ATR) lalu kembali ditutup di {last_close:.2f}; "
+                "zona telah gagal dan tidak dipromosikan ulang sebagai S/R aktif."
+            )
+        else:
+            bt_label = "FALSE_BREAKOUT" if z_type == "RESISTANCE" else "FALSE_BREAKDOWN"
+            disp_lbl = "FALSE BREAKOUT" if z_type == "RESISTANCE" else "FALSE BREAKDOWN"
+            reason_txt = (
+                f"False {'breakout' if z_type == 'RESISTANCE' else 'breakdown'} pada {z_type}: "
+                f"candle sempat close di luar zona ({ref_bo['close']:.2f}) tanpa penerimaan lanjutan "
+                f"dan langsung kembali ditutup di {last_close:.2f}."
+            )
         return {
             "zone_id": zone.get("zone_id", "UNKNOWN"),
             "timeframe": tf,
             "zone_type": z_type,
             "status": "FALSE_BREAKOUT",
-            "label": "FALSE BREAKOUT",
-            "summary_status": "FALSE BREAKOUT",
+            "break_type": bt_label,
+            "potential_breakdown": False,
+            "potential_breakout": False,
+            "reclaim_detected": reclaim_detected,
+            "zone_failed": reclaim_detected,
+            "label": disp_lbl,
+            "summary_status": "RECLAIM" if reclaim_detected else "FALSE BREAKOUT",
             "direction": expected_dir,
             "breakout_bar_index": bo_idx,
             "breakout_bar_time": ref_bo["bar_time"],
             "prior_confirmed_breakout": prior_confirmed_breakout,
+            "max_consecutive_closes_outside": int(max_consec_outside),
             "close_outside_zone": False,
             "wick_penetration_only": False,
             "penetration_points": ref_bo["penetration_points"],
@@ -377,10 +446,7 @@ def detect_zone_breakout(
             "volume_supported": vol_supported,
             "pre_breakout_structure": pre_struct,
             "quality_score_15": 3.5,
-            "reason": (
-                f"False breakout pada {z_type}: candle sempat close di luar zona ({ref_bo['close']:.2f}) "
-                f"namun gagal bertahan dan kembali ditutup di {last_close:.2f}."
-            ),
+            "reason": reason_txt,
         }
 
     # Harga masih ditutup di luar zona pada bar closed terakhir -> evaluasi kualitas & momentum breakout
@@ -389,14 +455,18 @@ def detect_zone_breakout(
     curr_pen_atr = curr_pen_pts / last_atr
     max_pen_atr = max(curr_pen_atr, float(best_bo["penetration_atr"]))
 
+    conf_start_idx = zone_confirmation_start(zone, clean_df)
     consec_outside = 0
-    for idx_c in range(n_bars - 1, -1, -1):
+    for idx_c in range(n_bars - 1, conf_start_idx - 1, -1):
         if z_type == "RESISTANCE" and float(closes[idx_c]) > z_high:
             consec_outside += 1
         elif z_type == "SUPPORT" and float(closes[idx_c]) < z_low:
             consec_outside += 1
         else:
             break
+    initial_bo_idx = max(conf_start_idx, n_bars - consec_outside) if consec_outside > 0 else int(first_bo["bar_index"])
+    initial_bo_time = str(times[initial_bo_idx]) if 0 <= initial_bo_idx < n_bars else first_bo["bar_time"]
+    is_historical_break = bool(consec_outside > lookback_bars)
 
     candle_has_momentum = (
         bool(best_bo["is_directional_candle"])
@@ -423,17 +493,27 @@ def detect_zone_breakout(
         if vol_supported is True:
             q_score += 0.8
         q_score = min(15.0, round(q_score, 2))
-
+        is_support = (z_type == "SUPPORT")
+        rep_bo_idx = initial_bo_idx if is_historical_break else int(best_bo["bar_index"])
+        rep_bo_time = initial_bo_time if is_historical_break else best_bo["bar_time"]
         return {
             "zone_id": zone.get("zone_id", "UNKNOWN"),
             "timeframe": tf,
             "zone_type": z_type,
             "status": "VALID_BREAKOUT",
-            "label": "VALID BREAKOUT",
+            "break_type": "CONFIRMED_BREAKDOWN" if is_support else "CONFIRMED_BREAKOUT",
+            "potential_breakdown": is_support,
+            "potential_breakout": not is_support,
+            "reclaim_detected": False,
+            "zone_failed": True,
+            "label": "VALID BREAKDOWN" if is_support else "VALID BREAKOUT",
             "summary_status": "CONFIRMED",
             "direction": expected_dir,
-            "breakout_bar_index": int(best_bo["bar_index"]),
-            "breakout_bar_time": best_bo["bar_time"],
+            "breakout_bar_index": rep_bo_idx,
+            "breakout_bar_time": rep_bo_time,
+            "initial_break_bar_index": initial_bo_idx,
+            "initial_break_bar_time": initial_bo_time,
+            "is_historical_break": is_historical_break,
             "close_outside_zone": True,
             "wick_penetration_only": False,
             "penetration_points": round(curr_pen_pts, 2),
@@ -446,23 +526,42 @@ def detect_zone_breakout(
             "pre_breakout_structure": pre_struct,
             "quality_score_15": q_score,
             "reason": (
-                f"Valid {expected_dir} breakout melewati {z_type} ({z_low:.2f}-{z_high:.2f}): "
+                f"Valid {expected_dir} {'breakdown' if is_support else 'breakout'} melewati {z_type} ({z_low:.2f}-{z_high:.2f}): "
                 f"close={last_close:.2f} (penetrasi {curr_pen_atr:.2f} ATR, body {best_bo['body_atr']:.2f} ATR)."
             ),
         }
 
-    # Jika sudah close di luar zona tetapi penetrasi tipis atau tanpa dukungan momentum yang memadai
+    # Jika sudah close di luar zona tetapi penetrasi tipis atau sedang pullback ke tepi zona pasca-breakout
+    prior_confirmed_bo = any(
+        float(event["penetration_atr"]) >= valid_pen_atr
+        and bool(event["is_directional_candle"])
+        and float(event["body_atr"]) >= min_body_atr
+        and float(event["body_ratio"]) >= min_body_ratio
+        for event in breakout_events
+    )
+    is_support = (z_type == "SUPPORT")
+    pend_bo_idx = initial_bo_idx if is_historical_break else (int(best_bo["bar_index"]) if prior_confirmed_bo else int(latest_bo["bar_index"]))
+    pend_bo_time = initial_bo_time if is_historical_break else (best_bo["bar_time"] if prior_confirmed_bo else latest_bo["bar_time"])
     return {
         "zone_id": zone.get("zone_id", "UNKNOWN"),
         "timeframe": tf,
         "zone_type": z_type,
         "status": "BREAKOUT_PENDING_CONFIRMATION",
-        "label": "BREAKOUT PENDING CONFIRMATION",
+        "break_type": "POTENTIAL_BREAKDOWN" if is_support else "POTENTIAL_BREAKOUT",
+        "potential_breakdown": is_support,
+        "potential_breakout": not is_support,
+        "prior_confirmed_breakout": bool(prior_confirmed_bo),
+        "reclaim_detected": False,
+        "zone_failed": bool(prior_confirmed_bo),
+        "label": "POTENTIAL BREAKDOWN (PENDING)" if is_support else "POTENTIAL BREAKOUT (PENDING)",
         "summary_status": "PENDING CONFIRMATION",
         "direction": expected_dir,
-        "breakout_bar_index": int(latest_bo["bar_index"]),
-        "breakout_bar_time": latest_bo["bar_time"],
-        "close_outside_zone": True,
+        "breakout_bar_index": pend_bo_idx,
+        "breakout_bar_time": pend_bo_time,
+        "initial_break_bar_index": initial_bo_idx,
+        "initial_break_bar_time": initial_bo_time,
+        "is_historical_break": is_historical_break,
+        "close_outside_zone": bool(curr_pen_pts > 0),
         "wick_penetration_only": False,
         "penetration_points": round(curr_pen_pts, 2),
         "penetration_atr": round(curr_pen_atr, 3),
@@ -474,9 +573,9 @@ def detect_zone_breakout(
         "pre_breakout_structure": pre_struct,
         "quality_score_15": 7.5,
         "reason": (
-            f"Breakout belum terkonfirmasi penuh (penetrasi={curr_pen_atr:.2f} ATR, "
-            f"body={best_bo['body_atr']:.2f} ATR, momentum_supported={momentum_supported}); "
-            "menunggu candle konfirmasi lanjutan."
+            f"Potensi {'breakdown Support' if is_support else 'breakout Resistance'} belum terkonfirmasi penuh "
+            f"(penetrasi={curr_pen_atr:.2f} ATR, body={best_bo['body_atr']:.2f} ATR, "
+            f"momentum_supported={momentum_supported}); menunggu candle konfirmasi lanjutan."
         ),
     }
 

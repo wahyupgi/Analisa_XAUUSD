@@ -67,14 +67,20 @@ def validate_single_zone(zone, df=None, current_price=None, config=None, has_unc
         lifecycle = "BROKEN"
         reasons.append("Zona telah ditembus (BROKEN); dialihkan ke pemantauan potensi retest/flip.")
     elif detected_lifecycle in (
-        "BREAKDOWN_PENDING", "RETEST", "RECLAIM_PENDING", "RECLAIMED", "UNCONFIRMED"
+        "BREAKDOWN_PENDING", "BREAKOUT_PENDING", "RETEST", "RECLAIM_PENDING", "RECLAIMED", "UNCONFIRMED"
     ):
         lifecycle = detected_lifecycle
         reasons.append(f"Lifecycle zona: {lifecycle}.")
     elif current_price_beyond:
-        lifecycle = "UNCONFIRMED"
+        z_type_cur = str(evaluated.get("zone_type", "SUPPORT")).upper()
+        lifecycle = "BREAKDOWN_PENDING" if z_type_cur == "SUPPORT" else "BREAKOUT_PENDING"
         evaluated["touch_status"] = "UNCONFIRMED"
-        reasons.append("Harga berada di sisi breakout tanpa konfirmasi candle tertutup yang cukup.")
+        evaluated["break_event"] = "POTENTIAL_BREAKDOWN" if z_type_cur == "SUPPORT" else "POTENTIAL_BREAKOUT"
+        reasons.append(
+            "Harga menembus ke bawah Support (potensi breakdown); menunggu konfirmasi candle tertutup."
+            if z_type_cur == "SUPPORT"
+            else "Harga menembus ke atas Resistance (potensi breakout); menunggu konfirmasi candle tertutup."
+        )
     elif detected_lifecycle in ("TOUCHED", "SWEEP"):
         lifecycle = detected_lifecycle
         reasons.append(f"Interaksi candle tertutup terakhir: {lifecycle}.")

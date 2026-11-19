@@ -34,6 +34,7 @@ import modules.state_manager as SM
 import modules.snr as _m_snr
 import modules.unified_monitor as _m_unified
 import modules.us_news_radar as _m_news
+from modules.terminal_ui import print_terminal
 
 # Expose every function, variable, and helper (including _catat_error, _tutup_mt5, etc.)
 for _mod in (_m_config, _m_utils, _m_mt5, _m_tek, _m_pasar, _m_jurnal, _m_state, _m_ai, _m_pantau, _m_zone):
@@ -77,7 +78,7 @@ def format_command_menu_help():
         "- jurnal           : Rekap riwayat sinyal, winrate, dan evaluasi performa",
         "- audit            : Audit fakta akun MT5, pending order & status ADR",
         "- refresh          : Perbarui analisis dengan data market MT5 terkini",
-        "- news             : US Fundamental Radar ringkas (news detail / news refresh)",
+        "- news             : Kalender Ekonomi AS + Gold Market News (news detail / news refresh)",
         "- help             : Menampilkan panduan dan daftar perintah ini",
         "- exit             : Keluar dari aplikasi (q / quit / keluar)",
         "",
@@ -213,6 +214,8 @@ def execute_cli_command(cmd_str, snapshot=None, max_cycles=1, smc_runner=None, s
         return {
             "parsed": parsed,
             "cycle_result": cycle_res,
+            "news": cycle_res.get("news"),
+            "news_alerts": cycle_res.get("news_alerts") or [],
             "output": output,
         }
 
@@ -319,7 +322,7 @@ def main():
         ai_status = "DISCONNECTED"
 
     # TAMPILKAN STARTUP AWAL RINGKAS (4 BAGIAN: HEADER, SYSTEM STATUS, MARKET OVERVIEW, COMMAND MENU)
-    print(format_startup_presentation(
+    print_terminal(format_startup_presentation(
         symbol=SYMBOL,
         mt5_connected=mt5_ok,
         tick=tick_live,
@@ -329,13 +332,13 @@ def main():
     ))
     try:
         _nl = [x.replace(" : ", " : ", 1) for x in _m_news.startup_lines()]
-        print("\n5. US NEWS RADAR")
+        print_terminal("\n5. US NEWS RADAR")
         for _x in _nl:
             _k, _, _v = _x.partition(" : ")
-            print(f"• {_k:<20}: {_v}")
-        print("=" * 70)
+            print_terminal(f"• {_k:<20}: {_v}")
+        print_terminal("=" * 70)
     except Exception:
-        print("\n5. US NEWS RADAR\n• Status              : UNAVAILABLE\n" + "=" * 70)
+        print_terminal("\n5. US NEWS RADAR\n• Status              : UNAVAILABLE\n" + "=" * 70)
 
     # Sinkronisasi target zona awal Python Scanner ke state jika belum diset
     if not ZONA_ATAS_DINAMIS or not ZONA_BAWAH_DINAMIS:
@@ -354,14 +357,14 @@ def main():
         try:
             tanya = input("\n[XAUUSD SMC] > ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nSelesai. Semoga trading Anda lancar!")
+            print_terminal("\nSelesai. Semoga trading Anda lancar!")
             break
 
         if not tanya:
             continue
         cmd = tanya.lower()
         if cmd in ("exit", "keluar", "quit", "q"):
-            print("Selesai. Semoga trading Anda lancar!")
+            print_terminal("Selesai. Semoga trading Anda lancar!")
             break
 
         if cmd in ("sinyal", "status", "status sinyal", "signal", "setup"):
@@ -372,9 +375,9 @@ def main():
             tick_now = mt5.symbol_info_tick(SYMBOL) if pastikan_mt5_aktif() else None
             bid_now = tick_now.bid if tick_now else 0.0
 
-            print("\n" + "=" * 70)
-            print("📊 [MONITORING STATUS SINYAL]")
-            print(f"• Harga Bid MT5 Saat Ini: {bid_now:.2f}")
+            print_terminal("\n" + "=" * 70)
+            print_terminal("📊 [MONITORING STATUS SINYAL]")
+            print_terminal(f"• Harga Bid MT5 Saat Ini: {bid_now:.2f}")
 
             # Evaluasi apakah ada sinyal yang benar-benar MASIH VALID
             sinyal_ditampilkan = None
@@ -401,42 +404,42 @@ def main():
                 kat_t, ket_r_t = tentukan_klasifikasi_risiko_sinyal(sig_t)
                 tag_risk_icon = "⚠️" if kat_t == "HIGH RISK" else ("🛡️" if kat_t == "LOW RISK" else "⚡")
 
-                print("\n" + "─" * 70)
-                print(f"🎯 SINYAL AKTIF (MASIH VALID) — [{lbl_eks_t}]:")
-                print(f"   • Setup Sinyal   : {sig_t['arah']} @ {sig_t['lo']:.2f} - {sig_t['hi']:.2f}")
-                print(f"   • Tingkat Risiko : {tag_risk_icon} [{kat_t}] ({ket_r_t})")
+                print_terminal("\n" + "─" * 70)
+                print_terminal(f"🎯 SINYAL AKTIF (MASIH VALID) — [{lbl_eks_t}]:")
+                print_terminal(f"   • Setup Sinyal   : {sig_t['arah']} @ {sig_t['lo']:.2f} - {sig_t['hi']:.2f}")
+                print_terminal(f"   • Tingkat Risiko : {tag_risk_icon} [{kat_t}] ({ket_r_t})")
                 if kat_t == "HIGH RISK":
-                    print("   • Pertimbangan   : ⚠️ Sinyal ini dadakan di LTF M5. Anda bebas SKIP / TIDAK DIAMBIL jika ingin santai, ATAU ambil dengan lot mini (0.25%).")
-                print(f"   • Stop Loss & TP : SL {sig_t['sl']:.2f} | TP1 {sig_t['tp1']:.2f} | TP2 {sig_t.get('tp2', sig_t['tp1']):.2f}")
-                print(f"   • Status Saat Ini: [{st_t}] -> {al_t}")
-                print(f"   • Status di Akun : {lbl_eks_t} ({info_eks_t})")
+                    print_terminal("   • Pertimbangan   : ⚠️ Sinyal ini dadakan di LTF M5. Anda bebas SKIP / TIDAK DIAMBIL jika ingin santai, ATAU ambil dengan lot mini (0.25%).")
+                print_terminal(f"   • Stop Loss & TP : SL {sig_t['sl']:.2f} | TP1 {sig_t['tp1']:.2f} | TP2 {sig_t.get('tp2', sig_t['tp1']):.2f}")
+                print_terminal(f"   • Status Saat Ini: [{st_t}] -> {al_t}")
+                print_terminal(f"   • Status di Akun : {lbl_eks_t} ({info_eks_t})")
                 info_kentut_st = evaluasi_limit_kena_kentut(sig_t, bid_now)
                 if info_kentut_st:
-                    print(f"   • Note Limit     : [{info_kentut_st['judul']}]")
-                    print(f"     (Anti Kentut)    {info_kentut_st['catatan']}")
+                    print_terminal(f"   • Note Limit     : [{info_kentut_st['judul']}]")
+                    print_terminal(f"     (Anti Kentut)    {info_kentut_st['catatan']}")
                 mm_s = hitung_mm_sinyal(sig_t['lo'], sig_t['hi'], sig_t['sl'], sig_t['tp1'], sig_t.get('tp2', 0))
                 if mm_s:
-                    print(f"   • Rasio R:R      : TP1 1:{mm_s['rrr_tp1']:.1f} | TP2 1:{mm_s['rrr_tp2']:.1f} (Jarak SL: {mm_s['jarak_sl']:.2f} pt)")
+                    print_terminal(f"   • Rasio R:R      : TP1 1:{mm_s['rrr_tp1']:.1f} | TP2 1:{mm_s['rrr_tp2']:.1f} (Jarak SL: {mm_s['jarak_sl']:.2f} pt)")
                     if kat_t == "HIGH RISK":
-                        print(f"   • Lot High Risk  : {mm_s.get('lot_025', mm_s['lot_05']):.2f} lot (Risiko mini 0.25%: -${mm_s.get('risk_025_usd', mm_s['risk_05_usd']):.2f}) [batas maksimum bila tetap diambil]")
-                    print(f"   • Rekomendasi Lot: 0.5% (Konservatif): {mm_s['lot_05']:.2f} lot (-${mm_s['risk_05_usd']:.2f}) | 1.0% (Risiko Lebih Tinggi): {mm_s['lot_10']:.2f} lot (-${mm_s['risk_10_usd']:.2f})")
+                        print_terminal(f"   • Lot High Risk  : {mm_s.get('lot_025', mm_s['lot_05']):.2f} lot (Risiko mini 0.25%: -${mm_s.get('risk_025_usd', mm_s['risk_05_usd']):.2f}) [batas maksimum bila tetap diambil]")
+                    print_terminal(f"   • Rekomendasi Lot: 0.5% (Konservatif): {mm_s['lot_05']:.2f} lot (-${mm_s['risk_05_usd']:.2f}) | 1.0% (Risiko Lebih Tinggi): {mm_s['lot_10']:.2f} lot (-${mm_s['risk_10_usd']:.2f})")
                     if mm_s.get("melebihi_batas"):
-                        print(f"   ⚠️ Lot minimum broker ({mm_s['lot_05']:.2f}) membuat risiko melebihi 0.5% modal — pertimbangkan SL lebih dekat atau lewati setup.")
+                        print_terminal(f"   ⚠️ Lot minimum broker ({mm_s['lot_05']:.2f}) membuat risiko melebihi 0.5% modal — pertimbangkan SL lebih dekat atau lewati setup.")
             else:
-                print("\n" + "─" * 70)
-                print("🎯 STATUS SINYAL: WAIT / BELUM ADA SETUP AKTIF (Menunggu konfirmasi jemputan zona baru).")
-                print("   (Sinyal sebelumnya yang sudah tidak valid/selesai telah dibersihkan).")
+                print_terminal("\n" + "─" * 70)
+                print_terminal("🎯 STATUS SINYAL: WAIT / BELUM ADA SETUP AKTIF (Menunggu konfirmasi jemputan zona baru).")
+                print_terminal("   (Sinyal sebelumnya yang sudah tidak valid/selesai telah dibersihkan).")
 
             if state_aktif:
-                print("\n" + "─" * 70)
-                print(f"• Terakhir Disimpan : {state_aktif.get('waktu_simpan', '-')}")
+                print_terminal("\n" + "─" * 70)
+                print_terminal(f"• Terakhir Disimpan : {state_aktif.get('waktu_simpan', '-')}")
                 if state_aktif.get("bawah"):
                     lb, hb, jb = state_aktif["bawah"]
-                    print(f"• Zona Demand Bawah : {lb:.2f} - {hb:.2f} (Batas SL Zona: {jb:.2f})")
+                    print_terminal(f"• Zona Demand Bawah : {lb:.2f} - {hb:.2f} (Batas SL Zona: {jb:.2f})")
                 if state_aktif.get("atas"):
                     la, ha, ja = state_aktif["atas"]
-                    print(f"• Zona Supply Atas  : {la:.2f} - {ha:.2f} (Batas SL Zona: {ja:.2f})")
-            print("=" * 70)
+                    print_terminal(f"• Zona Supply Atas  : {la:.2f} - {ha:.2f} (Batas SL Zona: {ja:.2f})")
+            print_terminal("=" * 70)
             continue
 
         # US News Radar (informasional; terisolasi, tidak memengaruhi scanner/order)
@@ -446,10 +449,18 @@ def main():
                 if client is not None:
                     _ask_news = lambda p: sanitasi_output_gemini(panggil_gemini(client, [{"role": "user", "parts": [{"text": p}]}])[0])
                 _sig_ref = SINYAL_AKTIF_DINAMIS
-                print("\n" + _m_news.handle_command(cmd, ask_ai=_ask_news, active_signal=_sig_ref))
+                print_terminal("\n" + _m_news.handle_command(cmd, ask_ai=_ask_news, active_signal=_sig_ref))
                 continue
-            if cmd.split()[0] in ("scan", "scanner", "zona", "zone", "smc", "snr", "snd", "pantau", "watch"):
-                print("\n" + "\n".join(_m_news.context_lines()))
+            _is_unified_cmd = (
+                cmd in ("scan all", "scan gabungan", "scan unified", "scanner gabungan", "scanner unified",
+                        "scan all detail", "scan gabungan detail", "scan unified detail", "scanner gabungan detail", "scanner unified detail")
+                or (
+                    (cmd.startswith("pantau") or cmd.startswith("watch"))
+                    and _m_unified.parse_monitor_command(tanya).get("mode") != "legacy_manual"
+                )
+            )
+            if not _is_unified_cmd and cmd.split()[0] in ("scan", "scanner", "zona", "zone", "smc", "snr", "snd", "pantau", "watch"):
+                print_terminal("\n" + "\n".join(_m_news.context_lines()))
         except Exception:
             pass
 
@@ -482,16 +493,16 @@ def main():
                     if jml_baris > 0:
                         angka_list = [jml_baris]
             if not angka_list:
-                print("   [ℹ️ Gunakan format: 'ambil <nomor>' (contoh: ambil 7 atau ambil 7,8,20) atau 'skip <nomor>' (contoh: skip 9).]")
+                print_terminal("   [ℹ️ Gunakan format: 'ambil <nomor>' (contoh: ambil 7 atau ambil 7,8,20) atau 'skip <nomor>' (contoh: skip 9).]")
                 continue
             status_set = "TIDAK (MANUAL)" if is_batal else "YA (MANUAL)"
             ok_t, info_t = tandai_sinyal_diambil_jurnal(angka_list, status_set, mode_by_id=False)
             if ok_t:
                 label_aksi = "DIHAPUS dari daftar diambil (⚪ -)" if is_batal else "DITANDAI sebagai ✅ DIAMBIL"
-                print(f"\n   [✅ BERHASIL]: Zona {info_t} telah {label_aksi}!")
+                print_terminal(f"\n   [✅ BERHASIL]: Zona {info_t} telah {label_aksi}!")
                 tampilkan_rekap()
             else:
-                print(f"\n   [⚠️ GAGAL]: {info_t}")
+                print_terminal(f"\n   [⚠️ GAGAL]: {info_t}")
             continue
 
         if cmd in ("rekap", "statistik", "stat", "jurnal", "journal", "evaluasi", "riwayat sinyal") or any(k in cmd for k in ("jurnal sinyal", "rekap sinyal", "cek jurnal", "tabel sinyal", "evaluasi sinyal", "zona kena sl", "zona kena tp", "mana zona")):
@@ -501,33 +512,33 @@ def main():
         if cmd in ("scan all detail", "scan gabungan detail", "scan unified detail", "scanner gabungan detail", "scanner unified detail"):
             try:
                 cyc_u_det = _m_unified.run_unified_scan(symbol=SYMBOL, detailed=True)
-                print("\n" + cyc_u_det["formatted_report"])
+                print_terminal("\n" + cyc_u_det["formatted_report"])
             except Exception as e_u_d:
-                print(f"Gagal menjalankan Scan Gabungan Detail: {e_u_d}")
+                print_terminal(f"Gagal menjalankan Scan Gabungan Detail: {e_u_d}")
             continue
 
         if cmd in ("scan all", "scan gabungan", "scan unified", "scanner gabungan", "scanner unified"):
             try:
                 cyc_u = _m_unified.run_unified_scan(symbol=SYMBOL, detailed=False)
-                print("\n" + cyc_u["formatted_report"])
+                print_terminal("\n" + cyc_u["formatted_report"])
             except Exception as e_u:
-                print(f"Gagal menjalankan Scan Gabungan: {e_u}")
+                print_terminal(f"Gagal menjalankan Scan Gabungan: {e_u}")
             continue
 
         if cmd in ("scan snr detail", "scanner snr detail", "snr detail", "scan snd detail", "scanner snd detail", "snd detail"):
             try:
                 _, _, txt_snr_det = _m_snr.scan_snr_detail()
-                print("\n" + txt_snr_det)
+                print_terminal("\n" + txt_snr_det)
             except Exception as e_snr_d:
-                print(f"Gagal menjalankan SNR Scanner Detail: {e_snr_d}")
+                print_terminal(f"Gagal menjalankan SNR Scanner Detail: {e_snr_d}")
             continue
 
         if cmd in ("scan snr", "scanner snr", "snr", "scan snd", "scanner snd", "snd"):
             try:
                 _, _, txt_snr = _m_snr.scan_snr(detailed=False)
-                print("\n" + txt_snr)
+                print_terminal("\n" + txt_snr)
             except Exception as e_snr:
-                print(f"Gagal menjalankan SNR Scanner: {e_snr}")
+                print_terminal(f"Gagal menjalankan SNR Scanner: {e_snr}")
             continue
 
         if cmd in ("scan detail", "scanner detail", "zona detail", "zone detail", "scan smc detail", "smc detail"):
@@ -535,9 +546,9 @@ def main():
                 snap = create_market_snapshot()
                 hasil_scan = scan_xauusd_zones(snapshot=snap)
                 dec = evaluate_trade_decision(snapshot=snap, scan_result=hasil_scan)
-                print("\n" + format_scan_presentation(hasil_scan, dec, detailed=True))
+                print_terminal("\n" + format_scan_presentation(hasil_scan, dec, detailed=True))
             except Exception as e_sc:
-                print(f"Gagal menjalankan Zone Scanner Detail: {e_sc}")
+                print_terminal(f"Gagal menjalankan Zone Scanner Detail: {e_sc}")
             continue
 
         if cmd in ("zona", "zone", "scanner", "scan", "smc", "scan smc"):
@@ -545,42 +556,42 @@ def main():
                 snap = create_market_snapshot()
                 hasil_scan = scan_xauusd_zones(snapshot=snap)
                 dec = evaluate_trade_decision(snapshot=snap, scan_result=hasil_scan)
-                print("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
+                print_terminal("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
             except Exception as e_sc:
-                print(f"Gagal menjalankan Zone Scanner: {e_sc}")
+                print_terminal(f"Gagal menjalankan Zone Scanner: {e_sc}")
             continue
 
         if cmd in ("audit", "audit mt5", "cek akun", "cek order", "audit order"):
             try:
-                print("\n" + "=" * 70)
-                print("AUDIT FAKTA AKUN MT5, PENDING ORDER & VOLATILITAS PASAR")
-                print("=" * 70)
+                print_terminal("\n" + "=" * 70)
+                print_terminal("AUDIT FAKTA AKUN MT5, PENDING ORDER & VOLATILITAS PASAR")
+                print_terminal("=" * 70)
                 info_mt5 = cek_posisi_terbuka_mt5(SYMBOL)
-                print(info_mt5)
+                print_terminal(info_mt5)
                 try:
                     df_d1 = ambil_data(SYMBOL, "D1", 20)
                     if df_d1 is not None and len(df_d1) >= 14:
                         ref_price = float(df_d1["Close"].iloc[-1])
                         adr_text = analisa_adr_exhaustion(df_d1, ref_price)
-                        print(adr_text)
+                        print_terminal(adr_text)
                 except Exception as e_adr:
-                    print(f"ADR Info tidak dapat dimuat: {e_adr}")
-                print("=" * 70)
+                    print_terminal(f"ADR Info tidak dapat dimuat: {e_adr}")
+                print_terminal("=" * 70)
             except Exception as e_aud:
-                print(f"Gagal melakukan audit MT5: {e_aud}")
+                print_terminal(f"Gagal melakukan audit MT5: {e_aud}")
             continue
 
         if cmd in ("diag", "diagnostik", "diagnostic", "scan diag"):
             try:
                 snap = create_market_snapshot()
                 hasil_scan = scan_xauusd_zones(snapshot=snap)
-                print("\n" + format_diagnostic_report(hasil_scan))
+                print_terminal("\n" + format_diagnostic_report(hasil_scan))
             except Exception as e_diag:
-                print(f"Gagal menjalankan diagnostik scanner: {e_diag}")
+                print_terminal(f"Gagal menjalankan diagnostik scanner: {e_diag}")
             continue
 
         if cmd in ("help", "bantuan", "menu", "?", "panduan"):
-            print("\n" + format_command_menu_help())
+            print_terminal("\n" + format_command_menu_help())
             continue
 
         if cmd in ("simpan", "save"):
@@ -595,19 +606,19 @@ def main():
                 for msg in riwayat_chat[1:]:
                     role = "AI Analis" if msg["role"] == "model" else "Trader"
                     f.write(f"## {role}\n{msg['parts'][0]['text']}\n\n---\n\n")
-            print(f"   Jurnal berhasil disimpan ke: {nama_file}")
+            print_terminal(f"   Jurnal berhasil disimpan ke: {nama_file}")
             continue
 
         if cmd in ("refresh", "update"):
             if client is None:
-                print("\n   [INFO]: Gemini AI tidak aktif. Memperbarui data market dan Python Scanner...")
+                print_terminal("\n   [INFO]: Gemini AI tidak aktif. Memperbarui data market dan Python Scanner...")
                 try:
                     snap = create_market_snapshot()
                     hasil_scan = scan_xauusd_zones(snapshot=snap)
                     dec = evaluate_trade_decision(snapshot=snap, scan_result=hasil_scan)
-                    print("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
+                    print_terminal("\n" + format_scan_presentation(hasil_scan, dec, detailed=False))
                 except Exception as e_rf:
-                    print(f"Gagal memperbarui scanner: {e_rf}")
+                    print_terminal(f"Gagal memperbarui scanner: {e_rf}")
                 continue
 
             # Jika user ketik refresh manual, cek juga apakah zona dari AI sebelumnya sudah ditembus oleh harga terbaru
@@ -617,7 +628,7 @@ def main():
                 info_jurnal_ref = ringkasan_jurnal_untuk_ai(5)
                 prompt_baru = kumpulkan_konteks_mt5(is_refresh=True) + (f"\n\n{info_jurnal_ref}" if info_jurnal_ref else "")
             except KonteksError as e_ctx:
-                print(f"\n   Gagal menarik data MT5: {e_ctx}")
+                print_terminal(f"\n   Gagal menarik data MT5: {e_ctx}")
                 continue
 
             if not catatan_jebol_otomatis and CATATAN_JEBOL_PANTAU:
@@ -647,7 +658,7 @@ def main():
                     "serta apakah penjebolan ini adalah VALID BREAKOUT (sehingga zona lama berubah menjadi Breaker/Flip Zone untuk dicari Retest-nya) atau FAKEOUT/LIQUIDITY SWEEP!"
                 )
 
-            print("   Mengirim data live ke AI (streaming real-time)...", end="\r")
+            print_terminal("   Mengirim data live ke AI (streaming real-time)...", end="\r")
             jwb_baru, mdl = panggil_gemini(client, prompt_baru, stream_output=True)
             if jwb_baru:
                 jwb_baru = sanitasi_output_gemini(jwb_baru)
@@ -674,7 +685,7 @@ def main():
                     konteks="REFRESH",
                 )
                 for p in logs_lock:
-                    print(p)
+                    print_terminal(p)
                 if sig_rw:
                     # Pengarsipan di Refresh adalah perubahan perilaku yang disengaja (jika sinyal lama diganti karena selesai/batal)
                     SINYAL_SEBELUMNYA_DINAMIS = sig_rw
@@ -696,7 +707,7 @@ def main():
                     {"role": "model", "parts": [{"text": jwb_baru}]},
                 ]
             else:
-                print("\nGagal memperbarui analisa (server padat). Coba lagi sebentar.")
+                print_terminal("\nGagal memperbarui analisa (server padat). Coba lagi sebentar.")
             continue
 
         tanya_lower = tanya.lower()
@@ -756,15 +767,15 @@ def main():
 
         # Jika Gemini AI offline, infokan kepada trader dan arahkan ke perintah lokal
         if client is None:
-            print("\n   [INFO]: Layanan Gemini AI tidak aktif (GEMINI_API_KEY belum dikonfigurasi atau offline).")
-            print("   Gunakan perintah lokal scanner seperti 'scan', 'zona', 'pantau', 'jurnal', 'audit', atau 'help'.")
+            print_terminal("\n   [INFO]: Layanan Gemini AI tidak aktif (GEMINI_API_KEY belum dikonfigurasi atau offline).")
+            print_terminal("   Gunakan perintah lokal scanner seperti 'scan', 'zona', 'pantau', 'jurnal', 'audit', atau 'help'.")
             continue
 
         # Untuk sesi Tanya Jawab, gunakan hanya percakapan Q&A terakhir (hingga 6 giliran terakhir)
         percakapan_qa = list(riwayat_chat[-6:]) if riwayat_chat else []
         konten_qa = percakapan_qa + [{"role": "user", "parts": [{"text": instruksi_qa}]}]
 
-        print("   Menghubungi server AI...", end="\r")
+        print_terminal("   Menghubungi server AI...", end="\r")
         jawaban_qa, mdl = panggil_gemini(client, konten_qa, stream_output=True)
         if jawaban_qa:
             jawaban_qa = sanitasi_output_gemini(jawaban_qa)
@@ -794,7 +805,7 @@ def main():
                         konteks="QA",
                     )
                     for p in logs_lock:
-                        print(p)
+                        print_terminal(p)
                     if sig_rw:
                         SINYAL_SEBELUMNYA_DINAMIS = sig_rw
                     if diubah:
@@ -813,7 +824,7 @@ def main():
             riwayat_chat.append({"role": "user", "parts": [{"text": f"Pertanyaan trader: {tanya}"}]})
             riwayat_chat.append({"role": "model", "parts": [{"text": jawaban_qa}]})
         else:
-            print("   Maaf, server AI sedang sibuk. Silakan kirim ulang pertanyaan Anda.")
+            print_terminal("   Maaf, server AI sedang sibuk. Silakan kirim ulang pertanyaan Anda.")
 
 
 

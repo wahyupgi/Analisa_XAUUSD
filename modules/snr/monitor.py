@@ -15,6 +15,7 @@ from modules.snr.formatter import (
 )
 from modules.snr.radar import SnrAlertTracker
 from modules.snr.scanner import evaluate_snr_decision, run_snr_scan
+from modules.terminal_ui import print_terminal
 
 
 def format_snr_monitor_section(cycle_result, detailed=False):
@@ -225,6 +226,7 @@ class SnrCycleEngine:
                 "decision": dec,
                 "radar": radar,
                 "alerts": alert_bundle["alerts"],
+                "historical_events": alert_bundle.get("historical_events") or [],
                 "critical_warnings": alert_bundle["critical_warnings"],
                 "state_changed": state_changed,
             }
@@ -266,10 +268,10 @@ def mode_pantau_snr(cmd_str="pantau snr", max_cycles=None, sleep_sec=2.0, snapsh
     detailed = "detail" in cmd_clean
     engine = SnrCycleEngine(symbol=DEFAULT_APP_SYMBOL)
 
-    print("\n" + "=" * 68)
-    print(f"📡 MEMULAI SNR ADVANCED MONITOR ({'DETAIL MODE' if detailed else 'SUMMARY MODE'})")
-    print("   Tekan Ctrl+C untuk menghentikan pemantauan.")
-    print("=" * 68)
+    print_terminal("\n" + "=" * 68)
+    print_terminal(f"📡 MEMULAI SNR ADVANCED MONITOR ({'DETAIL MODE' if detailed else 'SUMMARY MODE'})")
+    print_terminal("   Tekan Ctrl+C untuk menghentikan pemantauan.")
+    print_terminal("=" * 68)
 
     cycles_done = 0
     last_result = None
@@ -280,16 +282,16 @@ def mode_pantau_snr(cmd_str="pantau snr", max_cycles=None, sleep_sec=2.0, snapsh
             cycles_done += 1
 
             if cycles_done == 1 or res.get("state_changed"):
-                print("\n" + res["formatted_section"])
+                print_terminal("\n" + res["formatted_section"])
             elif res.get("critical_warnings"):
                 for cw in res["critical_warnings"]:
-                    print(cw)
+                    print_terminal(cw)
 
             if max_cycles is not None and cycles_done >= int(max_cycles):
                 break
             time.sleep(max(0.1, float(sleep_sec)))
     except KeyboardInterrupt:
-        print("\n[SNR MONITOR] Pemantauan SNR dihentikan oleh pengguna.")
+        print_terminal("\n[SNR MONITOR] Pemantauan SNR dihentikan oleh pengguna.")
 
     return last_result
 

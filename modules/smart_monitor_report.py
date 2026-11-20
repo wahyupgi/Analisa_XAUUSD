@@ -8,17 +8,35 @@ Dipindahkan apa adanya dari modules/unified_monitor.py (structural refactoring, 
 Modul ini tidak bergantung pada unified_monitor (dependency satu arah); unified_monitor
 mengimpor kembali seluruh nama publiknya agar caller lama tetap kompatibel.
 """
+from modules.config import LOW_RISK_MAX_ATR_RATIO, LOW_RISK_MAX_DISTANCE_PT, SL_JARAK_MAKS, ZONE_APPROACH_DISTANCE_POINTS
 from modules.mt5_conn import (
     fetch_mt5_pending_orders_snapshot,
+    find_pending_orders_on_invalid_zones,
     format_pending_compact_status,
     format_pending_reconciliation_evidence,
     reconcile_pending_plan_with_mt5,
     reconcile_pending_plans_batch,
+    summarize_mt5_risk_warnings,
 )
+from modules.snr.breakout_detection import build_snr_breakout_watch
 from modules.snr.data_provider import safe_float
 from modules.snr.entry_validator import _is_live_active_snr_zone, select_live_snr_focus
-from modules.utils import format_wib_timestamp
-from modules.zone_scanner import format_smc_zone_lines, smc_zone_summary
+from modules.terminal_ui import (
+    fit_dashboard_text,
+    get_terminal_height,
+    get_terminal_width,
+    render_big_price_digits,
+    supports_unicode_glyphs,
+    truncate_clean,
+    wrap_dashboard_field,
+)
+from modules.utils import (
+    format_wib_timestamp,
+    get_symbol_unit_spec,
+    extract_unit_spec_from_container,
+    format_price_distance,
+)
+from modules.zone_scanner import format_smc_zone_lines, is_far_reference_zone, smc_zone_summary
 
 
 def format_account_monitor_section(acc_data):
@@ -34,7 +52,8 @@ def format_account_monitor_section(acc_data):
     - Peringatan risiko penting
     """
     acc = acc_data or {}
-    spread_str = f"{safe_float(acc.get('spread')):.2f} pts" if acc.get("spread") is not None else "N/A"
+    _u_acc_r = extract_unit_spec_from_container(acc, symbol=acc.get("symbol"))
+    spread_str = format_price_distance(safe_float(acc.get("spread")), spec=_u_acc_r, include_mt5_points=True) if acc.get("spread") is not None else "N/A"
 
     if not acc.get("available", False):
         lines = [
@@ -84,6 +103,13 @@ def _format_pending_compact_tag(item, active_zone_id=None, is_selected=True):
         return "WAIT"
     plan_st = str(item.get("plan_status") or item.get("status") or "WAIT").strip()
     if not plan_st.upper().startswith("READY"):
+        recon = item.get("mt5_reconciliation")
+        b_st = str(item.get("broker_order_status") or (recon or {}).get("broker_order_status") or "").upper()
+        if b_st == "OTHER_ORDER_EXISTS":
+            if item.get("compact_status"):
+                return str(item["compact_status"])
+            tot_ord = int((recon or {}).get("symbol_orders_count") or 0)
+            return f"{plan_st} | MT5: NO MATCH | OTHER ORDERS: {tot_ord}"
         return plan_st
     if item.get("compact_status"):
         return str(item["compact_status"])
@@ -177,7 +203,7 @@ def resolve_monitor_pending_plans(
                 if live_z is not None:
                     if callable(zone_usable_fn) and not zone_usable_fn(live_z):
                         continue
-                    if str(live_z.get("risk_tier") or "").upper() == "FAR_ZONE":
+                    if str(live_z.get("risk_tier") or "").upper() == "FAR_ZONE" or is_far_reference_zone(live_z):
                         continue
                     if str(live_z.get("radar_eligibility") or "QUALIFIED").upper() == "NOT_QUALIFIED":
                         continue
@@ -327,6 +353,7 @@ def resolve_monitor_pending_plans(
         "broker_order_status": empty_recon["broker_order_status"],
         "mt5_execution_state": empty_recon["broker_order_status"],
         "mt5_reconciliation": empty_recon,
+        "compact_status": empty_recon.get("compact_status") or "WAIT",
         "status": "WAIT",
         "is_placed": False,
         "alternatives": [],
@@ -511,15 +538,13 @@ def _calc_zone_touch(z, p, stages_dict, trk_rec, life_st):
     z_hi = safe_float(z.get("price_high"), 0.0)
     if not z:
         return "NO_ZONE", "NO SMC SETUP"
-    if z.get("is_valid") is False or life_st in ("INVALIDATED", "BROKEN") or z.get("status") == "INVALIDATED":
-        return "INVALIDATED", "INVALIDATED"
-    inv_p = safe_float(z.get("invalidation_price"), 0.0)
-    z_t = str(z.get("zone_type", "")).upper()
-    if inv_p > 0 and p > 0:
-        if z_t in ("DEMAND", "SUPPORT") and p < inv_p:
-            return "INVALIDATED", "INVALIDATED"
-        if z_t in ("SUPPLY", "RESISTANCE") and p > inv_p:
-            return "INVALIDATED", "INVALIDATED"
+    if (
+        z.get("is_valid") is False
+        or z.get("is_broken") is True
+        or life_st in ("INVALIDATED", "BROKEN")
+        or str(z.get("status") or "").upper() in ("INVALIDATED", "BROKEN")
+    ):
+        return "INVALIDATED", "INVALID — BROKEN"
     if z_lo > 0 and z_hi > 0 and p > 0 and (z_lo <= p <= z_hi):
         return "IN_ZONE", "IN ZONE"
     t_stage = (stages_dict.get("zone_touch") if isinstance(stages_dict, dict) else {}) or {}
@@ -565,8 +590,10 @@ def _smart_monitor_context(cycle_result):
             return False
         status = str(candidate.get("lifecycle_status") or candidate.get("status") or "ACTIVE").upper()
         freshness_status = str(candidate.get("freshness") or candidate.get("freshness_status") or "FRESH").upper()
+        rel_status = str(candidate.get("zone_relevance") or "").upper()
         return (
-            status not in (
+            rel_status != "INVALID"
+            and status not in (
                 "INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN",
                 "RECLAIMED", "RECLAIM_PENDING", "RETEST",
                 "BREAKDOWN_PENDING", "BREAKOUT_PENDING", "HISTORICAL", "UNCONFIRMED",
@@ -574,6 +601,7 @@ def _smart_monitor_context(cycle_result):
             and freshness_status not in ("INVALIDATED", "EXPIRED", "MITIGATED", "STALE", "INVALID")
         )
 
+    price = safe_float(snapshot.get("snapshot_price", snapshot.get("bid")), 0.0)
     h4_bias_ctx = str(summary.get("h4_bias") or (scan.get("htf_context") or {}).get("H4") or "").upper()
     h1_bias_ctx = str(summary.get("h1_bias") or (scan.get("htf_context") or {}).get("H1") or "").upper()
 
@@ -586,15 +614,40 @@ def _smart_monitor_context(cycle_result):
         want = ("DEMAND", "SUPPORT") if h4_bias_ctx == "BULLISH" else ("SUPPLY", "RESISTANCE")
         return zt in want
 
+    def _is_far_zone_ctx(candidate):
+        if not isinstance(candidate, dict):
+            return False
+        if str(candidate.get("zone_relevance") or "").upper() == "FAR_REFERENCE" or candidate.get("is_far_reference"):
+            return True
+        if str(candidate.get("source") or "SMC").upper() != "SNR" and is_far_reference_zone(
+            candidate, current_price=price if price > 0 else None
+        ):
+            return True
+        if str(candidate.get("risk_tier") or "").upper() == "FAR_ZONE":
+            return True
+        if str(candidate.get("radar_eligibility") or "").upper() == "NOT_QUALIFIED":
+            return True
+        if candidate.get("is_distant_historical"):
+            return True
+        if str(candidate.get("lifecycle_status") or candidate.get("status") or "").upper() == "HISTORICAL":
+            return True
+        d_atr_snr = candidate.get("distance_atr")
+        if isinstance(d_atr_snr, (int, float)) and d_atr_snr > 12.0:
+            return True
+        return False
+
     def _is_actionable_monitor_candidate(candidate):
         return (
             _zone_is_usable(candidate)
-            and str(candidate.get("radar_eligibility") or "QUALIFIED").upper() == "QUALIFIED"
-            and str(candidate.get("risk_tier") or "").upper() != "FAR_ZONE"
+            and not _is_far_zone_ctx(candidate)
             and _is_directional_for_htf(candidate)
         )
 
+    far_reference_zone = None
     zone = _as_monitor_zone(decision.get("zone"))
+    if zone and _is_far_zone_ctx(zone):
+        far_reference_zone = dict(zone)
+        zone = {}
     if not zone or safe_float(zone.get("price_low", zone.get("low")), 0.0) <= 0:
         priority = decision.get("radar_priority") or scan.get("radar_priority") or {}
         smc_candidates = [
@@ -625,12 +678,19 @@ def _smart_monitor_context(cycle_result):
                     zone["zone_type"] = zone["type"]
                 break
 
-    price = safe_float(snapshot.get("snapshot_price", snapshot.get("bid")), 0.0)
     lo = safe_float(zone.get("price_low", zone.get("low")), 0.0)
     hi = safe_float(zone.get("price_high", zone.get("high")), 0.0)
-    distance = 0.0 if lo <= price <= hi and price > 0 else (
-        lo - price if price > 0 and lo > price else (price - hi if price > hi else None)
-    )
+    if lo > hi > 0:
+        lo, hi = hi, lo
+    if price > 0 and lo > 0 and hi >= lo:
+        if lo <= price <= hi:
+            distance = 0.0
+        elif lo > price:
+            distance = max(round(lo - price, 2), 0.01)
+        else:
+            distance = max(round(price - hi, 2), 0.01)
+    else:
+        distance = None
     zone_type = str(zone.get("zone_type") or zone.get("type") or "").upper()
     direction = str(decision.get("direction") or summary.get("direction") or "").upper()
     if direction not in ("BUY", "SELL"):
@@ -747,44 +807,38 @@ def _smart_monitor_context(cycle_result):
         if not isinstance(snr_zone, dict) or snr_zone.get("zone_id") != live_focus_cand.get("zone_id"):
             snr_overridden = bool(raw_snr_target)
         snr_zone = dict(live_focus_cand)
-    elif not _snr_side_valid_for_live_price(snr_zone):
+    elif not _snr_side_valid_for_live_price(snr_zone) or (
+        isinstance(snr_zone, dict) and snr_zone.get("zone_id")
+        and str(snr_zone.get("zone_id")) not in {
+            str(z_a.get("zone_id")) for z_a in (active_sups + active_ress) if isinstance(z_a, dict)
+        }
+    ):
+        # Zona harus ada di daftar aktif live (sama dengan `scan snr`); target keputusan lama bukan S/R aktif.
         snr_zone = {}
         snr_overridden = bool(raw_snr_target)
 
-    # Propagasikan status breakdown / breakout / reclaim SNR terbaru ke Smart Monitor (informational, independen dari SMC)
+    # Propagasikan status breakout SNR kanonis (sinkron penuh dengan `scan snr`:
+    # BREAKDOWN/BREAKOUT PENDING, CONFIRMED, RETEST WATCH, BROKEN) ke Smart Monitor
     snr_breakout_watch = ""
     snr_historical_watch = ""
     historical_events_meta = []
     if snr.get("status") == "OK":
-        def _is_nearby_watch(z_item):
-            if not isinstance(z_item, dict) or z_item.get("is_distant_historical"):
-                return False
-            d_atr = safe_float(z_item.get("distance_atr"), 0.0)
-            if d_atr > 12.0:
-                return False
-            bo_i = z_item.get("breakout_info") if isinstance(z_item.get("breakout_info"), dict) else {}
-            if bo_i.get("is_historical_break") and d_atr > 6.0:
-                return False
-            return True
+        bo_watch_snr = snr_scan.get("breakout_watch") or build_snr_breakout_watch(
+            snr_zones, price_action=snr_scan.get("price_action")
+        )
+        snr_breakout_watch = str(bo_watch_snr.get("summary_line") or "").strip()
 
-        def _is_current_watch(z_item):
-            if not _is_nearby_watch(z_item):
-                return False
-            if z_item.get("lifecycle_is_historical"):
-                return False
-            st_up = str(z_item.get("lifecycle_status") or z_item.get("status") or "").upper()
-            bars_ago = int(safe_float(z_item.get("lifecycle_bars_ago"), 0))
-            if st_up == "RECLAIMED" and bars_ago > 1:
-                return False
-            bo_i = z_item.get("breakout_info") if isinstance(z_item.get("breakout_info"), dict) else {}
-            if bo_i.get("is_historical_break"):
-                return False
-            return True
-
-        pend_watch = [z for z in (snr_zones.get("pending_break_zones") or []) if _is_current_watch(z)]
         recl_pool = [z for z in (snr_zones.get("reclaimed_zones") or []) if isinstance(z, dict)]
-        recl_watch = [z for z in recl_pool if _is_current_watch(z)]
-        recl_hist = [z for z in recl_pool if not _is_current_watch(z)]
+        recl_hist = [
+            z for z in recl_pool
+            if (
+                z.get("lifecycle_is_historical")
+                or z.get("is_distant_historical")
+                or safe_float(z.get("distance_atr"), 0.0) > 12.0
+                or (str(z.get("lifecycle_status") or z.get("status") or "").upper() == "RECLAIMED" and int(safe_float(z.get("lifecycle_bars_ago"), 0)) > 1)
+                or bool((z.get("breakout_info") or {}).get("is_historical_break"))
+            )
+        ]
         recl_hist.sort(
             key=lambda item: (
                 str(item.get("lifecycle_event_time") or (item.get("breakout_info") or {}).get("breakout_bar_time") or ""),
@@ -792,32 +846,6 @@ def _smart_monitor_context(cycle_result):
             ),
             reverse=True,
         )
-        brok_watch = [
-            z for z in (snr_zones.get("broken_zones") or [])
-            if _is_current_watch(z) and str(z.get("lifecycle_status") or z.get("status") or "").upper() in ("BROKEN", "RETEST")
-        ]
-        if pend_watch:
-            pw = pend_watch[0]
-            p_zt = str(pw.get("zone_type") or "").upper()
-            p_tag = "POTENTIAL BREAKDOWN" if p_zt == "SUPPORT" else "POTENTIAL BREAKOUT"
-            snr_breakout_watch = f"{p_tag} ({pw.get('timeframe', '')} {p_zt} {safe_float(pw.get('low')):.2f}-{safe_float(pw.get('high')):.2f})".replace("  ", " ")
-        elif recl_watch:
-            rw = recl_watch[0]
-            r_st = str(rw.get("lifecycle_status") or "RECLAIMED").upper().replace("_", " ")
-            r_zt = str(rw.get("zone_type") or "").upper()
-            snr_breakout_watch = f"{r_st} ({rw.get('timeframe', '')} {r_zt} {safe_float(rw.get('low')):.2f}-{safe_float(rw.get('high')):.2f})".replace("  ", " ")
-        elif brok_watch:
-            bw = brok_watch[0]
-            b_zt = str(bw.get("zone_type") or "").upper()
-            b_tag = "SUPPORT BROKEN" if b_zt == "SUPPORT" else "RESISTANCE BROKEN"
-            snr_breakout_watch = f"{b_tag} ({bw.get('timeframe', '')} {safe_float(bw.get('low')):.2f}-{safe_float(bw.get('high')):.2f})".replace("  ", " ")
-        else:
-            snr_pa = snr_scan.get("price_action") or {}
-            pa_code = str(snr_pa.get("breakout_code") or "NO_BREAKOUT").upper()
-            if pa_code in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION") and not snr_pa.get("breakout_is_historical"):
-                pa_bt = str(snr_pa.get("break_type") or pa_code).replace("_", " ")
-                pa_lbl = str(snr_pa.get("breakout_zone_label") or "").strip()
-                snr_breakout_watch = f"{pa_bt} ({pa_lbl})" if pa_lbl and pa_lbl != "NONE" else pa_bt
         for rh in recl_hist[:5]:
             rh_st = str(rh.get("lifecycle_status") or "RECLAIMED").upper()
             rh_zt = str(rh.get("zone_type") or "").upper()
@@ -985,6 +1013,38 @@ def _smart_monitor_context(cycle_result):
                 "score": safe_float(zone.get("score")) if zone.get("score") is not None else None,
             })
 
+    if (not zone or safe_float(zone.get("price_low", zone.get("low")), 0.0) <= 0) and far_reference_zone is None:
+        dec_far = decision.get("far_reference_zone")
+        if isinstance(dec_far, dict) and safe_float(dec_far.get("price_low", dec_far.get("low")), 0.0) > 0:
+            far_reference_zone = dict(dec_far)
+        else:
+            far_smc_pool = [
+                z_f for z_f in (scan.get("radar_zones") or [])
+                if isinstance(z_f, dict)
+                and _zone_is_usable(z_f)
+                and _is_far_zone_ctx(z_f)
+                and _is_directional_for_htf(z_f)
+            ]
+            if far_smc_pool:
+                far_reference_zone = dict(min(
+                    far_smc_pool,
+                    key=lambda z_f: max(safe_float(z_f.get("price_low"), 0.0) - price, price - safe_float(z_f.get("price_high"), 0.0), 0.0) if price > 0 else safe_float(z_f.get("distance"), 9999.0),
+                ))
+            elif isinstance(snr_zone, dict) and _is_far_zone_ctx(snr_zone) and safe_float(snr_zone.get("low", snr_zone.get("price_low")), 0.0) > 0:
+                far_reference_zone = dict(snr_zone)
+                far_reference_zone.setdefault("source", "SNR")
+            else:
+                snr_hist = [
+                    z_h for z_h in (
+                        list(snr_zones.get("far_reference_zones") or [])
+                        + list(snr_zones.get("historical_zones") or [])
+                    )
+                    if isinstance(z_h, dict)
+                ]
+                if snr_hist:
+                    far_reference_zone = dict(snr_hist[0])
+                    far_reference_zone.setdefault("source", "SNR")
+
     smc_zone_usable = _zone_is_usable(smc_zone_ref) if smc_zone_ref else (zone.get("source") != "SNR" and _zone_is_usable(zone))
     snr_zone_usable = _zone_is_usable(snr_zone)
     smc_comp_lo = safe_float(smc_zone_ref.get("price_low", smc_zone_ref.get("low")), 0.0) if smc_zone_ref else (lo if zone.get("source") != "SNR" else 0.0)
@@ -1013,14 +1073,14 @@ def _smart_monitor_context(cycle_result):
     confluence_display = ""
 
     def _zones_overlap_points(lo_a, hi_a, lo_b, hi_b):
+        if lo_a > hi_a and hi_a > 0:
+            lo_a, hi_a = hi_a, lo_a
+        if lo_b > hi_b and hi_b > 0:
+            lo_b, hi_b = hi_b, lo_b
         if not (lo_a > 0 and hi_a >= lo_a and lo_b > 0 and hi_b >= lo_b):
             return 0.0
-        ov = min(hi_a, hi_b) - max(lo_a, lo_b)
-        if ov > 0.0:
-            return ov
-        if (hi_a == lo_a and lo_b <= lo_a <= hi_b) or (hi_b == lo_b and lo_a <= lo_b <= hi_a):
-            return 1e-6
-        return 0.0
+        ov = round(min(hi_a, hi_b) - max(lo_a, lo_b), 2)
+        return ov if ov > 0.0 else 0.0
 
     def _snr_pool_key(cand_z):
         zid_c = str(cand_z.get("zone_id") or "").strip().upper()
@@ -1122,9 +1182,9 @@ def _smart_monitor_context(cycle_result):
         confluence = "CONFLICT"
         confluence_reason = (
             f"Zona entry SMC {smc_comp_dir} ({smc_comp_lo:.2f}-{smc_comp_hi:.2f}) overlap langsung "
-            f"dengan zona SNR lawan {o_lbl} ({o_lo:.2f}-{o_hi:.2f}, {opp_overlap_pts:.2f} pt)"
+            f"dengan zona SNR lawan {o_lbl} ({o_lo:.2f}-{o_hi:.2f}, {opp_overlap_pts:.2f} USD)"
         )
-        snr_confluence_source_display = f"CONFLICT ({o_lbl} {o_lo:.2f}-{o_hi:.2f} overlap lawan {opp_overlap_pts:.2f} pt)"
+        snr_confluence_source_display = f"CONFLICT ({o_lbl} {o_lo:.2f}-{o_hi:.2f} overlap lawan {opp_overlap_pts:.2f} USD)"
     elif (
         snr_zone_usable
         and snr_zone_direction in ("BUY", "SELL")
@@ -1144,27 +1204,27 @@ def _smart_monitor_context(cycle_result):
         d_grd = str(snr_confluence_source.get("grade") or "N/A").strip()
         d_tag = f"{d_lbl} {d_tf}".strip()
         confluence = "ALIGNED"
-        snr_confluence_source_display = f"{d_tag} {d_lo:.2f} - {d_hi:.2f} (Grade {d_grd} | overlap {snr_confluence_overlap_pts:.2f} pt)"
+        snr_confluence_source_display = f"{d_tag} {d_lo:.2f} - {d_hi:.2f} (Grade {d_grd} | overlap {snr_confluence_overlap_pts:.2f} USD)"
         base_c_reason = (
             f"Directional {smc_comp_dir}: zona SMC {smc_comp_lo:.2f}-{smc_comp_hi:.2f} "
-            f"overlap dengan SNR {d_lbl} {d_lo:.2f}-{d_hi:.2f} ({snr_confluence_overlap_pts:.2f} pt)"
+            f"overlap dengan SNR {d_lbl} {d_lo:.2f}-{d_hi:.2f} ({snr_confluence_overlap_pts:.2f} USD)"
         )
         if snr_proximity_detail:
             confluence_reason = f"{base_c_reason}; {snr_proximity_detail} (bukan konflik setup {smc_comp_dir})"
-            confluence_display = f"{confluence} ({d_lbl} {d_lo:.2f}-{d_hi:.2f} overlap {snr_confluence_overlap_pts:.2f} pt | {snr_price_proximity})"
+            confluence_display = f"{confluence} ({d_lbl} {d_lo:.2f}-{d_hi:.2f} overlap {snr_confluence_overlap_pts:.2f} USD | {snr_price_proximity})"
         else:
             confluence_reason = base_c_reason
-            confluence_display = f"{confluence} ({d_lbl} {d_lo:.2f}-{d_hi:.2f} overlap {snr_confluence_overlap_pts:.2f} pt)"
+            confluence_display = f"{confluence} ({d_lbl} {d_lo:.2f}-{d_hi:.2f} overlap {snr_confluence_overlap_pts:.2f} USD)"
     elif directional_snr_zone is not None:
         d_lo = safe_float(directional_snr_zone.get("low", directional_snr_zone.get("price_low")), 0.0)
         d_hi = safe_float(directional_snr_zone.get("high", directional_snr_zone.get("price_high")), 0.0)
         d_lbl = str(directional_snr_zone.get("rank_label") or directional_snr_zone.get("zone_type") or "SNR").strip()
         gap_pts = (smc_comp_lo - d_hi) if smc_comp_lo > d_hi else max(0.0, d_lo - smc_comp_hi)
         confluence = "PARTIAL"
-        snr_confluence_source_display = f"NONE (searah terdekat {d_lbl} {d_lo:.2f}-{d_hi:.2f} tidak overlap SMC, jarak {gap_pts:.2f} pt)"
+        snr_confluence_source_display = f"NONE (searah terdekat {d_lbl} {d_lo:.2f}-{d_hi:.2f} tidak overlap SMC, jarak {gap_pts:.2f} USD)"
         base_c_reason = (
             f"Directional {smc_comp_dir}: searah SNR {d_lbl} {d_lo:.2f}-{d_hi:.2f}, "
-            f"rentang SMC {smc_comp_lo:.2f}-{smc_comp_hi:.2f} tidak overlap (jarak {gap_pts:.2f} pt)"
+            f"rentang SMC {smc_comp_lo:.2f}-{smc_comp_hi:.2f} tidak overlap (jarak {gap_pts:.2f} USD)"
         )
         if snr_proximity_detail:
             confluence_reason = f"{base_c_reason}; {snr_proximity_detail} (bukan konflik setup {smc_comp_dir})"
@@ -1204,7 +1264,14 @@ def _smart_monitor_context(cycle_result):
         "EXPIRED": "EXPIRED",
     }
     monitor_state = state_map.get(lifecycle, lifecycle)
-    if monitor_state == "IN_ZONE":
+    if lo > 0 and hi >= lo and price > 0 and monitor_state not in ("INVALIDATED", "EXPIRED", "CONFIRMED"):
+        if lo <= price <= hi:
+            monitor_state = "AWAITING_CONFIRMATION"
+        elif distance is not None and distance <= float(ZONE_APPROACH_DISTANCE_POINTS):
+            monitor_state = "APPROACHING"
+        elif monitor_state in ("APPROACHING", "AWAITING_CONFIRMATION", "IN_ZONE", "ZONE_TOUCHED"):
+            monitor_state = "IDLE"
+    elif monitor_state == "IN_ZONE":
         # Jika harga sudah berada di luar zona dan tidak ada trigger aktif, jangan paksakan AWAITING_CONFIRMATION
         if lo > 0 and hi >= lo and price > 0 and not (lo <= price <= hi):
             monitor_state = "IDLE"
@@ -1320,7 +1387,7 @@ def _smart_monitor_context(cycle_result):
                 continue
             if str(cz.get("radar_eligibility") or "QUALIFIED").upper() != "QUALIFIED":
                 continue
-            if str(cz.get("risk_tier") or "").upper() == "FAR_ZONE":
+            if str(cz.get("risk_tier") or "").upper() == "FAR_ZONE" or is_far_reference_zone(cz, current_price=price if price > 0 else None):
                 continue
             cz_type = str(cz.get("zone_type") or "").upper()
             if h4_bias_ctx in ("BULLISH", "BEARISH") and cz_type != ("DEMAND" if h4_bias_ctx == "BULLISH" else "SUPPLY"):
@@ -1475,7 +1542,7 @@ def _smart_monitor_context(cycle_result):
             monitor_state = "RADAR"
             touch_status = "NOT_TOUCHED"
             z_desc = f"{zone.get('timeframe', '')} {zone.get('zone_type', '')} {safe_float(zone.get('price_low', zone.get('low'))):.2f}-{safe_float(zone.get('price_high', zone.get('high'))):.2f}".strip()
-            touch_display = f"UNTOUCHED ({distance:.2f} pt)" if distance is not None else "UNTOUCHED"
+            touch_display = f"UNTOUCHED ({format_price_distance(distance, spec=extract_unit_spec_from_container(snapshot), include_mt5_points=True)})" if distance is not None else "UNTOUCHED"
             reason = f"RADAR: Menunggu pullback ke {z_desc}"
             next_action = "WAIT PULLBACK"
             final_signal = "WAIT"
@@ -1483,7 +1550,15 @@ def _smart_monitor_context(cycle_result):
             # Historical touch tidak boleh menggantikan kandidat radar terbaru yang masih valid
             r_lo = safe_float(radar_candidate.get("price_low", radar_candidate.get("low")), 0.0)
             r_hi = safe_float(radar_candidate.get("price_high", radar_candidate.get("high")), 0.0)
-            r_dist = safe_float(radar_candidate.get("distance"), 0.0)
+            if price > 0 and r_lo > 0 and r_hi >= r_lo:
+                if r_lo <= price <= r_hi:
+                    r_dist = 0.0
+                elif r_lo > price:
+                    r_dist = max(round(r_lo - price, 2), 0.01)
+                else:
+                    r_dist = max(round(price - r_hi, 2), 0.01)
+            else:
+                r_dist = safe_float(radar_candidate.get("distance"), 0.0)
             r_desc = f"{radar_candidate.get('timeframe', '')} {radar_candidate.get('zone_type', '')} {r_lo:.2f}-{r_hi:.2f}".strip()
             zone = dict(radar_candidate)
             lo, hi = r_lo, r_hi
@@ -1514,11 +1589,25 @@ def _smart_monitor_context(cycle_result):
                 "score": safe_float(zone.get("score")) if zone.get("score") is not None else None,
                 "lifecycle_status": str(zone.get("lifecycle_status") or zone.get("status") or "RADAR").upper(),
             })
-            monitor_state = "RADAR"
-            touch_status = "NOT_TOUCHED"
-            touch_display = f"RADAR ({r_dist:.2f} pt)" if r_dist > 0 else "UNTOUCHED"
-            reason = f"RADAR: Menunggu pullback ke {r_desc}"
-            next_action = "WAIT PULLBACK"
+            if price > 0 and r_lo > 0 and r_hi >= r_lo and (r_lo <= price <= r_hi):
+                monitor_state = "AWAITING_CONFIRMATION"
+                touch_status = "IN_ZONE"
+                touch_display = "IN ZONE"
+                reason = f"ZONE TOUCHED: Harga berada di {r_desc}"
+                next_action = "PANTAU KONFIRMASI M5"
+            elif price > 0 and r_lo > 0 and r_hi >= r_lo and r_dist <= float(ZONE_APPROACH_DISTANCE_POINTS):
+                monitor_state = "APPROACHING"
+                touch_status = "NOT_TOUCHED"
+                _r_d_txt = format_price_distance(r_dist, spec=extract_unit_spec_from_container(snapshot), include_mt5_points=True)
+                touch_display = f"APPROACHING ({_r_d_txt})"
+                reason = f"APPROACHING: Harga mendekati {r_desc} ({_r_d_txt})"
+                next_action = "WAIT ZONE TOUCH"
+            else:
+                monitor_state = "RADAR"
+                touch_status = "NOT_TOUCHED"
+                touch_display = f"RADAR ({format_price_distance(r_dist, spec=extract_unit_spec_from_container(snapshot), include_mt5_points=True)})" if r_dist > 0 else "UNTOUCHED"
+                reason = f"RADAR: Menunggu pullback ke {r_desc}"
+                next_action = "WAIT PULLBACK"
             final_signal = "WAIT"
             if not _m5_stages_match_zone(decision, zone):
                 trigger = "NOT_CHECKED"
@@ -1531,7 +1620,7 @@ def _smart_monitor_context(cycle_result):
                 alt_pending_display = alt_first
             radar_candidate = None
         elif act_item.get("historical_touch"):
-            monitor_state = "HISTORICAL_TOUCH"
+            monitor_state = "WAIT_NO_ACTIVE_ZONE"  # riwayat sentuh = info saja, bukan status entry
             touch_status = "TOUCHED_PREVIOUSLY"
             touch_display = f"{active_method} TOUCHED (HISTORICAL)"
             reason = f"{active_method} PERNAH DISENTUH; ENTRY BELUM TERBUKTI"
@@ -1555,7 +1644,7 @@ def _smart_monitor_context(cycle_result):
                 final_signal = "WAIT"
             elif historical:
                 m_hist, it_hist = historical
-                monitor_state = "HISTORICAL_TOUCH"
+                monitor_state = "WAIT_NO_ACTIVE_ZONE"  # riwayat sentuh = info saja, bukan status entry
                 touch_status = "TOUCHED_PREVIOUSLY"
                 touch_display = f"{m_hist} TOUCHED (HISTORICAL)"
                 reason = f"{m_hist} PERNAH DISENTUH; ENTRY BELUM TERBUKTI"
@@ -1589,18 +1678,83 @@ def _smart_monitor_context(cycle_result):
             and (has_pending_waiting or not ever_taken_any)
         )
     ]
-    sl_missing_tickets = []
+    # Deteksi pending order MT5 yang masih aktif pada zona INVALID — BROKEN (SMC, SNR & gabungan terdeduplikasi, read-only)
+    inv_smc_pool = [
+        {**z_inv, "source": "SMC"} for z_inv in (
+            list(scan.get("invalidated_zones") or [])
+            + list(decision.get("invalidated_zones") or [])
+            + [
+                rz for rz in (scan.get("rejected_zones") or [])
+                if isinstance(rz, dict)
+                and (
+                    rz.get("is_broken")
+                    or str(rz.get("status") or "").upper() in ("INVALIDATED", "BROKEN")
+                    or str(rz.get("freshness") or "").upper() == "INVALIDATED"
+                )
+            ]
+        )
+        if isinstance(z_inv, dict)
+    ]
+    inv_snr_pool = [
+        {**z_inv, "source": "SNR"} for z_inv in (
+            list(snr_zones.get("broken_zones") or [])
+            + list(snr_zones.get("invalidated_zones") or [])
+        )
+        if isinstance(z_inv, dict)
+        and str(z_inv.get("lifecycle_status") or z_inv.get("status") or "").upper() != "RECLAIMED"
+    ]
+    inv_smc_warns = find_pending_orders_on_invalid_zones(
+        inv_smc_pool,
+        mt5_snapshot=mt5_ord_snap,
+        symbol=sym_ctx,
+        default_source="SMC",
+    )
+    inv_snr_warns = find_pending_orders_on_invalid_zones(
+        inv_snr_pool,
+        mt5_snapshot=mt5_ord_snap,
+        symbol=sym_ctx,
+        default_source="SNR",
+    )
+    invalid_pending_warnings = find_pending_orders_on_invalid_zones(
+        inv_smc_pool + inv_snr_pool,
+        mt5_snapshot=mt5_ord_snap,
+        symbol=sym_ctx,
+    )
+    invalid_pending_scope = {
+        "scope": "SMC+SNR",
+        "smc": len(inv_smc_warns),
+        "snr": len(inv_snr_warns),
+        "combined": len(invalid_pending_warnings),
+    }
+    for iw in invalid_pending_warnings:
+        iw_msg = iw.get("message") if isinstance(iw, dict) else str(iw)
+        if iw_msg and iw_msg not in warnings:
+            warnings.append(iw_msg)
+
+    matched_recons_ctx = []
     for p_chk in ([pending_setup] + list(alt_pending_setups or [])):
-        if isinstance(p_chk, dict) and p_chk.get("sl_missing_high_risk"):
-            recon_p = p_chk.get("mt5_reconciliation") or {}
-            tkts_p = [f"#{t}" for t in (recon_p.get("matched_tickets") or []) if t is not None]
-            for t_str in tkts_p:
-                if t_str not in sl_missing_tickets:
-                    sl_missing_tickets.append(t_str)
-            tkt_lbl = ", ".join(tkts_p) if tkts_p else str(p_chk.get("zone_id") or "PENDING")
-            risk_msg = f"[RISK WARNING] Pending order cocok ({tkt_lbl}) TANPA Stop Loss — SL MISSING HIGH RISK!"
-            if risk_msg not in warnings:
-                warnings.append(risk_msg)
+        if isinstance(p_chk, dict):
+            recon_p = p_chk.get("mt5_reconciliation")
+            if isinstance(recon_p, dict):
+                matched_recons_ctx.append(recon_p)
+            if p_chk.get("sl_missing_high_risk") and p_chk.get("is_placed"):
+                tkts_p = [f"#{t}" for t in ((recon_p or {}).get("matched_tickets") or []) if t is not None]
+                tkt_lbl = ", ".join(tkts_p[:2]) if tkts_p else str(p_chk.get("zone_id") or "PENDING")
+                risk_msg = f"[RISK WARNING] Matched order {tkt_lbl} TANPA Stop Loss — SL MISSING HIGH RISK!"
+                if risk_msg not in warnings:
+                    warnings.append(risk_msg)
+
+    spread_warn_ctx = ""
+    acc_spread_v = account.get("spread")
+    if acc_spread_v is not None and safe_float(acc_spread_v, 0.0) >= 0.80:
+        spread_warn_ctx = f"Spread Wide ({format_price_distance(safe_float(acc_spread_v), spec=extract_unit_spec_from_container(snapshot), include_mt5_points=True)})"
+    mt5_risk_summary = summarize_mt5_risk_warnings(
+        mt5_ord_snap,
+        invalid_zone_warnings=invalid_pending_warnings,
+        matched_recons=matched_recons_ctx,
+        spread_warning=spread_warn_ctx or None,
+        invalid_zone_scope=invalid_pending_scope,
+    )
     alerts = list(raw_alerts)
     for w_item in warnings:
         if w_item not in alerts:
@@ -1659,23 +1813,19 @@ def _smart_monitor_context(cycle_result):
             best_al = "NONE"
         alert_display = best_al if best_al else "NONE"
 
-    critical_risk_display = ""
-    if categorized["risk"]:
+    critical_risk_display = mt5_risk_summary.get("headline") or ""
+    if not critical_risk_display:
         p_nosl_cnt = int(safe_float(account.get("position_without_sl"), 0))
         o_nosl_cnt = int(safe_float(account.get("pending_without_sl"), 0))
-        first_risk = _clean_alert_label(categorized["risk"][0])
-        if (p_nosl_cnt > 0 or o_nosl_cnt > 0 or sl_missing_tickets) and any(
-            k in first_risk.upper() for k in ("TANPA STOP LOSS", "TANPA SL", "SL MISSING", "[RISK WARNING]")
-        ):
+        if p_nosl_cnt > 0 or o_nosl_cnt > 0:
             parts_nosl = []
             if p_nosl_cnt > 0:
-                parts_nosl.append(f"{p_nosl_cnt} posisi")
-            if o_nosl_cnt > 0 or sl_missing_tickets:
-                tkt_part = f" ({', '.join(sl_missing_tickets)})" if sl_missing_tickets else ""
-                cnt_p = o_nosl_cnt if o_nosl_cnt > 0 else len(sl_missing_tickets)
-                parts_nosl.append(f"{cnt_p} pending{tkt_part}")
-            critical_risk_display = f"{' + '.join(parts_nosl)} tanpa SL — SL MISSING (HIGH RISK)"
-        else:
+                parts_nosl.append(f"{p_nosl_cnt} Position{'s' if p_nosl_cnt != 1 else ''}")
+            if o_nosl_cnt > 0:
+                parts_nosl.append(f"{o_nosl_cnt} Pending")
+            critical_risk_display = f"RISK: {' + '.join(parts_nosl)} Without SL [HIGH RISK]"
+        elif categorized["risk"]:
+            first_risk = _clean_alert_label(categorized["risk"][0])
             if first_risk.startswith("[RISK WARNING] "):
                 first_risk = first_risk[len("[RISK WARNING] "):].strip()
             critical_risk_display = first_risk
@@ -1701,6 +1851,7 @@ def _smart_monitor_context(cycle_result):
         "snr_selection_reason_short": snr_reason_short,
         "snr_price_proximity": snr_price_proximity,
         "zone": zone,
+        "far_reference_zone": far_reference_zone,
         "plan": plan,
         "price": price,
         "distance": distance,
@@ -1731,6 +1882,7 @@ def _smart_monitor_context(cycle_result):
         "alerts": alerts,
         "alert_display": alert_display,
         "critical_risk_display": critical_risk_display,
+        "mt5_risk_summary": mt5_risk_summary,
         "categorized_alerts": categorized,
         "risk_alerts": categorized["risk"],
         "market_alerts": categorized["market"],
@@ -1743,9 +1895,567 @@ def _smart_monitor_context(cycle_result):
         "radar_candidate": radar_candidate,
         "historical_event": historical_event,
         "snr_breakout_watch": snr_breakout_watch,
+        "snr_snapshot_id": str(snr_scan.get("snapshot_id") or ""),
         "pending_setup": pending_setup,
         "confirmed_setup": confirmed_setup,
+        "invalid_pending_warnings": invalid_pending_warnings,
+        "invalid_pending_scope": invalid_pending_scope,
+        "mt5_orders_snapshot": mt5_ord_snap,
     }
+
+
+def _resolve_dashboard_ticker_info(cycle, snapshot, data, acc):
+    """Ekstrak data harga live TradingView-style dari live_ticker / snapshot MT5 (tanpa angka perkiraan)."""
+    raw_tk = cycle.get("live_ticker") if isinstance(cycle.get("live_ticker"), dict) else {}
+    sym = str(raw_tk.get("symbol") or snapshot.get("symbol") or acc.get("symbol") or "XAUUSDc")
+
+    u_spec_tk = extract_unit_spec_from_container(raw_tk if raw_tk.get("point") else snapshot, symbol=sym)
+    digits_raw = raw_tk.get("digits", snapshot.get("digits"))
+    try:
+        digits = max(0, min(8, int(digits_raw))) if digits_raw is not None else u_spec_tk["digits"]
+    except (TypeError, ValueError):
+        digits = u_spec_tk["digits"]
+    u_spec_tk = dict(u_spec_tk)
+    u_spec_tk["digits"] = digits
+
+    conn_st = str(raw_tk.get("connection_status") or snapshot.get("connection_status") or "").upper()
+    mkt_st = str(raw_tk.get("market_status") or snapshot.get("market_status") or "").upper()
+    fresh_st = str(raw_tk.get("data_freshness") or snapshot.get("data_freshness") or "").upper()
+    snap_st = str(snapshot.get("snapshot_status") or "").upper()
+
+    feed_st = str(raw_tk.get("feed_status") or "").upper()
+    if not feed_st:
+        if conn_st == "DISCONNECTED" or fresh_st == "NO DATA":
+            feed_st = "DISCONNECTED"
+        elif mkt_st == "CLOSED" or snap_st == "MARKET_CLOSED":
+            feed_st = "CLOSED"
+        elif fresh_st in ("STALE", "INVALID") or snap_st == "DATA_INCOMPLETE" or snapshot.get("data_ok") is False:
+            feed_st = "STALE"
+        else:
+            feed_st = "OPEN"
+
+    prev_d1 = raw_tk.get("prev_d1_close")
+    if prev_d1 is None:
+        prev_d1 = snapshot.get("prev_d1_close")
+    if prev_d1 is None:
+        frames = snapshot.get("frames") if isinstance(snapshot.get("frames"), dict) else {}
+        df_d1 = frames.get("D1") if isinstance(frames, dict) else None
+        if df_d1 is not None and len(df_d1) > 0 and "Close" in df_d1.columns:
+            try:
+                idx_d1 = -2 if (feed_st == "CLOSED" and len(df_d1) >= 2) else -1
+                cand_d1 = float(df_d1["Close"].iloc[idx_d1])
+                if cand_d1 > 0:
+                    prev_d1 = cand_d1
+            except Exception:
+                prev_d1 = None
+    prev_d1_val = safe_float(prev_d1, 0.0) if prev_d1 is not None else 0.0
+
+    if feed_st in ("DISCONNECTED", "STALE"):
+        live_price = 0.0
+        bid_v = 0.0
+        ask_v = 0.0
+        spr_v = None
+    elif feed_st == "CLOSED":
+        live_price = safe_float(raw_tk.get("live_price", snapshot.get("snapshot_price", data.get("price"))), 0.0)
+        bid_v = safe_float(raw_tk.get("bid", snapshot.get("tick_bid_raw", snapshot.get("bid"))), 0.0)
+        ask_v = safe_float(raw_tk.get("ask", snapshot.get("tick_ask_raw", snapshot.get("ask"))), 0.0)
+        spr_v = raw_tk.get("spread", snapshot.get("spread"))
+    else:
+        bid_v = safe_float(raw_tk.get("bid", snapshot.get("tick_bid_raw", snapshot.get("bid"))), 0.0)
+        ask_v = safe_float(raw_tk.get("ask", snapshot.get("tick_ask_raw", snapshot.get("ask"))), 0.0)
+        live_price = safe_float(raw_tk.get("live_price"), 0.0)
+        if live_price <= 0:
+            live_price = bid_v if bid_v > 0 else safe_float(snapshot.get("snapshot_price", data.get("price")), 0.0)
+        if live_price <= 0:
+            feed_st = "DISCONNECTED" if conn_st == "DISCONNECTED" else "STALE"
+            bid_v = 0.0
+            ask_v = 0.0
+            spr_v = None
+        else:
+            spr_v = raw_tk.get("spread")
+            if spr_v is None:
+                spr_v = (ask_v - bid_v) if (bid_v > 0 and ask_v >= bid_v) else snapshot.get("spread")
+
+    daily_chg = None
+    daily_pct = None
+    if live_price > 0 and prev_d1_val > 0 and feed_st in ("OPEN", "CLOSED"):
+        daily_chg = live_price - prev_d1_val
+        daily_pct = (daily_chg / prev_d1_val) * 100.0
+
+    change_dir = "FLAT"
+    if daily_chg is not None:
+        if daily_chg > 1e-9:
+            change_dir = "UP"
+        elif daily_chg < -1e-9:
+            change_dir = "DOWN"
+
+    price_dir = str(raw_tk.get("price_direction") or "").upper()
+    if price_dir not in ("UP", "DOWN", "FLAT"):
+        price_dir = change_dir
+
+    tick_delta = raw_tk.get("tick_delta")
+    tick_delta_val = safe_float(tick_delta, 0.0) if tick_delta is not None else 0.0
+    spr_float = safe_float(spr_v, -1.0) if spr_v is not None else -1.0
+
+    return {
+        "symbol": sym,
+        "digits": digits,
+        "point": u_spec_tk["point"],
+        "trade_tick_size": u_spec_tk["trade_tick_size"],
+        "unit_spec": u_spec_tk,
+        "feed_status": feed_st,
+        "live_price": live_price,
+        "bid": bid_v,
+        "ask": ask_v,
+        "spread": spr_float if spr_float >= 0 else None,
+        "spread_wide": bool(spr_float >= 0.80),
+        "prev_d1_close": prev_d1_val if prev_d1_val > 0 else None,
+        "daily_change": daily_chg,
+        "daily_change_pct": daily_pct,
+        "change_direction": change_dir,
+        "price_direction": price_dir,
+        "tick_delta": tick_delta_val,
+    }
+
+
+def _build_dashboard_ticker_widget(tk, ts_short, cyc_no, term_w, use_uni):
+    """Bangun baris TradingView-style Big Price Widget + metadata pewarnaan (ringan, <0.3 ms/tick)."""
+    eq_div = "=" * term_w
+    dash_div = "-" * term_w
+    digits = tk["digits"]
+    feed_st = tk["feed_status"]
+    sym_txt = tk["symbol"]
+    live_p = tk["live_price"]
+    bid_v = tk["bid"]
+    ask_v = tk["ask"]
+    spr_v = tk["spread"]
+    prev_d1 = tk["prev_d1_close"]
+    d_chg = tk["daily_change"]
+    d_pct = tk["daily_change_pct"]
+
+    dot = "●" if use_uni else "*"
+    up_ar = "▲" if use_uni else "^"
+    dn_ar = "▼" if use_uni else "v"
+    fl_ar = "─" if use_uni else "-"
+
+    status_label_map = {
+        "OPEN": f"{dot} MARKET OPEN",
+        "CLOSED": f"{dot} MARKET CLOSED",
+        "STALE": f"{dot} STALE",
+        "DISCONNECTED": f"{dot} DISCONNECTED",
+    }
+    status_badge = status_label_map.get(feed_st, f"{dot} {feed_st}")
+
+    # Header bar TradingView-style: Symbol + Status Badge di kiri, Timestamp Tick MT5 + Cycle di kanan
+    left_hdr = f" {sym_txt}  {status_badge}"
+    right_hdr = f"{ts_short} | #{cyc_no} | Ctrl+C "
+    gap_hdr = term_w - len(left_hdr) - len(right_hdr)
+    if gap_hdr >= 2:
+        hdr_line = left_hdr + (" " * gap_hdr) + right_hdr
+        time_span = (len(left_hdr) + gap_hdr, len(hdr_line))
+    else:
+        short_right = f" | {ts_short} | #{cyc_no}"
+        hdr_line = truncate_clean(left_hdr + short_right, term_w)
+        t_pos = hdr_line.find(" | ")
+        time_span = (t_pos, len(hdr_line)) if t_pos >= 0 else None
+    sym_span = (1, 1 + len(sym_txt))
+    st_start = 1 + len(sym_txt) + 2
+    status_span = (st_start, min(len(hdr_line), st_start + len(status_badge)))
+
+    # Susun teks perubahan harian (berdasarkan D1 Close sebelumnya dari MT5)
+    if feed_st in ("DISCONNECTED", "STALE"):
+        price_str = "---"
+        chg_str = "MT5 DISCONNECTED — NO LIVE PRICE" if feed_st == "DISCONNECTED" else "STALE FEED — NO LIVE TICK"
+        quote_str = "Bid: --- | Ask: --- | Spr: ---"
+        meta_str = "Waiting for live MT5 connection..." if feed_st == "DISCONNECTED" else "Waiting for fresh MT5 live tick..."
+    else:
+        price_str = f"{live_p:.{digits}f}" if live_p > 0 else "---"
+        if d_chg is not None and d_pct is not None and prev_d1 is not None:
+            ar = up_ar if d_chg > 1e-9 else (dn_ar if d_chg < -1e-9 else fl_ar)
+            chg_prefix = "LAST CLOSE | " if feed_st == "CLOSED" else ""
+            chg_str = f"{chg_prefix}{ar} {d_chg:+.{digits}f} ({d_pct:+.2f}%)  D1:{prev_d1:.{digits}f}"
+        elif feed_st == "CLOSED":
+            chg_str = "LAST CLOSE | D1: N/A"
+        else:
+            chg_str = "Daily Chg: N/A (D1 Close unavailable)"
+
+        if bid_v > 0 and ask_v > 0:
+            _spr_val = spr_v if spr_v is not None else max(0.0, ask_v - bid_v)
+            spr_txt = format_price_distance(_spr_val, spec=tk.get("unit_spec"), digits=digits, include_mt5_points=True)
+            quote_str = f"Bid: {bid_v:.{digits}f} | Ask: {ask_v:.{digits}f} | Spr: {spr_txt}"
+        else:
+            quote_str = "Bid: --- | Ask: --- | Spr: ---"
+
+        if feed_st == "CLOSED":
+            meta_str = "MARKET CLOSED (Last Session Close)"
+        else:
+            td = tk["tick_delta"]
+            td_ar = up_ar if tk["price_direction"] == "UP" else (dn_ar if tk["price_direction"] == "DOWN" else fl_ar)
+            td_txt = f"Tick {td_ar} {td:+.{digits}f}" if abs(td) > 1e-9 else f"Tick {td_ar} LIVE"
+            meta_str = f"MT5 LIVE TICK | {td_txt}"
+
+    widget_lines = [eq_div, hdr_line, dash_div]
+    widget_meta = {
+        "feed_status": feed_st,
+        "price_direction": tk["price_direction"],
+        "change_direction": tk["change_direction"],
+        "spread_wide": tk["spread_wide"],
+        "header_idx": 1,
+        "sym_span": sym_span,
+        "status_span": status_span,
+        "time_span": time_span,
+        "price_rows": [],
+        "compact_price_idx": None,
+        "compact_price_span": None,
+        "compact_change_span": None,
+    }
+
+    big_rows = render_big_price_digits(price_str) if use_uni else []
+    big_w = max((len(r) for r in big_rows), default=0)
+    use_big_widget = bool(use_uni and big_rows and (1 + big_w + 3 + 26) <= term_w)
+    if use_big_widget:
+        side_texts = [(chg_str, "change"), (quote_str, "quote"), (meta_str, "meta")]
+        split_col = 1 + big_w + 3
+        side_avail = max(16, term_w - split_col)
+        for r_i in range(3):
+            b_row = big_rows[r_i].ljust(big_w)
+            s_txt, s_role = side_texts[r_i]
+            line_str = f" {b_row}   {truncate_clean(s_txt, side_avail)}"
+            line_idx = len(widget_lines)
+            widget_lines.append(line_str)
+            widget_meta["price_rows"].append((line_idx, split_col, s_role))
+    else:
+        c_prefix = " PRICE : "
+        c_p = price_str
+        c_gap = "  "
+        c_chg = truncate_clean(chg_str, max(12, term_w - len(c_prefix) - len(c_p) - len(c_gap)))
+        c_line = f"{c_prefix}{c_p}{c_gap}{c_chg}"
+        c_idx = len(widget_lines)
+        widget_lines.append(c_line)
+        widget_meta["compact_price_idx"] = c_idx
+        widget_meta["compact_price_span"] = (len(c_prefix), len(c_prefix) + len(c_p))
+        widget_meta["compact_change_span"] = (len(c_prefix) + len(c_p) + len(c_gap), len(c_line))
+        widget_lines.extend(wrap_dashboard_field(" QUOTE : ", quote_str, term_w, max_lines=1))
+
+    return widget_lines, widget_meta
+
+
+def _format_live_distance_line(lo, hi, price_val, feed_st, monitor_state, touch_display, term_w, unit_spec=None):
+    if feed_st in ("DISCONNECTED", "STALE") or price_val <= 0 or lo <= 0 or hi < lo:
+        dist_txt = "N/A"
+    elif lo <= price_val <= hi:
+        dist_txt = f"{format_price_distance(0.0, spec=unit_spec, include_mt5_points=True)} (IN ZONE | {touch_display})"
+    else:
+        dist_v = (lo - price_val) if lo > price_val else (price_val - hi)
+        side_lbl = "ABOVE" if lo > price_val else "BELOW"
+        dist_txt = f"{format_price_distance(dist_v, spec=unit_spec, include_mt5_points=True)} ({side_lbl} | {monitor_state})"
+    return wrap_dashboard_field(" DISTANCE    : ", dist_txt, term_w, max_lines=1)[0]
+
+
+def patch_dashboard_live_ticker(base_text, base_meta, live_ticker, snapshot_time=None):
+    """
+    Update in-place HANYA widget harga real-time + baris jarak Active Focus tanpa menghitung ulang
+    SMC/SNR ataupun `_smart_monitor_context()` (<0.3 ms/tick).
+    """
+    if not isinstance(base_meta, dict) or not isinstance(base_meta.get("_live_patch"), dict):
+        return None, None
+    lp = base_meta["_live_patch"]
+    term_w = get_terminal_width()
+    if term_w != lp.get("term_w"):
+        return None, None
+
+    raw_tk = live_ticker if isinstance(live_ticker, dict) else {}
+    tk = _resolve_dashboard_ticker_info({"live_ticker": raw_tk}, raw_tk, {}, {})
+    raw_ts = str(snapshot_time or raw_tk.get("snapshot_time") or lp.get("last_ts") or "NO TICK")
+    ts_short = raw_ts[11:19] + " WIB" if len(raw_ts) >= 19 else raw_ts
+
+    widget_lines, new_meta = _build_dashboard_ticker_widget(
+        tk,
+        ts_short=ts_short,
+        cyc_no=lp.get("cycle_no", 1),
+        term_w=term_w,
+        use_uni=bool(lp.get("use_uni", True)),
+    )
+
+    body_lines = list(lp.get("body_lines") or [])
+    dist_idx = lp.get("dist_body_idx")
+    focus_bounds = lp.get("focus_bounds")
+    if dist_idx is not None and 0 <= dist_idx < len(body_lines) and focus_bounds:
+        f_lo, f_hi = focus_bounds
+        if tk["bid"] > 0 and tk["ask"] > 0:
+            price_val = round((tk["bid"] + tk["ask"]) / 2.0, int(tk.get("digits") or 2))
+        else:
+            price_val = tk["live_price"] if tk["live_price"] > 0 else 0.0
+        eff_mon_state = lp.get("monitor_state", "IDLE")
+        if price_val > 0 and f_lo > 0 and f_hi >= f_lo and eff_mon_state not in ("CONFIRMED", "RUNNING", "INVALIDATED", "EXPIRED"):
+            if f_lo <= price_val <= f_hi:
+                eff_mon_state = "AWAITING_CONFIRMATION"
+            else:
+                d_live = (f_lo - price_val) if f_lo > price_val else (price_val - f_hi)
+                eff_mon_state = "APPROACHING" if d_live <= float(ZONE_APPROACH_DISTANCE_POINTS) else "RADAR"
+        body_lines[dist_idx] = _format_live_distance_line(
+            f_lo,
+            f_hi,
+            price_val,
+            tk["feed_status"],
+            eff_mon_state,
+            lp.get("touch_display", "IN ZONE"),
+            term_w,
+            unit_spec=tk.get("unit_spec"),
+        )
+
+    new_lp = dict(lp)
+    new_lp["last_ts"] = raw_ts
+    new_meta["_live_patch"] = new_lp
+    return fit_dashboard_text("\n".join([*widget_lines, *body_lines]), width=term_w), new_meta
+
+
+def format_loading_live_dashboard(live_ticker, snapshot_time=None, mode="unified"):
+    """Dashboard awal real-time agar harga XAUUSD langsung bergerak sambil menunggu siklus scan SMC/SNR pertama."""
+    term_w = get_terminal_width()
+    use_uni = supports_unicode_glyphs()
+    eq_div = "=" * term_w
+    dash_div = "-" * term_w
+
+    raw_tk = live_ticker if isinstance(live_ticker, dict) else {}
+    tk = _resolve_dashboard_ticker_info({"live_ticker": raw_tk}, raw_tk, {}, {})
+    raw_ts = str(snapshot_time or raw_tk.get("snapshot_time") or "NO TICK")
+    ts_short = raw_ts[11:19] + " WIB" if len(raw_ts) >= 19 else raw_ts
+
+    widget_lines, widget_meta = _build_dashboard_ticker_widget(
+        tk, ts_short=ts_short, cyc_no=0, term_w=term_w, use_uni=use_uni
+    )
+    mode_lbl = str(mode or "unified").upper()
+    body_lines = [
+        dash_div,
+        *wrap_dashboard_field(" STATUS      : ", f"INITIALIZING {mode_lbl} SCANNER (SMC/SNR running in background...)", term_w, max_lines=1),
+        *wrap_dashboard_field(" ACTIVE FOCUS: ", "SCANNING...", term_w, max_lines=1),
+        eq_div,
+    ]
+    widget_meta["_live_patch"] = {
+        "body_lines": body_lines,
+        "dist_body_idx": None,
+        "focus_bounds": None,
+        "monitor_state": "IDLE",
+        "touch_display": "NOT TOUCHED",
+        "cycle_no": 0,
+        "term_w": term_w,
+        "use_uni": use_uni,
+        "last_ts": raw_ts,
+    }
+    return fit_dashboard_text("\n".join([*widget_lines, *body_lines]), width=term_w), widget_meta
+
+
+def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
+    """
+    Dashboard terpadu TradingView-style Price Widget + Smart Monitor untuk in-place refresh `pantau`.
+    Mengembalikan `(plain_text, widget_meta)` agar renderer Rich/ANSI mewarnai widget harga secara presisi.
+    """
+    data = _smart_monitor_context(cycle_result)
+    cycle = cycle_result if isinstance(cycle_result, dict) else {}
+    zone = data["zone"]
+    far_ref = data.get("far_reference_zone")
+    summary = data["summary"]
+    snapshot = data["snapshot"]
+    acc = data.get("account") or {}
+    mt5_snap = data.get("mt5_orders_snapshot") if isinstance(data.get("mt5_orders_snapshot"), dict) else {}
+    mt5_risk = data.get("mt5_risk_summary") if isinstance(data.get("mt5_risk_summary"), dict) else {}
+
+    term_w = get_terminal_width()
+    term_h = get_terminal_height()
+    use_uni = supports_unicode_glyphs()
+    max_recent = 3 if term_h <= 28 else 5
+    eq_div = "=" * term_w
+    dash_div = "-" * term_w
+
+    tk = _resolve_dashboard_ticker_info(cycle, snapshot, data, acc)
+    feed_st = tk["feed_status"]
+    live_p = tk["live_price"]
+
+    snap_p = safe_float(snapshot.get("snapshot_price", data.get("price")), 0.0)
+    price_val = snap_p if snap_p > 0 else (live_p if live_p > 0 else 0.0)
+    raw_ts = str(cycle.get("snapshot_time") or snapshot.get("snapshot_time") or format_wib_timestamp(default_now=True))
+    ts_short = raw_ts[11:19] + " WIB" if len(raw_ts) >= 19 else raw_ts
+    cyc_no = cycle.get("cycle", 1)
+
+    widget_lines, widget_meta = _build_dashboard_ticker_widget(
+        tk, ts_short=ts_short, cyc_no=cyc_no, term_w=term_w, use_uni=use_uni
+    )
+
+    h4 = str(summary.get("h4_bias") or "N/A").upper()
+    h1 = str(summary.get("h1_bias") or "N/A").upper()
+    m30 = str(summary.get("m30_bias") or "N/A").upper()
+    m5 = str(data.get("trigger") or "WAIT").upper()
+
+    lo = safe_float(zone.get("price_low", zone.get("low")), 0.0)
+    hi = safe_float(zone.get("price_high", zone.get("high")), 0.0)
+    z_src = str(zone.get("source") or "SMC").upper()
+    z_tf = str(zone.get("timeframe") or "").strip()
+    z_type = str(zone.get("zone_type") or zone.get("type") or "").upper()
+    z_grd = str(zone.get("grade") or "N/A").strip()
+    z_sc = zone.get("score")
+    z_sc_txt = f"{safe_float(z_sc):.1f}" if z_sc is not None else "N/A"
+
+    u_spec_dash = tk.get("unit_spec") or extract_unit_spec_from_container(snapshot)
+    focus_lines = []
+    if lo > 0 and hi > 0:
+        main_zone_txt = f"{data['direction']} | {z_tf} {z_type} {lo:.2f}-{hi:.2f} (G:{z_grd}/{z_sc_txt}) [{z_src}]"
+        dist_v = data.get("distance")
+        if dist_v is None or feed_st in ("DISCONNECTED", "STALE"):
+            dist_txt = "N/A"
+        elif dist_v <= 0.0:
+            dist_txt = f"{format_price_distance(0.0, spec=u_spec_dash, include_mt5_points=True)} (IN ZONE | {data.get('touch_display', 'IN ZONE')})"
+        else:
+            side_lbl = "ABOVE" if lo > price_val else "BELOW"
+            dist_txt = f"{format_price_distance(dist_v, spec=u_spec_dash, include_mt5_points=True)} ({side_lbl} | {data.get('monitor_state', 'RADAR')})"
+        focus_lines.extend(wrap_dashboard_field(" ACTIVE FOCUS: ", main_zone_txt, term_w, max_lines=2))
+        focus_lines.extend(wrap_dashboard_field(" DISTANCE    : ", dist_txt, term_w, max_lines=1))
+    else:
+        focus_lines.append(" ACTIVE FOCUS: NONE | WAIT")
+        if isinstance(far_ref, dict):
+            f_lo = safe_float(far_ref.get("price_low", far_ref.get("low")), 0.0)
+            f_hi = safe_float(far_ref.get("price_high", far_ref.get("high")), 0.0)
+            f_tf = str(far_ref.get("timeframe") or "").strip()
+            f_zt = str(far_ref.get("rank_label") or far_ref.get("zone_type") or far_ref.get("type") or "ZONE").upper()
+            f_dist = (
+                max(f_lo - price_val, price_val - f_hi, 0.0)
+                if (price_val > 0 and f_lo > 0 and f_hi >= f_lo)
+                else safe_float(far_ref.get("distance", far_ref.get("distance_points")), 0.0)
+            )
+            f_atr = far_ref.get("distance_atr_ratio") if far_ref.get("distance_atr_ratio") is not None else far_ref.get("distance_atr")
+            f_atr_s = f"/{safe_float(f_atr):.1f}xATR" if f_atr is not None else ""
+            far_txt = f"FAR ZONE / REFERENCE ONLY | {f_tf} {f_zt} {f_lo:.2f}-{f_hi:.2f} ({format_price_distance(f_dist, spec=u_spec_dash, include_mt5_points=True)}{f_atr_s})".replace("  ", " ")
+            focus_lines.extend(wrap_dashboard_field(" FAR ZONE    : ", far_txt, term_w, max_lines=2))
+
+    # Pisahkan tegas Active Focus vs SNR Reference bila tidak overlap
+    snr_z = data.get("snr_focus_zone") or data.get("snr_zone") or {}
+    snr_lo = safe_float(snr_z.get("low", snr_z.get("price_low")), 0.0)
+    snr_hi = safe_float(snr_z.get("high", snr_z.get("price_high")), 0.0)
+    confl_src = data.get("snr_confluence_source")
+    snr_is_far = bool(
+        isinstance(snr_z, dict)
+        and (
+            snr_z.get("is_far_reference")
+            or str(snr_z.get("zone_relevance") or "").upper() == "FAR_REFERENCE"
+            or snr_z.get("is_distant_historical")
+            or str(snr_z.get("lifecycle_status") or snr_z.get("status") or "").upper() == "HISTORICAL"
+            or safe_float(snr_z.get("distance_atr"), 0.0) > 12.0
+        )
+    )
+    if data.get("confluence") == "ALIGNED" and isinstance(confl_src, dict):
+        c_lbl = str(confl_src.get("rank_label") or "SNR").strip()
+        c_ov = safe_float(data.get("snr_confluence_overlap_points"), 0.0)
+        snr_ref_txt = f"OVERLAP {c_lbl} {safe_float(confl_src.get('low')):.2f}-{safe_float(confl_src.get('high')):.2f} ({format_price_distance(c_ov, spec=u_spec_dash)})"
+    elif snr_lo > 0 and snr_hi > 0:
+        s_lbl = str(snr_z.get("rank_label") or "SNR").strip()
+        s_tf = str(snr_z.get("timeframe") or "").strip()
+        s_zt_ref = str(snr_z.get("zone_type") or ("RESISTANCE" if s_lbl.upper().startswith("R") else "SUPPORT")).upper()
+        snr_not_live = not _is_live_active_snr_zone(snr_z, s_zt_ref, price_val)
+        s_tag = "FAR ZONE / REFERENCE ONLY" if snr_is_far else ("NOT ACTIVE / REFERENCE ONLY" if snr_not_live else "SEPARATED")
+        s_ts = str(snr_z.get("confirmed_time") or snr_z.get("confirmation_time") or snr_z.get("formation_time") or "").strip()
+        s_ts_part = f" | confirmed {s_ts[:16]}" if s_ts else ""
+        if data.get("snr_snapshot_id"):
+            s_ts_part += f" | snap {str(data['snr_snapshot_id'])[-12:]}"
+        snr_ref_txt = f"{s_lbl} {s_tf} {snr_lo:.2f}-{snr_hi:.2f} ({s_tag}{s_ts_part})".replace("  ", " ")
+    else:
+        snr_ref_txt = "NONE"
+
+    # Ringkasan MT5 Order Display (jumlah posisi, pending, matched, tanpa SL — TANPA daftar penuh / ticket acak)
+    pending_setup_d = data.get("pending_setup") if isinstance(data.get("pending_setup"), dict) else {}
+    alt_pend_d = list(data.get("alt_pending_setups") or [])
+    matched_tkts_set = set()
+    for p_it in [pending_setup_d, *alt_pend_d]:
+        if isinstance(p_it, dict) and p_it.get("is_placed"):
+            rec_it = p_it.get("mt5_reconciliation") or {}
+            for mt in (rec_it.get("matched_tickets") or []):
+                if mt is not None:
+                    matched_tkts_set.add(mt)
+    matched_cnt = len(matched_tkts_set)
+    ord_list = list(mt5_snap.get("orders") or acc.get("orders") or [])
+    pos_cnt = int(safe_float(acc.get("open_positions"), mt5_snap.get("symbol_positions_count", 0)))
+    ord_cnt = int(safe_float(acc.get("pending_orders"), len(ord_list)))
+    p_nosl_c = int(mt5_risk.get("positions_without_sl_count", safe_float(acc.get("position_without_sl"), 0)))
+    o_nosl_c = int(mt5_risk.get("pending_without_sl_count", safe_float(acc.get("pending_without_sl"), 0)))
+    no_sl_tot = p_nosl_c + o_nosl_c
+    flt_pnl = safe_float(acc.get("floating_pnl"), 0.0)
+    cur_lbl = str(acc.get("currency") or "USD")
+
+    pending_disp = str(data.get("pending_display") or data.get("pending_status") or "WAIT")
+    if matched_cnt == 0 and ord_cnt > 0 and "NO MATCH" not in pending_disp.upper():
+        if pending_disp.upper() in ("WAIT", "NONE", "NOT PLACED"):
+            pending_disp = f"MT5: NO MATCH | OTHER ORDERS: {ord_cnt}"
+        else:
+            pending_disp = f"{pending_disp} | MT5: NO MATCH | OTHER ORDERS: {ord_cnt}"
+    elif matched_cnt == 0 and ord_cnt == 0 and pending_disp.upper() == "WAIT":
+        pending_disp = "WAIT | MT5: NOT PLACED"
+
+    if feed_st == "DISCONNECTED":
+        pos_txt = "MT5 DISCONNECTED"
+    else:
+        pos_txt = f"Pos:{pos_cnt} ({flt_pnl:+.2f} {cur_lbl}) | Pend:{ord_cnt} | Match:{matched_cnt} | NoSL:{no_sl_tot}"
+
+    confirmed_disp = str(data.get("confirmed_display") or data.get("confirmed") or "WAIT")
+    signal_disp = str(data.get("signal_display") or data.get("signal") or "WAIT")
+    reason_disp = str(data.get("reason") or "WAIT").replace("\n", " ").strip()
+    next_act = str(data.get("next_action") or "WAIT").strip()
+
+    # Ringkasan risiko singkat & jelas (tanpa daftar panjang ticket / tanpa pesan warning panjang)
+    risk_txt = str(data.get("critical_risk_display") or "").strip()
+    if feed_st == "DISCONNECTED" and "DISCONNECTED" not in risk_txt.upper():
+        risk_txt = f"MT5 DISCONNECTED | {risk_txt}" if risk_txt else "MT5 DISCONNECTED [HIGH RISK]"
+    elif not risk_txt:
+        risk_txt = "AMAN (No critical risk)"
+    news_sum = str(cycle.get("news_summary") or "").strip()
+
+    body_lines = [
+        dash_div,
+        *wrap_dashboard_field(" MTF BIAS    : ", f"H4={h4} | H1={h1} | M30={m30} | M5={m5}", term_w, max_lines=1),
+        *focus_lines,
+        *wrap_dashboard_field(" SNR REF     : ", snr_ref_txt, term_w, max_lines=1),
+        dash_div,
+        *wrap_dashboard_field(" MT5 PENDING : ", pending_disp, term_w, max_lines=2),
+        *wrap_dashboard_field(" MT5 ACCOUNT : ", pos_txt, term_w, max_lines=1),
+        *wrap_dashboard_field(" ENTRY       : ", f"CONF={confirmed_disp} | SIG={signal_disp} | STATE={data.get('monitor_state', 'IDLE')}", term_w, max_lines=1),
+        *wrap_dashboard_field(" REASON      : ", f"{reason_disp} -> {next_act}", term_w, max_lines=2),
+        *wrap_dashboard_field(" RISK WARNING: ", risk_txt, term_w, max_lines=2),
+    ]
+    if news_sum:
+        compact_news = news_sum.replace("NEWS RISK : ", "").replace(" | NEXT EVENT : ", " | ")
+        body_lines.extend(wrap_dashboard_field(" US NEWS     : ", compact_news, term_w, max_lines=1))
+    if data.get("snr_breakout_watch"):
+        body_lines.extend(wrap_dashboard_field(" BREAK WATCH : ", str(data["snr_breakout_watch"]), term_w, max_lines=1))
+
+    ev_list = [str(e).strip() for e in (recent_events or []) if str(e).strip()]
+    if ev_list:
+        body_lines.append(dash_div)
+        body_lines.append(" RECENT EVENTS:")
+        for ev_ln in ev_list[-max_recent:]:
+            body_lines.append("  * " + truncate_clean(ev_ln, max(20, term_w - 4)))
+    body_lines.append(eq_div)
+
+    dist_body_idx = next((idx_b for idx_b, ln_b in enumerate(body_lines) if ln_b.startswith(" DISTANCE    : ")), None)
+    widget_meta["_live_patch"] = {
+        "body_lines": body_lines,
+        "dist_body_idx": dist_body_idx,
+        "focus_bounds": (lo, hi) if (lo > 0 and hi >= lo) else None,
+        "monitor_state": data.get("monitor_state", "IDLE"),
+        "touch_display": data.get("touch_display", "IN ZONE"),
+        "cycle_no": cyc_no,
+        "term_w": term_w,
+        "use_uni": use_uni,
+        "last_ts": raw_ts,
+    }
+    lines = [*widget_lines, *body_lines]
+    return fit_dashboard_text("\n".join(lines), width=term_w), widget_meta
+
+
+def format_smart_monitor_dashboard(cycle_result, recent_events=None):
+    """
+    Dashboard ringkas anti-spam untuk in-place refresh pada command `pantau` (kompatibel Windows/PowerShell).
+    Setiap baris dibatasi sesuai lebar terminal (`shutil.get_terminal_size()`) dengan wrapping/truncation terkontrol.
+    """
+    text, _ = format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=recent_events)
+    return text
 
 
 def format_smart_monitor_report(cycle_result):
@@ -1767,6 +2477,13 @@ def format_smart_monitor_report(cycle_result):
     m5 = data["trigger"]
     lo = safe_float(zone.get("price_low", zone.get("low")), 0.0)
     hi = safe_float(zone.get("price_high", zone.get("high")), 0.0)
+    _u_rep = extract_unit_spec_from_container(data.get("snapshot"))
+    dist_val_rep = data.get("distance")
+    dist_rep_str = (
+        f"{format_price_distance(0.0, spec=_u_rep, include_mt5_points=True)} (IN ZONE)"
+        if (dist_val_rep is not None and dist_val_rep <= 0.0)
+        else (format_price_distance(dist_val_rep, spec=_u_rep, include_mt5_points=True) if dist_val_rep is not None else "N/A")
+    )
     raw_score = zone.get("score")
     if raw_score is None:
         score_disp = "N/A"
@@ -1809,15 +2526,32 @@ def format_smart_monitor_report(cycle_result):
 
     z_grade = str(zone.get("grade") or "N/A").strip()
     zt_raw = str(zone.get("zone_type") or data.get("zone_type") or ("SUPPLY" if data.get("direction") == "SELL" else ("DEMAND" if data.get("direction") == "BUY" else "ZONE"))).strip().upper()
-    zone_header_label = f"ACTIVE {zt_raw} ZONE" if zt_raw in ("SUPPLY", "DEMAND") else "ACTIVE SETUP ZONE"
+    zone_header_label = f"SMC ACTIVE {zt_raw}" if (z_src == "SMC" and zt_raw in ("SUPPLY", "DEMAND")) else "ACTIVE SETUP ZONE"
     if lo > 0 and hi > 0:
         zone_lines = [
             f"SETUP DIRECTION     : {data['direction']}",
             f"{zone_header_label:<20}: {lo:.2f} - {hi:.2f}{z_tag}",
+            f"ZONE DISTANCE       : {dist_rep_str}",
             f"GRADE               : {z_grade} ({score_disp}) [{z_src}]",
         ]
     else:
-        zone_lines = ["SETUP DIRECTION     : N/A", "ACTIVE ZONE         : NO ACTIVE SETUP", "GRADE               : N/A"]
+        zone_lines = [
+            "ACTIVE FOCUS        : NONE | WAIT",
+        ]
+        far_ref_rep = data.get("far_reference_zone")
+        if isinstance(far_ref_rep, dict):
+            fr_lo = safe_float(far_ref_rep.get("price_low", far_ref_rep.get("low")), 0.0)
+            fr_hi = safe_float(far_ref_rep.get("price_high", far_ref_rep.get("high")), 0.0)
+            fr_tf = str(far_ref_rep.get("timeframe") or "").strip()
+            fr_zt = str(far_ref_rep.get("rank_label") or far_ref_rep.get("zone_type") or far_ref_rep.get("type") or "ZONE").upper()
+            fr_dist = (
+                max(fr_lo - data["price"], data["price"] - fr_hi, 0.0)
+                if (data["price"] > 0 and fr_lo > 0 and fr_hi >= fr_lo)
+                else safe_float(far_ref_rep.get("distance", far_ref_rep.get("distance_points")), 0.0)
+            )
+            zone_lines.append(
+                f"FAR ZONE            : FAR ZONE / REFERENCE ONLY — {fr_tf} {fr_zt} {fr_lo:.2f}-{fr_hi:.2f} ({format_price_distance(fr_dist, spec=_u_rep, include_mt5_points=True)})".replace("  ", " ")
+            )
 
     snr_lo = safe_float(snr_z.get("low", snr_z.get("price_low")), 0.0)
     snr_hi = safe_float(snr_z.get("high", snr_z.get("price_high")), 0.0)
@@ -1835,7 +2569,9 @@ def format_smart_monitor_report(cycle_result):
             if s_rsn_short in ("PRICE AT SUPPORT", "NO ACTIVE RESISTANCE", "PRICE AT RESISTANCE", "NO ACTIVE SUPPORT")
             else ""
         )
-        snr_focus_line = f"SNR FOCUS   : {snr_lo:.2f} - {snr_hi:.2f} ({s_tag} | Grade {s_grd}{s_state_tag}{s_rsn_tag})"
+        ref_lbl = "SNR REFERENCE" if (z_src != "SNR" and data.get("confluence") != "ALIGNED") else "SNR FOCUS"
+        sep_note = " | SEPARATED (NO OVERLAP)" if (z_src != "SNR" and data.get("confluence") != "ALIGNED") else ""
+        snr_focus_line = f"{ref_lbl:<13}: {snr_lo:.2f} - {snr_hi:.2f} ({s_tag} | Grade {s_grd}{s_state_tag}{s_rsn_tag}{sep_note})"
 
     snr_confl_source_line = None
     if z_src != "SNR" and lo > 0 and hi > 0:
@@ -1856,7 +2592,7 @@ def format_smart_monitor_report(cycle_result):
     confirmed_disp = data.get("confirmed_display", data.get("confirmed", "WAIT"))
     touch_disp = data.get("touch_display", "NOT TOUCHED")
     trigger_disp = data.get("trigger", "WAIT")
-    focused_states = ("RUNNING", "ZONE_TOUCHED", "HISTORICAL_TOUCH", "HISTORY_UNCERTAIN")
+    focused_states = ("RUNNING", "ZONE_TOUCHED", "HISTORICAL_TOUCH", "WAIT_NO_ACTIVE_ZONE", "HISTORY_UNCERTAIN")
     status_text = "WAIT" if data["data_invalid"] and data["monitor_state"] not in focused_states else data["monitor_state"]
     alert_text = data.get("alert_display", "NONE")
     alert_text = str(alert_text).replace("\n", " ").strip()
@@ -1886,8 +2622,8 @@ def format_smart_monitor_report(cycle_result):
             if "jarak sl" in r_str.lower() or "melebihi batas" in r_str.lower():
                 blocker_line = r_str.upper()
                 break
-        if not blocker_line and sl_dist > 20.0:
-            blocker_line = f"SL DISTANCE {sl_dist:.2f} > MAX 20 PT"
+        if not blocker_line and sl_dist > SL_JARAK_MAKS:
+            blocker_line = f"SL DISTANCE {format_price_distance(sl_dist, spec=_u_rep, include_mt5_points=True)} > MAX {SL_JARAK_MAKS:g} USD"
         elif not blocker_line and raw_reasons:
             blocker_line = str(raw_reasons[0])
         elif not blocker_line:
@@ -1925,9 +2661,16 @@ def format_smart_monitor_report(cycle_result):
         )
         radar_lines = [
             "RADAR CANDIDATE",
-            f"RADAR       : {r_lo:.2f} - {r_hi:.2f} ({r_tf} {r_zt} | Grade {r_grd} {r_sc_txt} | Dist {r_dist:.2f} pt | RADAR ALT)",
+            f"RADAR       : {r_lo:.2f} - {r_hi:.2f} ({r_tf} {r_zt} | Grade {r_grd} {r_sc_txt} | Dist {format_price_distance(r_dist, spec=_u_rep, include_mt5_points=True)} | RADAR ALT)",
         ]
 
+    smc_snr_short_disp = (
+        data["confluence"]
+        if data.get("confluence") == "ALIGNED"
+        else f"{data['confluence']} (SEPARATED — BUKAN FULL CONFLUENCE)"
+        if data.get("confluence") == "PARTIAL"
+        else data["confluence"]
+    )
     lines = [
         "==========================================",
         "       XAUUSD SMART MONITOR v2.5",
@@ -1944,13 +2687,13 @@ def format_smart_monitor_report(cycle_result):
         *( [snr_focus_line] if snr_focus_line else [] ),
         *( [snr_confl_source_line] if snr_confl_source_line else [] ),
         f"CONFLUENCE  : {data.get('confluence_display', data['confluence'])}",
-        f"SMC + SNR   : {data['confluence']}",
+        f"SMC + SNR   : {smc_snr_short_disp}",
         *radar_lines,
         *entry_status_lines,
         "SMART MONITOR",
         f"STATE       : {status_text}",
         *( [f"SNR WATCH   : {data['snr_breakout_watch']}"] if data.get("snr_breakout_watch") else [] ),
-        *( [f"HIST. EVENT : {data['historical_event']}"] if data.get("historical_event") and status_text == "HISTORICAL_TOUCH" else [] ),
+        *( [f"HIST. EVENT : {data['historical_event']}"] if data.get("historical_event") and status_text in ("HISTORICAL_TOUCH", "WAIT_NO_ACTIVE_ZONE") else [] ),
         f"NEXT        : {data['next_action']}",
         f"ALERT       : {alert_text}",
         *(
@@ -2066,6 +2809,7 @@ def format_smart_monitor_detail(cycle_result):
     else:
         snr_det_line = f"NONE ({data.get('snr_selection_reason', 'N/A')})"
     snr_confl_det = data.get("snr_confluence_source")
+    _u_det_sm = extract_unit_spec_from_container(snapshot)
     if isinstance(snr_confl_det, dict):
         c_det_lo = safe_float(snr_confl_det.get("low", snr_confl_det.get("price_low")), 0.0)
         c_det_hi = safe_float(snr_confl_det.get("high", snr_confl_det.get("price_high")), 0.0)
@@ -2074,7 +2818,7 @@ def format_smart_monitor_detail(cycle_result):
         snr_confl_det_line = (
             f"{snr_confl_det.get('rank_label', 'SNR')} {snr_confl_det.get('timeframe', '')} "
             f"{c_det_lo:.2f}-{c_det_hi:.2f} | Grade {snr_confl_det.get('grade', 'N/A')} ({c_det_sc}) | "
-            f"overlap {c_det_ov:.2f} pt"
+            f"overlap {format_price_distance(c_det_ov, spec=_u_det_sm)}"
         ).replace("  ", " ")
     else:
         snr_confl_det_line = str(data.get("snr_confluence_source_display") or "NONE")
@@ -2098,7 +2842,7 @@ def format_smart_monitor_detail(cycle_result):
         f"STRUCTURE   : {struct_det_line}",
         f"DISPLACEMENT: {_stage_status(stages.get('displacement'), 'NOT_CHECKED' if not stages else summary.get('displacement', 'WAIT'))}",
         f"R:R CHECK   : {_stage_status(stages.get('risk_reward'), 'NOT_CHECKED' if not stages else summary.get('rr_stage', 'WAIT'))}",
-        f"SPREAD      : {safe_float(snapshot.get('spread'), 0.0):.2f}" if snapshot.get("spread") is not None else "SPREAD      : N/A",
+        f"SPREAD      : {format_price_distance(safe_float(snapshot.get('spread'), 0.0), spec=_u_det_sm, include_mt5_points=True)}" if snapshot.get("spread") is not None else "SPREAD      : N/A",
         f"FRESHNESS   : {data['freshness']} | CONNECTION: {snapshot.get('connection_status', 'UNKNOWN')}",
         f"LAST M5     : {(snapshot.get('last_candle_times') or {}).get('M5', snapshot.get('last_closed_m5', 'N/A'))}",
         "",

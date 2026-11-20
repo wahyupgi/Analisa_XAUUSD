@@ -85,6 +85,9 @@ def _is_live_active_snr_zone(zone, expected_type, current_price):
         or zone.get("is_active") is False
         or zone.get("is_broken") is True
         or zone.get("is_invalidated") is True
+        or zone.get("is_far_reference") is True
+        or zone.get("is_distant_historical") is True
+        or str(zone.get("zone_relevance") or "").upper() in ("FAR_REFERENCE", "INVALID")
         or str(zone.get("grade") or "").upper() == "REJECTED"
     ):
         return False
@@ -171,14 +174,6 @@ def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price,
     elif r1:
         nearest_zone = r1
         nearest_label = f"RESISTANCE {r1.get('rank_label', 'R1')}"
-    elif broken_zones:
-        bz = broken_zones[0]
-        nearest_zone = bz
-        nearest_label = f"BROKEN {bz.get('zone_type', 'ZONE')}"
-    elif invalid_zones:
-        iz = invalid_zones[0]
-        nearest_zone = iz
-        nearest_label = f"INVALIDATED {iz.get('zone_type', 'ZONE')}"
     else:
         nearest_zone = None
         nearest_label = "NONE"
@@ -418,8 +413,11 @@ def validate_snr_entry(
     # Gate 3: Validasi Spread
     curr_spread = safe_float((symbol_spec or {}).get("spread_points"), 0.0)
     if curr_spread > max_spread_points:
+        from modules.utils import format_price_distance, extract_unit_spec_from_container
+        _u_ev = extract_unit_spec_from_container(symbol_spec)
         return _blocked_wait(
-            f"Spread saat ini ({curr_spread:.2f} pt) melebihi batas maksimal ({max_spread_points:.2f} pt)."
+            f"Spread saat ini ({format_price_distance(curr_spread, spec=_u_ev, include_mt5_points=True)}) "
+            f"melebihi batas maksimal ({format_price_distance(max_spread_points, spec=_u_ev)})."
         )
 
     # Gate 4: Market Bias CONFLICT / UNCONFIRMED / M30 CONFLICT
@@ -903,21 +901,39 @@ def validate_snr_entry(
                         "reason": rr_res.get("reason", "Retest SELL terkonfirmasi namun RR/SL tidak memenuhi syarat."),
                     }
 
-    # Cek apakah seluruh zona aktif sudah INVALIDATED atau setup pada zona fokus terinvalidasi
-    if (not active_sups and not active_ress and (invalid_zones or invalid_reasons)) or (
-        focus_zone is not None and focus_zone.get("lifecycle_status") == "INVALIDATED"
+    far_ref_pool = [
+        z for z in (
+            list((ranked_zones or {}).get("far_reference_zones") or [])
+            + list((ranked_zones or {}).get("historical_zones") or [])
+        )
+        if isinstance(z, dict)
+    ]
+    nearest_far_ref = far_ref_pool[0] if far_ref_pool else None
+
+    # Cek apakah seluruh zona aktif sudah INVALID — BROKEN atau setup pada zona fokus terinvalidasi
+    if (not active_sups and not active_ress and (invalid_zones or broken_zones or invalid_reasons)) or (
+        focus_zone is not None and str(focus_zone.get("lifecycle_status") or "").upper() in ("INVALIDATED", "BROKEN")
     ):
-        inv_msg = invalid_reasons[0] if invalid_reasons else "Zona target telah INVALIDATED."
+        is_focus_broken = bool(
+            focus_zone is not None and str(focus_zone.get("lifecycle_status") or "").upper() in ("INVALIDATED", "BROKEN")
+        )
+        if invalid_reasons:
+            inv_msg = invalid_reasons[0]
+        elif nearest_far_ref is not None and not is_focus_broken:
+            inv_msg = "Tidak ada zona SNR berkualitas dalam jangkauan (zona tersimpan hanya FAR REFERENCE); status WAIT."
+        else:
+            inv_msg = "Tidak ada zona SNR aktif tersisa (zona sebelumnya INVALID — BROKEN); status WAIT."
         return {
-            "final_status": "INVALID",
-            "buy_status": "INVALID",
-            "sell_status": "INVALID",
-            "setup_type": "INVALIDATED_SETUP",
+            "final_status": "WAIT",
+            "buy_status": "WAIT",
+            "sell_status": "WAIT",
+            "setup_type": "WAIT_FAR_REFERENCE" if (nearest_far_ref is not None and not invalid_reasons and not is_focus_broken) else "INVALIDATED_SETUP",
             "direction": "NONE",
-            "zone_label": focus_label,
-            "target_zone": focus_zone,
+            "zone_label": focus_label if focus_zone and focus_zone.get("is_active") else "NONE",
+            "target_zone": focus_zone if focus_zone and focus_zone.get("is_active") else None,
+            "far_reference_zone": nearest_far_ref,
             "focus_selection_reason": focus_selection_reason,
-            "trigger_status": "INVALIDATED",
+            "trigger_status": "WAIT (FAR REFERENCE ONLY)" if (nearest_far_ref is not None and not invalid_reasons and not is_focus_broken) else "INVALID — BROKEN",
             "rr_status": "NOT CHECKED",
             "rr_calculation": {
                 "checked": False,
@@ -1024,6 +1040,8 @@ def validate_snr_entry(
         default_wait_msg = "Waiting for valid resistance rejection."
     elif focus_label.startswith("SUPPORT"):
         default_wait_msg = "Waiting for valid support rejection."
+    elif focus_zone is None and nearest_far_ref is not None:
+        default_wait_msg = "WAIT_NO_ZONE_IN_RANGE: Tidak ada zona SNR berkualitas dalam jangkauan (zona tersimpan hanya FAR REFERENCE)."
     else:
         default_wait_msg = "Waiting for valid price reaction at SNR zone."
 
@@ -1088,6 +1106,7 @@ def validate_snr_entry(
         "direction": "NONE",
         "zone_label": focus_label,
         "target_zone": focus_zone,
+        "far_reference_zone": nearest_far_ref,
         "focus_selection_reason": focus_selection_reason,
         "recent_closed_touch": recent_closed_touch,
         "nearest_snr_zone": nearest_snr_zone,

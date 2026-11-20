@@ -51,7 +51,7 @@ def validasi_sinyal_struktur(sig):
     tp2 = sig.get("tp2", tp1)
     mid = (lo + hi) / 2.0
     if hi - lo > ENTRY_LEBAR_MAKS:
-        alasan.append(f"area entry terlalu lebar ({hi - lo:.1f} pt > {ENTRY_LEBAR_MAKS:g})")
+        alasan.append(f"area entry terlalu lebar ({hi - lo:.2f} USD > {ENTRY_LEBAR_MAKS:g} USD)")
     sisi_ok = True
     if arah == "BUY":
         if sl >= lo:
@@ -72,9 +72,9 @@ def validasi_sinyal_struktur(sig):
     if sisi_ok:
         risiko = abs(mid - sl)
         if risiko < 0.5:
-            alasan.append(f"jarak SL terlalu dekat ({risiko:.2f} pt)")
+            alasan.append(f"jarak SL terlalu dekat ({risiko:.2f} USD)")
         elif risiko > SL_JARAK_MAKS:
-            alasan.append(f"jarak SL terlalu jauh ({risiko:.1f} pt > {SL_JARAK_MAKS:g})")
+            alasan.append(f"jarak SL terlalu jauh ({risiko:.2f} USD > {SL_JARAK_MAKS:g} USD)")
         else:
             rr = abs(tp1 - mid) / risiko
             if rr < RR_MIN - 1e-9:
@@ -690,7 +690,7 @@ def evaluasi_limit_kena_kentut(sig, harga_bid=0.0, order_list=None):
                     status_kode="WAJIB_CANCEL",
                     judul="❌ WAJIB CANCEL BUY LIMIT SEKARANG (ZONA SUDAH MITIGATED / HABIS BENSIN!)",
                     catatan=(
-                        f"Harga tadi sudah colek zona sampai {titik_terdalam:.2f} ({lbl_limit} meleset tipis {selisih_meleset:.2f} pt / 'kena kentut') "
+                        f"Harga tadi sudah colek zona sampai {titik_terdalam:.2f} ({lbl_limit} meleset tipis {selisih_meleset:.2f} USD / 'kena kentut') "
                         f"dan sekarang sudah terbang jauh ke {harga_bid:.2f} (melewati Batas Mitigasi 60% di {batas_cancel:.2f} menuju TP1 {tp1:.2f}). "
                         f"Order institusi di zona {lo:.2f}-{hi:.2f} SUDAH TERPAKAI! Jika harga nanti turun balik ke {lvl_limit:.2f}, zona ini sudah tidak fresh & sangat rawan jebol SL. SEGERA CANCEL LIMIT ANDA!"
                     ),
@@ -702,7 +702,7 @@ def evaluasi_limit_kena_kentut(sig, harga_bid=0.0, order_list=None):
                     status_kode="MASIH_VALID_SEMENTARA",
                     judul=f"⚠️ MASIH VALID SEMENTARA (TUNGGU RETEST KE-2) — BATAS CANCEL DI {batas_cancel:.2f}",
                     catatan=(
-                        f"Harga tadi baru colek tepi atas zona sampai {titik_terdalam:.2f} ({lbl_limit} kurang {selisih_meleset:.2f} pt / 'kena kentut') "
+                        f"Harga tadi baru colek tepi atas zona sampai {titik_terdalam:.2f} ({lbl_limit} kurang {selisih_meleset:.2f} USD / 'kena kentut') "
                         f"dan baru memantul ke {harga_bid:.2f} (BELUM melewati Batas Mitigasi 60% di {batas_cancel:.2f}). "
                         f"KEPUTUSAN: Limit Anda di {lvl_limit:.2f} MASIH VALID dipertahankan untuk menunggu retest/jarum kedua ke dalam zona, "
                         f"TETAPI WAJIB SEGERA CANCEL jika harga lanjut terbang menyentuh {batas_cancel:.2f} atau TP1 ({tp1:.2f})!"
@@ -735,7 +735,7 @@ def evaluasi_limit_kena_kentut(sig, harga_bid=0.0, order_list=None):
                     status_kode="WAJIB_CANCEL",
                     judul="❌ WAJIB CANCEL SELL LIMIT SEKARANG (ZONA SUDAH MITIGATED / HABIS BENSIN!)",
                     catatan=(
-                        f"Harga tadi sudah colek zona sampai {titik_terdalam:.2f} ({lbl_limit} meleset tipis {selisih_meleset:.2f} pt / 'kena kentut') "
+                        f"Harga tadi sudah colek zona sampai {titik_terdalam:.2f} ({lbl_limit} meleset tipis {selisih_meleset:.2f} USD / 'kena kentut') "
                         f"dan sekarang sudah terjun jauh ke {harga_bid:.2f} (melewati Batas Mitigasi 60% di {batas_cancel:.2f} menuju TP1 {tp1:.2f}). "
                         f"Order institusi di zona {lo:.2f}-{hi:.2f} SUDAH TERPAKAI! Jika harga nanti naik balik ke {lvl_limit:.2f}, zona ini sudah tidak fresh & sangat rawan jebol SL. SEGERA CANCEL LIMIT ANDA!"
                     ),
@@ -747,7 +747,7 @@ def evaluasi_limit_kena_kentut(sig, harga_bid=0.0, order_list=None):
                     status_kode="MASIH_VALID_SEMENTARA",
                     judul=f"⚠️ MASIH VALID SEMENTARA (TUNGGU RETEST KE-2) — BATAS CANCEL DI {batas_cancel:.2f}",
                     catatan=(
-                        f"Harga tadi baru colek tepi bawah zona sampai {titik_terdalam:.2f} ({lbl_limit} kurang {selisih_meleset:.2f} pt / 'kena kentut') "
+                        f"Harga tadi baru colek tepi bawah zona sampai {titik_terdalam:.2f} ({lbl_limit} kurang {selisih_meleset:.2f} USD / 'kena kentut') "
                         f"dan baru turun ke {harga_bid:.2f} (BELUM melewati Batas Mitigasi 60% di {batas_cancel:.2f}). "
                         f"KEPUTUSAN: Limit Anda di {lvl_limit:.2f} MASIH VALID dipertahankan untuk menunggu retest/jarum kedua ke dalam zona, "
                         f"TETAPI WAJIB SEGERA CANCEL jika harga lanjut terjun menyentuh {batas_cancel:.2f} atau TP1 ({tp1:.2f})!"
@@ -1015,11 +1015,12 @@ def gerbang_sinyal_baru(sig):
 
         mid = (sig.get("lo_asli", sig["lo"]) + sig.get("hi_asli", sig["hi"])) / 2.0
         if abs(mid - tick.bid) > ENTRY_JARAK_MAKS:
-            alasan.append(f"entry {mid:.2f} terlalu jauh dari harga {tick.bid:.2f} (> {ENTRY_JARAK_MAKS:g} pt)")
+            alasan.append(f"entry {mid:.2f} terlalu jauh dari harga {tick.bid:.2f} (> {ENTRY_JARAK_MAKS:g} USD)")
         spread = float(tick.ask - tick.bid)
         batas = min(SPREAD_MAKS_POIN, max(0.5, SPREAD_MAKS_RASIO_ATR * atr_val))
         if spread > batas:
-            alasan.append(f"spread {spread:.2f} pt terlalu lebar (batas {batas:.2f} pt)")
+            from modules.utils import format_price_distance
+            alasan.append(f"spread {format_price_distance(spread, include_mt5_points=True)} terlalu lebar (batas {batas:.2f} USD)")
     blk = berita_blackout_aktif()
     if blk:
         alasan.append(f"blackout berita High-impact USD: {blk}")

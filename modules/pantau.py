@@ -18,12 +18,12 @@ import numpy as np
 import pandas as pd
 
 from modules.config import (
-    SYMBOL, TIMEFRAMES, SWING_N, BIAS_MIN_SKOR,
+    SYMBOL, TIMEFRAMES, SWING_N, BIAS_MIN_SKOR, ZONE_APPROACH_DISTANCE_POINTS,
     FILE_JURNAL_SINYAL, FILE_ERROR_LOG,
     ST_BATAL_SL, ST_SELESAI_TP2, ST_TP1_TERCAPAI,
     ST_AKTIF_ENTRY, ST_VALID_BERJALAN, ST_VALID_PULLBACK, ST_VALID_DEKAT_SL
 )
-from modules.utils import bunyi, wkt, _catat_error
+from modules.utils import bunyi, wkt, _catat_error, format_price_distance
 from modules.terminal_ui import print_terminal, print_terminal as print  # noqa: A004
 from modules.mt5_conn import (
     pastikan_mt5_aktif, ambil_data, tambah_indikator,
@@ -51,6 +51,7 @@ from modules.zone_scanner import (
     create_market_snapshot,
     scan_xauusd_zones,
     evaluate_trade_decision,
+    is_far_reference_zone,
 )
 
 WIB_TZ = timezone(timedelta(hours=7))
@@ -122,6 +123,8 @@ def _normalize_radar_zone_entry(z):
         "status": status,
         "approach": approach,
         "radar_eligibility": eligibility,
+        "zone_relevance": str(z.get("zone_relevance", "RADAR") if isinstance(z, dict) else getattr(z, "zone_relevance", "RADAR")).upper(),
+        "touch_count": int(z.get("touch_count", 0) or 0) if isinstance(z, dict) else int(getattr(z, "touch_count", 0) or 0),
         "expired": bool(z.get("expired", False)) if isinstance(z, dict) else bool(getattr(z, "expired", False)),
         "mitigated": bool(z.get("mitigated", False)) if isinstance(z, dict) else bool(getattr(z, "mitigated", False)),
         "invalidated": bool(z.get("invalidated", False)) if isinstance(z, dict) else bool(getattr(z, "invalidated", False)),
@@ -182,7 +185,7 @@ def collect_radar_watchlist_with_reconciliation(scan_result, decision=None):
     def _classify_exclusion(nz_item, from_all_prio=False):
         if nz_item["zone_type"] not in ("SUPPLY", "DEMAND") or nz_item["price_high"] <= 0:
             return "DATA_INCOMPLETE", "DATA_INCOMPLETE"
-        if nz_item["risk_tier"] == "FAR_ZONE":
+        if nz_item["risk_tier"] == "FAR_ZONE" or nz_item.get("zone_relevance") == "FAR_REFERENCE":
             return "FAR_ZONE_EXCLUDED", "FAR_ZONE"
         if nz_item["invalidated"] or nz_item["status"] == "INVALIDATED":
             return "INVALIDATED", "INVALIDATED"
@@ -323,7 +326,9 @@ def evaluate_zone_status(zone, bid, ask, mid, close_m5=None, atr_m5=1.0, prev_st
     if zone.get("invalidated") or zone.get("status") == "INVALIDATED":
         return {"status": "INVALIDATED", "distance_pt": round(dist_pt, 2), "reason": "Struktur zona terinvalidasi"}
 
-    if close_m5 is not None and inv > 0:
+    tf_parts = [p.strip().upper() for p in re.split(r"[+/, ]+", str(zone.get("timeframe") or "")) if p.strip()]
+    is_m5_origin = (tf_parts == ["M5"])
+    if close_m5 is not None and inv > 0 and is_m5_origin:
         if kind == "SUPPLY" and close_m5 > inv:
             return {"status": "INVALIDATED", "distance_pt": round(dist_pt, 2), "reason": f"Close M5 ({close_m5:.2f}) menembus invalidasi Supply ({inv:.2f})"}
         if kind == "DEMAND" and close_m5 < inv:
@@ -332,23 +337,26 @@ def evaluate_zone_status(zone, bid, ask, mid, close_m5=None, atr_m5=1.0, prev_st
     if zone.get("mitigated") or zone.get("status") == "MITIGATED":
         return {"status": "MITIGATED", "distance_pt": round(dist_pt, 2), "reason": "Zona sudah termitigasi"}
 
-    # Cek ZONE_TOUCHED (sentuh zona oleh Bid/Ask/Mid)
-    touched_now = (lo <= mid <= hi) or (lo <= bid <= hi) or (lo <= ask <= hi)
+    # Cek ZONE_TOUCHED berbasis harga snapshot mid yang konsisten dengan jarak zona
+    touched_now = (lo <= mid <= hi)
     if touched_now:
         return {"status": "ZONE_TOUCHED", "distance_pt": 0.0, "reason": f"Harga menyentuh zona {lo:.2f}-{hi:.2f}"}
 
-    # Jika sebelumnya ZONE_TOUCHED dan kini harga keluar menjauh tanpa invalidasi -> MITIGATED
+    # Harga keluar menjauh setelah tersentuh: hanya MITIGATED jika sudah melewati batas sentuhan (>2x); zona fresh tetap valid!
     exit_buf = max(0.8, 0.4 * float(atr_m5 or 1.0))
+    touch_cnt = int(zone.get("touch_count", 0) or 0)
     if prev_status == "ZONE_TOUCHED":
         if (kind == "SUPPLY" and mid < lo - exit_buf) or (kind == "DEMAND" and mid > hi + exit_buf):
-            return {"status": "MITIGATED", "distance_pt": round(dist_pt, 2), "reason": "Harga memantul meninggalkan zona setelah tersentuh (MITIGATED)"}
+            if touch_cnt >= 2:
+                return {"status": "MITIGATED", "distance_pt": round(dist_pt, 2), "reason": "Harga memantul meninggalkan zona setelah batas uji tercapai (MITIGATED)"}
+            return {"status": "RADAR", "distance_pt": round(dist_pt, 2), "reason": "Harga memantul dari zona (struktur tetap valid, kembali dipantau di RADAR)"}
 
     # Cek APPROACHING
-    app_thr = max(3.0, 1.5 * float(atr_m5 or 1.0))
+    app_thr = float(ZONE_APPROACH_DISTANCE_POINTS)
     if dist_pt <= app_thr:
-        return {"status": "APPROACHING", "distance_pt": round(dist_pt, 2), "reason": f"Harga mendekati zona ({dist_pt:.2f} pt <= {app_thr:.2f} pt)"}
+        return {"status": "APPROACHING", "distance_pt": round(dist_pt, 2), "reason": f"Harga mendekati zona ({dist_pt:.2f} USD <= {app_thr:.2f} USD)"}
 
-    return {"status": "RADAR", "distance_pt": round(dist_pt, 2), "reason": f"Zona aktif dalam radar (jarak {dist_pt:.2f} pt)"}
+    return {"status": "RADAR", "distance_pt": round(dist_pt, 2), "reason": f"Zona aktif dalam radar (jarak {dist_pt:.2f} USD)"}
 
 
 class ZoneMonitorState:
@@ -411,7 +419,7 @@ class ZoneMonitorState:
             f"\n[TRANSISI ZONA {ev['symbol']}] {ev['timestamp_wib']} | {ev['zone_id']} "
             f"({ev['timeframe']} {ev['zone_type']}): {ev['prev_status']} -> {ev['new_status']} | "
             f"Bid:{ev['bid']:.2f} Ask:{ev['ask']:.2f} Mid:{ev['mid']:.2f} | "
-            f"Jarak:{ev['distance_pt']:.2f}pt | {ev['reason']}"
+            f"Jarak:{format_price_distance(ev['distance_pt'], symbol=ev.get('symbol'), include_mt5_points=True)} | {ev['reason']}"
         )
 
 
@@ -721,16 +729,24 @@ def _build_monitor_snapshot(
     )
     monitored_pz = _zone_from_monitored_identity(dec.get("monitored_zone_identity") if isinstance(dec, dict) else None)
     signal_pz = _zone_from_active_signal(sinyal_aktif, mid_val)
-    pz = (
-        monitored_pz
-        or signal_pz
-        or r_prio.get("best_confirmed_candidate")
-        or r_prio.get("best_pending_candidate")
-        or r_prio.get("primary_directional_zone")
-        or r_prio.get("primary_zone")
-        or r_prio.get("nearest_radar_zone")
-        or (wl_list[0] if wl_list else None)
-    )
+    h4_mon_bias = str(((scan_result or {}).get("htf_context") or {}).get("H4") or "").upper()
+    pz = None
+    for pz_cand in (
+        monitored_pz,
+        signal_pz,
+        r_prio.get("best_confirmed_candidate"),
+        r_prio.get("best_pending_candidate"),
+        r_prio.get("primary_directional_zone"),
+        r_prio.get("primary_zone"),
+    ):
+        if not isinstance(pz_cand, dict):
+            continue
+        if is_far_reference_zone(pz_cand, current_price=mid_val if mid_val > 0 else None):
+            continue
+        if h4_mon_bias in ("BULLISH", "BEARISH") and pz_cand.get("is_counter"):
+            continue
+        pz = pz_cand
+        break
     primary_zone_info = None
     if isinstance(pz, dict):
         lo = float(pz.get("price_low", 0.0) or 0.0)
@@ -889,8 +905,9 @@ def format_monitor_summary(monitor_data: dict) -> str:
         zt = pz.get("zone_type", "N/A")
         lo = float(pz.get("price_low", 0.0) or 0.0)
         hi = float(pz.get("price_high", 0.0) or 0.0)
+        from modules.utils import format_price_distance
         dist = pz.get("distance")
-        dist_str = f"{float(dist):.2f} pt" if isinstance(dist, (int, float)) else "N/A"
+        dist_str = format_price_distance(float(dist), include_mt5_points=True) if isinstance(dist, (int, float)) else "N/A"
         z_st = str(pz.get("status") or "RADAR").upper()
         lines.append(f"{tf} {zt} {lo:.2f} - {hi:.2f}")
         lines.append(f"Distance: {dist_str} | {z_st}")
@@ -901,12 +918,13 @@ def format_monitor_summary(monitor_data: dict) -> str:
     lines.append("POSITION MONITOR:")
     positions = d.get("positions") or []
     if positions:
+        from modules.utils import format_price_distance
         for idx, p in enumerate(positions):
             arah = str(p.get("arah", "N/A")).upper()
             vol = float(p.get("volume", 0.0) or 0.0)
             entry = float(p.get("price_open", 0.0) or 0.0)
             pts = p.get("points")
-            pts_str = f"{float(pts):+.1f} pt" if isinstance(pts, (int, float)) else "N/A"
+            pts_str = format_price_distance(float(pts), include_mt5_points=True, signed=True) if isinstance(pts, (int, float)) else "N/A"
             sl_val = float(p.get("sl", 0.0) or 0.0)
             sl_str = "NOT SET [WARNING]" if sl_val <= 0 else f"{sl_val:.2f}"
             if idx > 0:
@@ -984,6 +1002,7 @@ def format_monitor_detail(monitor_data: dict) -> str:
     else:
         lines.append("  * Belum ada zona Radar Qualified aktif saat ini.")
 
+    from modules.utils import format_price_distance
     if positions:
         lines.append(f"- Pengawal Posisi Running Aktif ({len(positions)} posisi di {d.get('symbol', SYMBOL)}):")
         for p in positions:
@@ -991,7 +1010,7 @@ def format_monitor_detail(monitor_data: dict) -> str:
             tp_txt = f"{float(p['tp']):.2f}" if float(p.get("tp", 0.0) or 0.0) > 0 else "BELUM DISET"
             lines.append(
                 f"  * Ticket #{p.get('ticket')} | {p.get('arah')} {float(p.get('volume', 0.0)):.2f} lot @ {float(p.get('price_open', 0.0)):.2f} "
-                f"| SL: {sl_txt} | TP: {tp_txt} | Floating: {float(p.get('points', 0.0)):+.1f} pt"
+                f"| SL: {sl_txt} | TP: {tp_txt} | Floating: {format_price_distance(float(p.get('points', 0.0)), include_mt5_points=True, signed=True)}"
             )
     else:
         lines.append("- Pengawal Posisi Running Siaga: Tidak ada posisi running.")
@@ -1003,7 +1022,7 @@ def format_monitor_detail(monitor_data: dict) -> str:
             tp_txt = f"{oa['tp']:.2f}" if float(oa.get("tp", 0.0) or 0.0) > 0 else "BELUM DISET"
             lines.append(
                 f"  * Ticket #{oa.get('ticket')} ({oa.get('symbol')}) | {oa.get('order_type')} {oa.get('volume')} lot @ {float(oa.get('entry_price', 0.0)):.2f} "
-                f"(Jarak: {float(oa.get('distance_pt', 0.0)):.2f} pt | {oa.get('price_validity')} | {oa.get('status')}) | SL: {sl_txt} | TP: {tp_txt}"
+                f"(Jarak: {format_price_distance(float(oa.get('distance_pt', 0.0)), spec=oa, include_mt5_points=True)} | {oa.get('price_validity')} | {oa.get('status')}) | SL: {sl_txt} | TP: {tp_txt}"
             )
     else:
         lines.append(f"- Pending Order Aktif: {int(d.get('pending_active_count', 0) or 0)} (Tanpa SL: {int(d.get('pending_without_sl', 0) or 0)})")
@@ -1333,7 +1352,7 @@ def diagnosa_forensik_penyebab_sl(df_m5):
 
     detail = (
         f"Diagnosa Penyebab: {alasan_singkat} ({', '.join(faktor)})\n"
-        f"Data Forensik 3 Candle M5: Rentang gerak {rng_3:.2f} pt | Volume Max {max_vol:.1f}x | Bodi Max {max_bodi:.1f}x ATR | RSI14 {d['RSI14'].iloc[-1]:.1f}"
+        f"Data Forensik 3 Candle M5: Rentang gerak {rng_3:.2f} USD | Volume Max {max_vol:.1f}x | Bodi Max {max_bodi:.1f}x ATR | RSI14 {d['RSI14'].iloc[-1]:.1f}"
     )
 
     return {
@@ -1389,14 +1408,15 @@ def _aktifkan_zona_valid_berikutnya(otomatis, sudah_notif_masuk, arah_cari, bata
         else:
             print(f"   [⏳ ZONA {lbl_jenis} BERIKUTNYA DISIAGAKAN — WATCHLIST (Menunggu Harga Menjemput)]")
             label_setup = "Setup Sinyal Baru"
+        from modules.utils import format_price_distance
         print(f"   • Pemicu             : {alasan_jebol}")
-        print(f"   • Zona Rekomendasi   : {utama['lo']:.2f} - {utama['hi']:.2f} (Jarak ~{utama['jarak']:.2f} pt dari harga {harga_skrg:.2f})")
+        print(f"   • Zona Rekomendasi   : {utama['lo']:.2f} - {utama['hi']:.2f} (Jarak ~{format_price_distance(utama['jarak'], include_mt5_points=True)} dari harga {harga_skrg:.2f})")
         print(f"   • Kategori Zona      : {utama.get('tipe_strategi', 'Valid')}")
         print(f"   • Dasar Konfluensi   : {utama['sumber']}")
         print(f"   • {label_setup:<19} : {utama['arah']} @ {utama['lo']:.2f}-{utama['hi']:.2f} | SL/Invalidasi: {utama['sl']:.2f} | TP1: {utama['tp1']:.2f} | TP2: {utama['tp2']:.2f}")
         mm_u = hitung_mm_sinyal(utama['lo'], utama['hi'], utama['sl'], utama['tp1'], utama['tp2'])
         if mm_u:
-            print(f"   • Rasio Risk/Reward  : TP1 1:{mm_u['rrr_tp1']:.1f} | TP2 1:{mm_u['rrr_tp2']:.1f} (Jarak SL: {mm_u['jarak_sl']:.2f} pt)")
+            print(f"   • Rasio Risk/Reward  : TP1 1:{mm_u['rrr_tp1']:.1f} | TP2 1:{mm_u['rrr_tp2']:.1f} (Jarak SL: {format_price_distance(mm_u['jarak_sl'], spec=mm_u, include_mt5_points=True, include_pips=True)})")
             print(f"   • Rekomendasi Lot MM : {mm_u['lot_05']:.2f} lot (0.5% modal / -${mm_u['risk_05_usd']:.2f}) s/d {mm_u['lot_10']:.2f} lot (1.0% modal / -${mm_u['risk_10_usd']:.2f})")
             print(f"   • Batas Toleransi MM : Maksimal lot {mm_u['lot_max']:.2f} lot (Maks 2.0% modal). DILARANG over-lot!")
         if hanya_preview:
@@ -1407,7 +1427,7 @@ def _aktifkan_zona_valid_berikutnya(otomatis, sudah_notif_masuk, arah_cari, bata
             mm_c = hitung_mm_sinyal(cadangan['lo'], cadangan['hi'], cadangan['sl'], cadangan['tp1'], cadangan['tp2'])
             print("   " + "─" * 70)
             print(f"   [🛡️ ZONA CADANGAN BERIKUTNYA — JIKA ZONA DI ATAS TERKENA SL LAGI]")
-            print(f"   • Area Pertahanan Ke-2 : {cadangan['arah']} @ {cadangan['lo']:.2f} - {cadangan['hi']:.2f} (Jarak ~{cadangan['jarak']:.2f} pt dari harga sekarang)")
+            print(f"   • Area Pertahanan Ke-2 : {cadangan['arah']} @ {cadangan['lo']:.2f} - {cadangan['hi']:.2f} (Jarak ~{format_price_distance(cadangan['jarak'], include_mt5_points=True)} dari harga sekarang)")
             print(f"   • Batas SL & Target TP : SL {cadangan['sl']:.2f} | TP1 {cadangan['tp1']:.2f} | TP2 {cadangan['tp2']:.2f}")
             if mm_c:
                 print(f"   • Rasio R:R & Lot MM   : R:R TP1 1:{mm_c['rrr_tp1']:.1f} | TP2 1:{mm_c['rrr_tp2']:.1f} | Lot Disiplin: {mm_c['lot_05']:.2f} lot (0.5% / -${mm_c['risk_05_usd']:.2f}) s/d {mm_c['lot_10']:.2f} lot (1% / -${mm_c['risk_10_usd']:.2f})")
@@ -1511,8 +1531,9 @@ def _update_sinyal_aktif_pantau(otomatis, sudah_notif_masuk, sinyal_baru, alasan
         if mm:
             print("   " + "─" * 66)
             print("   [💼 PROTOKOL MONEY MANAGEMENT & UKURAN LOT AKUN MT5]")
+            from modules.utils import format_price_distance
             print(f"   • Modal Real (Equity) : ${mm['equity']:,.2f} {mm['currency']}")
-            print(f"   • Jarak Risiko SL     : {mm['jarak_sl']:.2f} pt ({mm['jarak_sl']*10:.0f} pips)")
+            print(f"   • Jarak Risiko SL     : {format_price_distance(mm['jarak_sl'], spec=mm, include_mt5_points=True, include_pips=True)}")
             print(f"   • Rasio Risk/Reward   : TP1 1:{mm['rrr_tp1']:.1f} | TP2 1:{mm['rrr_tp2']:.1f}")
             print(f"   • REKOMENDASI UKURAN LOT MT5:")
             if kat_r == "HIGH RISK":
@@ -1718,12 +1739,13 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
         wl_for_ord = pantau_cycle_init.get("watchlist", []) if pantau_cycle_init else []
         ord_audits = audit_pending_orders(orders_awal, tick_awal, radar_zones=wl_for_ord, sym_info=sym_awal)
         print(f"- Pengawal Validitas Zona Pending Order Aktif ({len(ord_audits)} limit/stop order terdeteksi, READ-ONLY):")
+        from modules.utils import format_price_distance
         for oa in ord_audits:
             sl_txt = f"{oa['sl']:.2f}" if oa["sl"] > 0 else f"BELUM DISET (Saran Struktur: {oa['structural_sl']})"
             tp_txt = f"{oa['tp']:.2f}" if oa["tp"] > 0 else "BELUM DISET"
             print(
                 f"  * Ticket #{oa['ticket']} ({oa['symbol']}) | {oa['order_type']} {oa['volume']} lot @ {oa['entry_price']:.2f} "
-                f"(Jarak: {oa['distance_pt']:.2f} pt | {oa['price_validity']} | {oa['status']}) | SL: {sl_txt} | TP: {tp_txt}"
+                f"(Jarak: {format_price_distance(oa['distance_pt'], spec=oa, include_mt5_points=True)} | {oa['price_validity']} | {oa['status']}) | SL: {sl_txt} | TP: {tp_txt}"
             )
     else:
         print("- Pengawal Validitas Pending Order Siaga: Otomatis mengawasi validitas zona begitu Anda pasang Buy/Sell Limit di MT5.")
@@ -1846,13 +1868,13 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                         p0 = pos_live[0]
                         arah0 = "BUY" if p0.type == mt5.ORDER_TYPE_BUY else "SELL"
                         poin0 = (tick.bid - p0.price_open) if arah0 == "BUY" else (p0.price_open - tick.ask)
-                        label_pos = f"{arah0} {poin0:+.1f}pt" if len(pos_live) == 1 else f"{len(pos_live)}Pos"
+                        label_pos = f"{arah0} {poin0:+.2f}USD" if len(pos_live) == 1 else f"{len(pos_live)}Pos"
                         info_floating_bar += f" | {label_pos}({port_profit_str})"
                     if orders_live:
                         o0 = min(orders_live, key=lambda x: abs(harga - x.price_open))
                         nm0, _ = _info_tipe_pending(o0.type)
                         jrk0 = abs(harga - o0.price_open)
-                        label_ord = f"{nm0}@{o0.price_open:.1f}({jrk0:.1f}pt)" if len(orders_live) == 1 else f"{len(orders_live)}Lim({jrk0:.1f}pt)"
+                        label_ord = f"{nm0}@{o0.price_open:.1f}({jrk0:.2f}USD)" if len(orders_live) == 1 else f"{len(orders_live)}Lim({jrk0:.2f}USD)"
                         info_floating_bar += f" | {label_ord}"
                     if otomatis["sinyal"]:
                         sg = otomatis["sinyal"]
@@ -1898,7 +1920,8 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                         jarak_skrg = abs(harga - p_limit)
 
                         if tkt_o not in pending_terpantau:
-                            print(f"\n\n[PENDING ORDER BARU TERDETEKSI #{tkt_o}!] {nm_o} {vol_o} lot @ {p_limit:.2f} (Jarak: {jarak_skrg:.2f} pt) | SL: {o.sl if o.sl > 0 else 'BELUM DISET'} | TP: {o.tp if o.tp > 0 else 'BELUM DISET'}")
+                            from modules.utils import format_price_distance
+                            print(f"\n\n[PENDING ORDER BARU TERDETEKSI #{tkt_o}!] {nm_o} {vol_o} lot @ {p_limit:.2f} (Jarak: {format_price_distance(jarak_skrg, sym_info=sym_live_mm, include_mt5_points=True)}) | SL: {o.sl if o.sl > 0 else 'BELUM DISET'} | TP: {o.tp if o.tp > 0 else 'BELUM DISET'}")
                             print("   -> Pengawal Validitas Zona Limit aktif! Sistem akan memberi tahu jika zona limit ini tetap VALID atau berubah BAHAYA/TIDAK VALID.")
                             for _ in range(2):
                                 bunyi(1350, 180)
@@ -1951,21 +1974,21 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             key_bahaya_lim = f"ord_danger_{tkt_o}_{t_candle_last_c}"
                             if impuls_menghantam_limit and key_bahaya_lim not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(key_bahaya_lim)
-                                print(f"\n[Catatan Limit #{tkt_o}] Harga mendekati {nm_o} @ {p_limit:.2f} (sisa jarak {jarak_skrg:.2f} pt) dengan candle impuls M5 (Bodi {bodi_last_c:.2f} pt).")
+                                print(f"\n[Catatan Limit #{tkt_o}] Harga mendekati {nm_o} @ {p_limit:.2f} (sisa jarak {jarak_skrg:.2f} USD) dengan candle impuls M5 (Bodi {bodi_last_c:.2f} USD).")
                                 print("   -> Saran: Pantau apakah terbentuk reaksi/rejection di level ini sebelum order terjemput.")
                                 bunyi(620, 200)
                             elif jarak_skrg <= max(2.0, round(1.0 * atr_m5, 2)) and not impuls_menghantam_limit and f"ord_valid_{tkt_o}" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(f"ord_valid_{tkt_o}")
-                                print(f"\n[Siaga #{tkt_o}] Harga mendekati {nm_o} @ {p_limit:.2f} (jarak {jarak_skrg:.2f} pt) dengan ritme pullback wajar.")
+                                print(f"\n[Siaga #{tkt_o}] Harga mendekati {nm_o} @ {p_limit:.2f} (jarak {jarak_skrg:.2f} USD) dengan ritme pullback wajar.")
                                 bunyi(1300, 150)
 
-                        # (3) Deteksi Zona Limit Sudah Terpakai / Front-Run (Hanya jika benar-benar nyaris sentuh <= 0.8 pt lalu memantul jauh >= 8.0 pt)
+                        # (3) Deteksi Zona Limit Sudah Terpakai / Front-Run (Hanya jika benar-benar nyaris sentuh <= 0.8 USD lalu memantul jauh >= 8.0 USD)
                         batas_frontrun = max(0.8, round(0.4 * atr_m5, 2))
                         batas_terbang = max(8.0, round(3.5 * atr_m5, 2))
                         arah_terbang_benar = (arah_o == "BUY" and harga > p_limit) or (arah_o == "SELL" and harga < p_limit)
                         if "LIMIT" in nm_o and min_jrk_hist <= batas_frontrun and jarak_skrg >= batas_terbang and arah_terbang_benar and f"ord_mit_{tkt_o}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"ord_mit_{tkt_o}")
-                            print(f"\n[Catatan #{tkt_o}] Harga sempat mendekati {nm_o} @ {p_limit:.2f} ({min_jrk_hist:.2f} pt) lalu memantul {jarak_skrg:.2f} pt tanpa menjemput order. Zona ini sudah mengalami mitigasi dini.")
+                            print(f"\n[Catatan #{tkt_o}] Harga sempat mendekati {nm_o} @ {p_limit:.2f} ({min_jrk_hist:.2f} USD) lalu memantul {jarak_skrg:.2f} USD tanpa menjemput order. Zona ini sudah mengalami mitigasi dini.")
                             bunyi(780, 200)
 
                     # Cek jika ada Pending Order yang baru saja hilang (hanya jika query orders_get sukses)
@@ -2055,8 +2078,9 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                         sl_belum_bep = (arah_p == "BUY" and p.sl < p.price_open) or (arah_p == "SELL" and (p.sl == 0 or p.sl > p.price_open))
                         if poin_p >= batas_bep and sl_belum_bep and f"bep_{tkt}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"bep_{tkt}")
+                            from modules.utils import format_price_distance
                             pp_sug = build_profit_protection_suggestion(p, tick, sym_info=sym_live_mm, acc_info=acc_live_mm)
-                            print(f"\n\n[{pp_sug['label']} #{tkt}] Posisi {arah_p} @ {p.price_open:.2f} memiliki floating +{poin_p:.2f} poin ({profit_disp}).")
+                            print(f"\n\n[{pp_sug['label']} #{tkt}] Posisi {arah_p} @ {p.price_open:.2f} memiliki floating {format_price_distance(poin_p, sym_info=sym_live_mm, include_mt5_points=True, signed=True)} ({profit_disp}).")
                             if pp_sug["allowed"]:
                                 net_txt = (
                                     f"{pp_sug['estimated_net_profit']:+,.2f} {pp_sug.get('currency') or ''}".strip()
@@ -2064,20 +2088,20 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                                     else "NET_PROFIT_UNAVAILABLE (komponen biaya/kurs tidak lengkap)"
                                 )
                                 print(f"   -> Entry: {pp_sug['entry_price']:.2f} | Bid/Ask: {pp_sug['current_bid']:.2f}/{pp_sug['current_ask']:.2f} | Suggested SL: {pp_sug['suggested_sl']:.2f}")
-                                print(f"   -> Gross Profit Potentially Locked: +{pp_sug['gross_profit_locked_pts']:.2f} pt | Estimated Net Profit: {net_txt}")
-                                print(f"   -> Buffer & Dasar: {pp_sug['buffer_pts']:.2f} pt ({pp_sug['calculation_basis']})")
+                                print(f"   -> Gross Profit Potentially Locked: {format_price_distance(pp_sug['gross_profit_locked_pts'], spec=pp_sug, include_mt5_points=True, signed=True)} | Estimated Net Profit: {net_txt}")
+                                print(f"   -> Buffer & Dasar: {format_price_distance(pp_sug['buffer_pts'], spec=pp_sug, include_mt5_points=True)} ({pp_sug['calculation_basis']})")
                                 print(f"   -> CATATAN: {pp_sug['disclaimer']}")
                             else:
                                 print(f"   -> {pp_sug['status']} ({pp_sug['reason']}): dasar perhitungan atau batasan stop/freeze level broker tidak memungkinkan rekomendasi SL.")
                             for _ in range(3):
                                 bunyi(1450, 220)
 
-                        # (c) Peringatan Partial TP / Kunci Profit Besar saat profit >= 5.0 poin (atau 2.5x ATR M5)
+                        # (c) Peringatan Partial TP / Kunci Profit Besar saat profit >= 5.0 USD (atau 2.5x ATR M5)
                         batas_tp_parsial = max(5.0, round(2.5 * atr_m5, 2))
                         if poin_p >= batas_tp_parsial and f"lock_{tkt}" not in sudah_notif_masuk:
                             sudah_notif_masuk.add(f"lock_{tkt}")
                             kunci_sl = (p.price_open + round(poin_p * 0.5, 2)) if arah_p == "BUY" else (p.price_open - round(poin_p * 0.5, 2))
-                            print(f"\n\n[ALERT KUNCI PROFIT BESAR #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah profit +{poin_p:.2f} poin ({profit_disp})!")
+                            print(f"\n\n[ALERT KUNCI PROFIT BESAR #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah profit +{poin_p:.2f} USD ({profit_disp})!")
                             print(f"   -> TINDAKAN: Amankan sebagian profit (Partial Close) atau geser Trailing SL ke {kunci_sl:.2f} untuk mengunci profit!")
                             for _ in range(4):
                                 bunyi(1600, 200)
@@ -2093,8 +2117,8 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                         if melawan_impuls and key_impuls not in sudah_notif_masuk:
                             sudah_notif_masuk.add(key_impuls)
                             saran_imp = "Segera amankan profit / pasang BEP!" if poin_p > 0 else "Waspada tekanan lawan arah, perketat pengawasan SL / siap Cut terukur jika struktur jebol!"
-                            print(f"\n\n[PERINGATAN TEKANAN LAWAN ARAH #{tkt}!] Posisi Anda {arah_p} (Floating: {poin_p:+.2f} pt / {profit_disp}),")
-                            print(f"   tetapi candle M5 ({wkt(t_candle_last)}) membentuk impuls kuat melawan posisi Anda (Body {bodi_last:.2f} pt)!")
+                            print(f"\n\n[PERINGATAN TEKANAN LAWAN ARAH #{tkt}!] Posisi Anda {arah_p} (Floating: {poin_p:+.2f} USD / {profit_disp}),")
+                            print(f"   tetapi candle M5 ({wkt(t_candle_last)}) membentuk impuls kuat melawan posisi Anda (Body {bodi_last:.2f} USD)!")
                             print(f"   -> TINDAKAN: {saran_imp}")
                             for _ in range(3):
                                 bunyi(750, 300)
@@ -2104,7 +2128,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             jarak_ke_sl = (tick.bid - p.sl) if arah_p == "BUY" else (p.sl - tick.ask)
                             if 0 < jarak_ke_sl <= 1.2 and f"nearsl_{tkt}" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(f"nearsl_{tkt}")
-                                print(f"\n\n[AWAS MENDEKATI SL #{tkt}!] Harga saat ini tinggal {jarak_ke_sl:.2f} poin dari SL Anda ({p.sl:.2f})!")
+                                print(f"\n\n[AWAS MENDEKATI SL #{tkt}!] Harga saat ini tinggal {jarak_ke_sl:.2f} USD dari SL Anda ({p.sl:.2f})!")
                                 print("   -> DISIPLIN: Jangan menggeser/melebarkan SL agar batas risiko akun real Anda tetap terjaga.")
                                 for _ in range(3):
                                     bunyi(650, 300)
@@ -2112,7 +2136,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             batas_minus_darurat = -max(3.5, round(1.8 * atr_m5, 2))
                             if poin_p <= batas_minus_darurat and f"dd_{tkt}" not in sudah_notif_masuk:
                                 sudah_notif_masuk.add(f"dd_{tkt}")
-                                print(f"\n\n[BAHAYA FLOATING MINUS TANPA SL #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah minus {poin_p:.2f} poin ({profit_disp}) tanpa SL!")
+                                print(f"\n\n[BAHAYA FLOATING MINUS TANPA SL #{tkt}!] Posisi {arah_p} @ {p.price_open:.2f} sudah minus {poin_p:.2f} USD ({profit_disp}) tanpa SL!")
                                 print("   -> TINDAKAN DARURAT: Segera pasang batas Stop Loss atau lakukan Cut Loss jika zona pertahanan sudah jebol!")
                                 for _ in range(5):
                                     bunyi(600, 350)
@@ -2151,7 +2175,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                         if tkt_lama not in tiket_aktif_skrg:
                             info_lama = tiket_terpantau.pop(tkt_lama)
                             status_akhir = "PROFIT" if info_lama["profit"] >= 0 else "LOSS"
-                            print(f"\n\n[POSISI SELESAI / DITUTUP #{tkt_lama}] Posisi {info_lama['arah']} {info_lama['volume']} lot @ {info_lama['open']:.2f} telah tertutup ({status_akhir} terakhir: ${info_lama['profit']:+.2f} / {info_lama['poin']:+.2f} pt).")
+                            print(f"\n\n[POSISI SELESAI / DITUTUP #{tkt_lama}] Posisi {info_lama['arah']} {info_lama['volume']} lot @ {info_lama['open']:.2f} telah tertutup ({status_akhir} terakhir: ${info_lama['profit']:+.2f} / {info_lama['poin']:+.2f} USD).")
                             if status_akhir == "LOSS":
                                 lvl_sl_kena = info_lama.get("sl") if info_lama.get("sl", 0) > 0 else harga
                                 # Pastikan ini benar-benar SL risiko (bukan SL BEP+ yang tertutup tipis karena komisi/slippage)
@@ -2692,7 +2716,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             jrk_o = abs(harga - inf_o["open"])
                             lawan_inst = (inf_o["arah"] == "BUY" and "BEARISH" in baris_inst.upper()) or (inf_o["arah"] == "SELL" and "BULLISH" in baris_inst.upper())
                             if lawan_inst and "LIMIT" in inf_o["nama"] and jrk_o <= radius_bahaya_pending:
-                                print(f"   -> [Catatan Pending Order #{tkt_o}]: {inf_o['nama']} @ {inf_o['open']:.2f} berjarak dekat ({jrk_o:.2f} pt) dan berlawanan dengan impuls M5. Pantau reaksi sebelum terjemput.")
+                                print(f"   -> [Catatan Pending Order #{tkt_o}]: {inf_o['nama']} @ {inf_o['open']:.2f} berjarak dekat ({jrk_o:.2f} USD) dan berlawanan dengan impuls M5. Pantau reaksi sebelum terjemput.")
                         if otomatis["sinyal"]:
                             sg_now = otomatis["sinyal"]
                             sig_lawan_inst = (sg_now["arah"] == "BUY" and "BEARISH" in baris_inst.upper()) or (sg_now["arah"] == "SELL" and "BULLISH" in baris_inst.upper())
@@ -2716,7 +2740,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             for tkt, inf in tiket_terpantau.items():
                                 if (inf["arah"] == "BUY" and c_last["arah"] == "BEARISH") or (inf["arah"] == "SELL" and c_last["arah"] == "BULLISH"):
                                     aksi_c = "Segera amankan profit / pasang BEP!" if inf["poin"] > 0 else "CISD M5 berbalik melawan posisi Anda! Waspada pembalikan dini, pertimbangkan perketat SL / Cut terukur."
-                                    print(f"   -> [BAHAYA POSISI #{tkt}!] Posisi Anda {inf['arah']} ({inf['poin']:+.2f} pt / ${inf['profit']:+.2f}) berlawanan dengan {c_last['arah']} CISD M5! {aksi_c}")
+                                    print(f"   -> [BAHAYA POSISI #{tkt}!] Posisi Anda {inf['arah']} ({inf['poin']:+.2f} USD / ${inf['profit']:+.2f}) berlawanan dengan {c_last['arah']} CISD M5! {aksi_c}")
                                     for _ in range(3):
                                         bunyi(700, 300)
                             # Jika muncul CISD M5:
@@ -2788,7 +2812,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             for tkt, inf in tiket_terpantau.items():
                                 if (inf["arah"] == "BUY" and ev_item["arah"] == "BEARISH") or (inf["arah"] == "SELL" and ev_item["arah"] == "BULLISH"):
                                     aksi_saran = "Segera amankan profit / pasang BEP!" if inf["poin"] > 0 else "Struktur M5 berbalik melawan posisi Anda! Pertimbangkan Cut Loss terukur / perketat SL."
-                                    print(f"   -> [BAHAYA POSISI #{tkt}!] Posisi Anda {inf['arah']} ({inf['poin']:+.2f} pt / ${inf['profit']:+.2f}) berlawanan dengan {ev_item['tipe']} {ev_item['arah']} M5! {aksi_saran}")
+                                    print(f"   -> [BAHAYA POSISI #{tkt}!] Posisi Anda {inf['arah']} ({inf['poin']:+.2f} USD / ${inf['profit']:+.2f}) berlawanan dengan {ev_item['tipe']} {ev_item['arah']} M5! {aksi_saran}")
                                     for _ in range(3):
                                         bunyi(700, 300)
                             print("   -> TINDAKAN: Tekan Ctrl+C lalu ketik 'refresh' jika ini konfirmasi searah zona incaran Anda!")
@@ -2806,7 +2830,7 @@ def mode_pantau_mt5(arg="", teks_ai_terakhir="", detail=None):
                             for tkt, inf in tiket_terpantau.items():
                                 melawan_sw = (inf["arah"] == "BUY" and "BUY-SIDE" in sw_terakhir[1]) or (inf["arah"] == "SELL" and "SELL-SIDE" in sw_terakhir[1])
                                 if melawan_sw:
-                                    print(f"   -> [BAHAYA POSISI #{tkt}!] Sapuan likuiditas ini berpotensi membalikkan harga melawan posisi {inf['arah']} Anda ({inf['poin']:+.2f} pt)! Segera amankan posisi / BEP!")
+                                    print(f"   -> [BAHAYA POSISI #{tkt}!] Sapuan likuiditas ini berpotensi membalikkan harga melawan posisi {inf['arah']} Anda ({inf['poin']:+.2f} USD)! Segera amankan posisi / BEP!")
                                     for _ in range(3):
                                         bunyi(700, 300)
                             # Jika terjadi sweep:

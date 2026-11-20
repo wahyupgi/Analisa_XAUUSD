@@ -3,6 +3,7 @@
 formatter.py — Penyusun Output Ringkas (Section U) dan Detail Teknis 22 Bagian Audit (Section V)
 untuk SNR Advanced Scanner.
 """
+from modules.snr.breakout_detection import build_snr_breakout_watch, classify_snr_breakout_state
 from modules.snr.data_provider import safe_float
 
 
@@ -19,10 +20,16 @@ def format_snr_lifecycle_status(scan_result, decision=None):
     supports = [z for z in all_zones if str(z.get("zone_type", "")).upper() == "SUPPORT"]
     supports.sort(key=lambda z: safe_float(z.get("distance_points"), float("inf")))
 
-    # Prioritaskan zona yang sedang mengalami potensi breakdown/breakout, lalu broken/reclaim terdekat,
-    # lalu support/resistance aktif terdekat agar peristiwa breakdown/breakout terlihat jelas.
+    bo_watch_lc = sr.get("breakout_watch") or build_snr_breakout_watch(ranked, price_action=sr.get("price_action"))
+    # Prioritaskan breakout confirmed / retest watch / pending break, lalu support aktif, broken, resistance aktif
     zone = None
-    if pending_breaks:
+    if bo_watch_lc.get("confirmed"):
+        zone = bo_watch_lc["confirmed"][0].get("zone")
+    elif bo_watch_lc.get("retest_watch"):
+        zone = bo_watch_lc["retest_watch"][0].get("zone")
+    elif bo_watch_lc.get("pending"):
+        zone = bo_watch_lc["pending"][0].get("zone")
+    elif pending_breaks:
         zone = pending_breaks[0]
     elif active_supports:
         zone = active_supports[0]
@@ -48,31 +55,30 @@ def format_snr_lifecycle_status(scan_result, decision=None):
         reclaim = str(zone.get("reclaim_status") or "WAIT").upper()
         default_lbl = "NEAREST SUPPORT" if z_type == "SUPPORT" else "NEAREST RESISTANCE"
         zone_label = str(zone.get("rank_label") or default_lbl)
-        break_word = "BREAKDOWN" if z_type == "SUPPORT" else "BREAKOUT"
+        bo_cls = classify_snr_breakout_state(zone)
+        bo_st = bo_cls["state"]
 
         if lifecycle == "RECLAIMED" or (lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING") and reclaim == "CONFIRMED"):
             disp_status = "RECLAIMED"
             disp_event = "RECLAIM CONFIRMED"
-        elif lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING"):
-            disp_status = "BROKEN"
-            disp_event = (
-                "RETEST" if lifecycle == "RETEST"
-                else ("RECLAIM PENDING" if lifecycle == "RECLAIM_PENDING" else break_word)
-            )
-        elif lifecycle == "BREAKDOWN_PENDING":
-            disp_status = "BREAKDOWN_PENDING"
-            disp_event = "POTENTIAL BREAKDOWN"
-        elif lifecycle == "BREAKOUT_PENDING":
-            disp_status = "BREAKOUT_PENDING"
-            disp_event = "POTENTIAL BREAKOUT"
-        elif lifecycle == "INVALIDATED":
-            disp_status = "INVALIDATED"
-            disp_event = "INVALIDATED"
+        elif bo_st == "CONFIRMED":
+            disp_status = "INVALID — BROKEN"
+            disp_event = bo_cls["label"]
+        elif bo_st == "RETEST_WATCH":
+            disp_status = "INVALID — BROKEN"
+            disp_event = bo_cls["label"]
+        elif bo_st == "BROKEN" or lifecycle in ("BROKEN", "RETEST", "RECLAIM_PENDING", "INVALIDATED"):
+            disp_status = "INVALID — BROKEN"
+            disp_event = "RECLAIM PENDING" if lifecycle == "RECLAIM_PENDING" else bo_cls["label"]
+        elif bo_st in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING"):
+            disp_status = bo_st
+            disp_event = bo_cls["label"]
         elif lifecycle == "UNCONFIRMED":
             disp_status = "UNCONFIRMED"
             disp_event = "UNCONFIRMED"
         elif lifecycle in ("ACTIVE", "TOUCHED", "SWEEP"):
-            disp_status = "ACTIVE"
+            z_rel_lc = str(zone.get("zone_relevance") or "ACTIVE").upper()
+            disp_status = "FAR REFERENCE" if z_rel_lc == "FAR_REFERENCE" else ("RADAR" if z_rel_lc == "RADAR" else "ACTIVE")
             if event in ("FALSE_BREAKDOWN", "FALSE_BREAKOUT"):
                 disp_event = event.replace("_", " ")
             else:
@@ -195,7 +201,9 @@ def format_snr_focus_plan(decision, entry_validation=None, zone_override=None, m
             sl < entry < tp1 if plan.get("direction") == "BUY" else tp1 < entry < sl
         )
         if valid:
-            reference = "CURRENT PRICE" if plan.get("reference") == "CURRENT PRICE" else f"{safe_float(plan.get('distance')):.1f} pt away"
+            from modules.utils import format_price_distance, extract_unit_spec_from_container
+            _u_fp = extract_unit_spec_from_container(plan.get("rr_calculation") or dec)
+            reference = "CURRENT PRICE" if plan.get("reference") == "CURRENT PRICE" else f"{format_price_distance(safe_float(plan.get('distance')), spec=_u_fp, include_mt5_points=True)} away"
             entry_text = f"{plan['direction']} PLAN {entry:.2f} ({reference})"
             rr_text = f"1:{abs(tp1 - entry) / abs(entry - sl):.2f}"
             suffix = " (PROVISIONAL ONLY)"
@@ -224,7 +232,9 @@ def format_snr_focus_plan(decision, entry_validation=None, zone_override=None, m
     lifecycle = str(zone.get("lifecycle_status") or zone.get("status") or "").upper()
     if is_focus and direction in ("BUY", "SELL"):
         status = "CONFIRMED" if entry > 0 else f"{direction} (LEVELS N/A)"
-    elif lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN"):
+    elif lifecycle in ("INVALIDATED", "BROKEN"):
+        status = "INVALID — BROKEN"
+    elif lifecycle in ("EXPIRED", "MITIGATED"):
         status = lifecycle
     elif is_focus:
         status = _snr_status_code(dec.get("reason"), ev.get("reason")) + suffix
@@ -250,7 +260,22 @@ def format_snr_focus_plan(decision, entry_validation=None, zone_override=None, m
     return "\n".join(lines)
 
 
-def format_snr_summary(scan_result, decision=None):
+def _is_snr_far_zone(zone):
+    """True jika zona SNR berada di luar batas jarak ATR/timeframe (FAR REFERENCE / HISTORICAL)."""
+    if not isinstance(zone, dict):
+        return False
+    if zone.get("is_far_reference") or str(zone.get("zone_relevance") or "").upper() == "FAR_REFERENCE":
+        return True
+    if zone.get("is_distant_historical"):
+        return True
+    life = str(zone.get("lifecycle_status") or zone.get("status") or "").upper()
+    if life == "HISTORICAL":
+        return True
+    d_atr = safe_float(zone.get("distance_atr"), 0.0)
+    return d_atr > 12.0
+
+
+def format_snr_summary(scan_result, decision=None, detailed=False):
     """
     Menyusun output ringkas SNR Advanced Scanner:
     Ringkas, padat, tanpa kalimat berulang, namun informasi zona dan alasannya sangat jelas.
@@ -303,7 +328,7 @@ def format_snr_summary(scan_result, decision=None):
         f"MARKET BIAS : H4: {h4_b} | H1: {h1_b} | M30: {m30_b} | M5: {m5_b}",
         "",
         "----------------------------------------------------",
-        "SUPPORT ZONES",
+        "SUPPORT ZONES (ACTIVE)",
         "----------------------------------------------------",
     ]
 
@@ -317,8 +342,9 @@ def format_snr_summary(scan_result, decision=None):
             grade = sz.get("grade", "D")
             score_str = f"{safe_float(sz.get('score')):.2f}"
             strength = sz.get("strength_short", "MODERATE")
+            rel_tag = str(sz.get("zone_relevance") or "ACTIVE").upper()
             reason_str = build_snr_zone_reason(sz, mb.get("h4"))
-            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} (Grade {grade} | Score {score_str} | Strength {strength})")
+            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} [{rel_tag}] (Grade {grade} | Score {score_str} | Strength {strength})")
             lines.append(f"     Reason: {reason_str}")
             if idx_s == 0 and len(active_sups[:2]) > 1:
                 lines.append("")
@@ -328,7 +354,7 @@ def format_snr_summary(scan_result, decision=None):
     lines.extend([
         "",
         "----------------------------------------------------",
-        "RESISTANCE ZONES",
+        "RESISTANCE ZONES (ACTIVE)",
         "----------------------------------------------------",
     ])
 
@@ -342,50 +368,88 @@ def format_snr_summary(scan_result, decision=None):
             grade = rz.get("grade", "D")
             score_str = f"{safe_float(rz.get('score')):.2f}"
             strength = rz.get("strength_short", "MODERATE")
+            rel_tag = str(rz.get("zone_relevance") or "ACTIVE").upper()
             reason_str = build_snr_zone_reason(rz, mb.get("h4"))
-            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} (Grade {grade} | Score {score_str} | Strength {strength})")
+            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} [{rel_tag}] (Grade {grade} | Score {score_str} | Strength {strength})")
             lines.append(f"     Reason: {reason_str}")
             if idx_r == 0 and len(active_ress[:2]) > 1:
                 lines.append("")
     else:
         lines.append("R1 : NONE (Belum ada zona resistance aktif)")
 
-    pending_breaks = [
-        pz for pz in (ranked.get("pending_break_zones") or [])
-        if isinstance(pz, dict)
-        and not pz.get("is_distant_historical")
-        and safe_float(pz.get("distance_atr"), 0.0) <= 12.0
-    ]
-    reclaimed_zs = [
-        rz_rec for rz_rec in (ranked.get("reclaimed_zones") or [])
-        if isinstance(rz_rec, dict)
-        and not rz_rec.get("is_distant_historical")
-        and safe_float(rz_rec.get("distance_atr"), 0.0) <= 12.0
-    ]
-    if mkt_status != "DATA UNAVAILABLE" and (pending_breaks or reclaimed_zs):
+    bo_watch = sr.get("breakout_watch") or build_snr_breakout_watch(ranked, price_action=sr.get("price_action"))
+    bo_confirmed = list(bo_watch.get("confirmed") or [])
+    bo_retest = list(bo_watch.get("retest_watch") or [])
+    bo_pending = list(bo_watch.get("pending") or [])
+    bo_broken = list(bo_watch.get("broken") or [])
+
+    far_ref_zs = []
+    _seen_far = set()
+    for hz in list(ranked.get("far_reference_zones") or []) + list(ranked.get("historical_zones") or []):
+        if not isinstance(hz, dict):
+            continue
+        f_key = hz.get("zone_id") or (hz.get("timeframe"), hz.get("zone_type"), round(safe_float(hz.get("low")), 2), round(safe_float(hz.get("high")), 2))
+        if f_key in _seen_far:
+            continue
+        _seen_far.add(f_key)
+        far_ref_zs.append(hz)
+
+    if mkt_status != "DATA UNAVAILABLE" and (bo_confirmed or bo_retest or bo_pending or bo_broken):
         lines.extend([
             "",
             "----------------------------------------------------",
-            "BREAKOUT / BREAKDOWN & RECLAIM WATCH",
+            "BROKEN / INVALID & BREAKOUT WATCH (NON-ACTIVE)",
             "----------------------------------------------------",
         ])
-        for pz in pending_breaks[:2]:
-            p_zt = str(pz.get("zone_type", "")).upper()
-            p_tag = "POTENTIAL BREAKDOWN" if p_zt == "SUPPORT" else "POTENTIAL BREAKOUT"
-            p_bo = pz.get("m5_breakout_info") or pz.get("breakout_info") or {}
-            p_ts = str(p_bo.get("breakout_bar_time") or "").strip()
-            ts_note = f" @ {p_ts}" if p_ts else ""
+        for cw in bo_confirmed[:2]:
+            ts_note = f" @ {cw['event_time']}" if cw.get("event_time") else ""
             lines.append(
-                f"• {p_tag} : {pz.get('timeframe', '')} {p_zt} "
-                f"{safe_float(pz.get('low')):.2f}-{safe_float(pz.get('high')):.2f}{ts_note} (tidak dipromosikan sebagai S/R aktif)"
+                f"• {cw['label']} : {cw['timeframe']} {cw['zone_type']} "
+                f"{cw['low']:.2f}-{cw['high']:.2f}{ts_note} (closed candle terkonfirmasi)"
             )
-        for rz_rec in reclaimed_zs[:2]:
-            r_st = str(rz_rec.get("lifecycle_status", "RECLAIMED")).upper()
-            r_zt = str(rz_rec.get("zone_type", "")).upper()
-            r_dir = "AFTER BREAKDOWN" if r_zt == "SUPPORT" else "AFTER BREAKOUT"
+        for rw in bo_retest[:2]:
+            ts_note = f" @ {rw['event_time']}" if rw.get("event_time") else ""
             lines.append(
-                f"• {r_st} ({r_dir}) : {rz_rec.get('timeframe', '')} {r_zt} "
-                f"{safe_float(rz_rec.get('low')):.2f}-{safe_float(rz_rec.get('high')):.2f} (zona gagal sebelumnya; non-aktif)"
+                f"• {rw['label']} : {rw['timeframe']} {rw['zone_type']} "
+                f"{rw['low']:.2f}-{rw['high']:.2f}{ts_note} (pantau retest flip pasca-break)"
+            )
+        for pw in bo_pending[:2]:
+            ts_note = f" @ {pw['event_time']}" if pw.get("event_time") else ""
+            lines.append(
+                f"• {pw['label']} : {pw['timeframe']} {pw['zone_type']} "
+                f"{pw['low']:.2f}-{pw['high']:.2f}{ts_note} (menunggu close TF asal)"
+            )
+        seen_brk = set()
+        shown_brk = 0
+        for bw in bo_broken:
+            b_key = (bw["timeframe"], bw["zone_type"], round(bw["low"], 2), round(bw["high"], 2))
+            if b_key in seen_brk:
+                continue
+            seen_brk.add(b_key)
+            lines.append(
+                f"• INVALID — {bw['label']} : {bw['timeframe']} {bw['zone_type']} "
+                f"{bw['low']:.2f}-{bw['high']:.2f} (keluar dari zona aktif)"
+            )
+            shown_brk += 1
+            if shown_brk >= 3:
+                break
+
+    if mkt_status != "DATA UNAVAILABLE" and far_ref_zs:
+        lines.extend([
+            "",
+            "----------------------------------------------------",
+            "FAR REFERENCE ZONES (REFERENCE ONLY)",
+            "----------------------------------------------------",
+        ])
+        from modules.utils import format_price_distance, extract_unit_spec_from_container
+        _u_sum = extract_unit_spec_from_container(sr)
+        for hz in far_ref_zs[:3]:
+            h_zt = str(hz.get("zone_type", "")).upper()
+            h_dist = safe_float(hz.get("distance_points"), 0.0)
+            lines.append(
+                f"• FAR REFERENCE {h_zt} : {hz.get('timeframe', '')} "
+                f"{safe_float(hz.get('low')):.2f}-{safe_float(hz.get('high')):.2f} "
+                f"(Grade {hz.get('grade', 'D')} | Dist {format_price_distance(h_dist, spec=_u_sum, include_mt5_points=True)})"
             )
 
     sig_final = dec.get("signal", "WAIT")
@@ -432,11 +496,60 @@ def format_snr_summary(scan_result, decision=None):
     ])
     if dir_final not in ("NONE", "N/A"):
         lines.append(f"DIRECTION  : {dir_final}")
-    if focus_lbl and focus_lbl != "N/A":
-        lines.append(f"FOCUS      : {focus_lbl}")
-    if plan_line:
+    target_is_far = bool(target_z and _is_snr_far_zone(target_z) and sig_final not in ("BUY", "SELL"))
+    if target_z and not target_is_far and focus_lbl and focus_lbl != "N/A":
+        lines.append(f"ACTIVE FOCUS: {focus_lbl}")
+    else:
+        lines.append("ACTIVE FOCUS: NONE | WAIT")
+        far_ref_z = target_z if target_is_far else (ev.get("far_reference_zone") or (far_ref_zs[0] if far_ref_zs else None))
+        if isinstance(far_ref_z, dict):
+            from modules.utils import format_price_distance, extract_unit_spec_from_container
+            _u_far = extract_unit_spec_from_container(sr)
+            f_lo = safe_float(far_ref_z.get("low"), 0.0)
+            f_hi = safe_float(far_ref_z.get("high"), 0.0)
+            f_dist = safe_float(far_ref_z.get("distance_points"), 0.0)
+            f_atr = safe_float(far_ref_z.get("distance_atr"), 0.0)
+            f_lbl = far_ref_z.get("rank_label") or far_ref_z.get("zone_type") or "SNR"
+            lines.append(
+                f"FAR ZONE    : FAR ZONE / REFERENCE ONLY — {far_ref_z.get('timeframe', '')} {f_lbl} "
+                f"{f_lo:.2f}-{f_hi:.2f} ({format_price_distance(f_dist, spec=_u_far, include_mt5_points=True)} / {f_atr:.1f}x ATR)".replace("  ", " ")
+            )
+    if plan_line and not target_is_far:
         lines.append(f"PLAN       : {plan_line}")
     lines.append(f"REASON     : {reason_final}")
+
+    mt5_recon = sr.get("mt5_reconciliation")
+    mt5_snap = sr.get("mt5_orders_snapshot")
+    inv_ord_warns = sr.get("invalid_pending_warnings") or []
+    if isinstance(mt5_recon, dict) or isinstance(mt5_snap, dict) or inv_ord_warns:
+        lines.extend([
+            "",
+            "----------------------------------------------------",
+            "MT5 ORDER SYNC (READ-ONLY)",
+            "----------------------------------------------------",
+        ])
+        if isinstance(mt5_recon, dict):
+            lines.append(f"PENDING    : {mt5_recon.get('compact_status') or mt5_recon.get('display_status') or 'UNKNOWN'}")
+            if detailed or mt5_recon.get("is_placed"):
+                lines.append(f"EVIDENCE   : {mt5_recon.get('evidence_summary') or 'N/A'}")
+        if isinstance(mt5_snap, dict):
+            try:
+                from modules.mt5_conn import format_mt5_orders_summary_lines
+                m_recons = [mt5_recon] if isinstance(mt5_recon, dict) else None
+                for ln in format_mt5_orders_summary_lines(
+                    mt5_snap,
+                    invalid_zone_warnings=inv_ord_warns,
+                    matched_recons=m_recons,
+                    detailed=detailed,
+                    invalid_zone_scope="SNR",
+                ):
+                    lines.append(ln)
+            except Exception:
+                if inv_ord_warns:
+                    lines.append(f"- RISK: {len(inv_ord_warns)} Pending on INVALID Zone [SNR] [HIGH RISK]")
+        elif inv_ord_warns:
+            lines.append(f"- RISK: {len(inv_ord_warns)} Pending on INVALID Zone [SNR] [HIGH RISK]")
+
     lines.extend([
         "",
         "====================================================",
@@ -473,7 +586,7 @@ def format_snr_detail(scan_result, decision=None):
     inv_zones = ranked.get("invalidated_zones") or []
 
     lines = [
-        format_snr_summary(sr, dec),
+        format_snr_summary(sr, dec, detailed=True),
         "",
         "====================================================",
         "       XAUUSD SNR ADVANCED — FULL AUDIT DETAIL",
@@ -481,14 +594,18 @@ def format_snr_detail(scan_result, decision=None):
     ]
 
     # 1. Market Overview
+    from modules.utils import format_price_distance, extract_unit_spec_from_container
+    _u_det = extract_unit_spec_from_container(sr)
+    _d_det = _u_det["digits"]
+    _sp_det_txt = format_price_distance(safe_float(sr.get('spread')), spec=_u_det, include_mt5_points=True)
     lines.extend([
         "",
         "[1. MARKET OVERVIEW]",
         f"  • Symbol        : {sr.get('symbol', 'XAUUSD')}",
         f"  • Market Status : {sr.get('market_status', 'OPEN')} (Data Source: {sr.get('data_source', 'SNAPSHOT')})",
-        f"  • Last Price    : {safe_float(sr.get('last_price', sr.get('price'))):.2f} (Ask: {safe_float(sr.get('ask')):.2f}, Spread: {safe_float(sr.get('spread')):.2f})",
+        f"  • Last Price    : {safe_float(sr.get('last_price', sr.get('price'))):.{_d_det}f} (Ask: {safe_float(sr.get('ask')):.{_d_det}f}, Spread: {_sp_det_txt})",
         f"  • Last Candle   : {sr.get('last_candle', sr.get('server_time', 'N/A'))} ({sr.get('time_label', 'N/A')})",
-        f"  • Broker Spec   : Digits={spec.get('digits', 2)}, TickSize={spec.get('tick_size', 0.01)}, TickValue={spec.get('tick_value', 1.0)}, Source={spec.get('source', 'N/A')}",
+        f"  • Broker Spec   : Digits={_u_det['digits']}, Point={_u_det['point']:g}, TickSize={_u_det['trade_tick_size']:g}, TickValue={spec.get('tick_value', 1.0)}, Source={spec.get('source', _u_det['source'])}",
     ])
 
     # 2. ATR Diagnostics
@@ -599,7 +716,7 @@ def format_snr_detail(scan_result, decision=None):
     bo_detail = pa.get("breakout_detail") or {}
     lines.append(f"  • Summary Status : {pa.get('breakout_summary', 'NOT CONFIRMED')} ({bo_detail.get('status', 'NO_BREAKOUT')} | Type={bo_detail.get('break_type', pa.get('break_type', 'NONE'))})")
     lines.append(f"  • Reclaim / Fail : ReclaimDetected={bool(bo_detail.get('reclaim_detected', False))} | ZoneFailed={bool(bo_detail.get('zone_failed', False))}")
-    lines.append(f"  • Penetration    : {bo_detail.get('penetration_points', 0):.2f} pts ({bo_detail.get('penetration_atr', 0):.2f} ATR)")
+    lines.append(f"  • Penetration    : {format_price_distance(safe_float(bo_detail.get('penetration_points', 0)), spec=_u_det, include_mt5_points=True)} ({bo_detail.get('penetration_atr', 0):.2f} ATR)")
     lines.append(f"  • Body & Mom     : Body={bo_detail.get('body_atr', 0):.2f} ATR | MomSupported={bo_detail.get('momentum_supported', False)} | Vol={bo_detail.get('volume_supported', 'N/A')}")
     lines.append(f"  • Reason         : {bo_detail.get('reason', 'N/A')}")
 
@@ -734,7 +851,10 @@ def format_snr_detail(scan_result, decision=None):
     if rr_calc.get("checked"):
         lines.append(f"  • Effective Entry         : {rr_calc.get('effective_entry', 'N/A')}")
         lines.append(f"  • Structural Invalidation : {rr_calc.get('structural_invalidation', 'N/A')}")
-        lines.append(f"  • Volatility Buffer       : {rr_calc.get('volatility_buffer', 'N/A')} (Spread={rr_calc.get('spread_points', 0)})")
+        _vb_val = rr_calc.get("volatility_buffer")
+        _vb_txt = format_price_distance(safe_float(_vb_val), spec=_u_det, include_mt5_points=True) if isinstance(_vb_val, (int, float)) else "N/A"
+        _sp_rr_txt = format_price_distance(safe_float(rr_calc.get("spread_points", 0)), spec=_u_det, include_mt5_points=True)
+        lines.append(f"  • Volatility Buffer       : {_vb_txt} (Spread={_sp_rr_txt})")
         lines.append(f"  • Stop Loss (SL)          : {rr_calc.get('sl', 'N/A')}")
         lines.append(f"  • Take Profit (TP1 / TP2) : {rr_calc.get('tp1', 'N/A')} / {rr_calc.get('tp2', 'N/A')}")
     else:

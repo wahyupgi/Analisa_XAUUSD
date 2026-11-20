@@ -184,14 +184,24 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
 
     is_live_open = mkt_status == "OPEN"
     has_pot_breakdown = is_live_open and (
-        bool(pa.get("potential_breakdown"))
-        or (bo_state in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION") and bo_dir == "BEARISH")
-        or any(str(z.get("lifecycle_status", "")).upper() == "BREAKDOWN_PENDING" for z in pending_breaks)
+        (bool(pa.get("potential_breakdown")) and bo_state != "VALID_BREAKOUT")
+        or (bo_state == "BREAKOUT_PENDING_CONFIRMATION" and bo_dir == "BEARISH" and not bo_is_hist)
+        or any(
+            str(z.get("lifecycle_status", "")).upper() == "BREAKDOWN_PENDING"
+            and not z.get("is_broken")
+            and not z.get("is_invalidated")
+            for z in pending_breaks
+        )
     )
     has_pot_breakout = is_live_open and (
-        bool(pa.get("potential_breakout"))
-        or (bo_state in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION") and bo_dir == "BULLISH")
-        or any(str(z.get("lifecycle_status", "")).upper() == "BREAKOUT_PENDING" for z in pending_breaks)
+        (bool(pa.get("potential_breakout")) and bo_state != "VALID_BREAKOUT")
+        or (bo_state == "BREAKOUT_PENDING_CONFIRMATION" and bo_dir == "BULLISH" and not bo_is_hist)
+        or any(
+            str(z.get("lifecycle_status", "")).upper() == "BREAKOUT_PENDING"
+            and not z.get("is_broken")
+            and not z.get("is_invalidated")
+            for z in pending_breaks
+        )
     )
     reclaimed_zones = (ranked_zones or {}).get("reclaimed_zones") or []
     zone_meta_map = {}

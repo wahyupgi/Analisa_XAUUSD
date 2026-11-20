@@ -94,6 +94,9 @@ def format_snr_monitor_section(cycle_result, detailed=False):
 
     lines.extend(format_snr_lifecycle_status(sr, dec))
 
+    from modules.utils import extract_unit_spec_from_container, format_price_distance
+    u_spec = extract_unit_spec_from_container(sr)
+
     if active_sups:
         lines.append("ACTIVE SUPPORT  :")
         for sz in active_sups[:2]:
@@ -106,7 +109,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
             lines.append(
                 f"  • {lbl} : {safe_float(sz.get('low')):.2f} - {safe_float(sz.get('high')):.2f} "
                 f"| Grade {sz.get('grade', 'D')} (Score {safe_float(sz.get('score')):.2f} - {sz.get('strength_short', 'MODERATE')}) "
-                f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {dist:.2f} pts"
+                f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {format_price_distance(dist, spec=u_spec, include_mt5_points=True)}"
             )
     else:
         lines.append("ACTIVE SUPPORT  : N/A (Tidak ada support aktif)")
@@ -123,7 +126,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
             lines.append(
                 f"  • {lbl} : {safe_float(rz.get('low')):.2f} - {safe_float(rz.get('high')):.2f} "
                 f"| Grade {rz.get('grade', 'D')} (Score {safe_float(rz.get('score')):.2f} - {rz.get('strength_short', 'MODERATE')}) "
-                f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {dist:.2f} pts"
+                f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {format_price_distance(dist, spec=u_spec, include_mt5_points=True)}"
             )
     else:
         lines.append("ACTIVE RESIST.  : N/A (Tidak ada resistance aktif)")

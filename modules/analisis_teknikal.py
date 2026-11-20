@@ -475,13 +475,13 @@ def deteksi_institusi_dan_ranging(df, atr):
     if naik_kuat or (ledakan_1candle and arah6[-1] > 0):
         hasil.append(
             f"🚨 PERINGATAN LONJAKAN MOMENTUM (TICK-VOLUME, BUKAN DATA INSTITUSI) (ONE-WAY BULLISH IMPULSE AKTIF)! "
-            f"(Volume {np.max(vol_ratio[-5:]):.1f}x rata-rata, rentang gerak {H[-5:].max() - L[-5:].min():.1f} poin). "
+            f"(Volume {np.max(vol_ratio[-5:]):.1f}x rata-rata, rentang gerak {H[-5:].max() - L[-5:].min():.2f} USD). "
             f"Zona Supply kecil berisiko JEBOL TERUS! DILARANG SELL lawan arah sebelum terbentuk Sideways + CHoCH turun!"
         )
     elif turun_kuat or (ledakan_1candle and arah6[-1] < 0):
         hasil.append(
             f"🚨 PERINGATAN LONJAKAN MOMENTUM (TICK-VOLUME, BUKAN DATA INSTITUSI) (ONE-WAY BEARISH IMPULSE AKTIF)! "
-            f"(Volume {np.max(vol_ratio[-5:]):.1f}x rata-rata, rentang gerak {H[-5:].max() - L[-5:].min():.1f} poin). "
+            f"(Volume {np.max(vol_ratio[-5:]):.1f}x rata-rata, rentang gerak {H[-5:].max() - L[-5:].min():.2f} USD). "
             f"Zona Demand kecil berisiko JEBOL TERUS! DILARANG BUY lawan arah (tangkap pisau jatuh) sebelum terbentuk Sideways + CHoCH naik!"
         )
     else:

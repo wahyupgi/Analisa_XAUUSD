@@ -3,6 +3,7 @@
 modules/utils.py
 Fungsi helper umum: penanganan error, notifikasi suara, kalkulasi jarak zona, dan offset UTC/DST.
 """
+import math
 import os
 import queue
 import threading
@@ -15,7 +16,8 @@ except ImportError:
     winsound = None
 
 import pandas as pd
-from typing import Optional, Any
+from typing import Optional, Any, Dict
+import modules.config as _app_config
 from modules.config import FILE_ERROR_LOG, SYMBOL, APP_VERSION, API_KEY
 
 WIB_TZ = timezone(timedelta(hours=7))
@@ -123,16 +125,275 @@ def wkt(t):
     return t.strftime("%m-%d %H:%M")
 
 
-def jarak_zona(lo, hi, harga):
-    if lo <= harga <= hi:
+# =============================================================================
+# HELPER TERPUSAT SPESIFIKASI SIMBOL MT5 & KONVERSI SATUAN JARAK (XAUUSD)
+# =============================================================================
+# Membedakan secara tegas:
+# 1. Price Distance (USD/oz) : abs(harga_zona_terdekat - harga_saat_ini), 0 jika di dalam zona
+# 2. MT5 Points              : Price Distance / symbol.point
+# 3. Pips                    : Price Distance / PIP_SIZE_PRICE (HANYA bila dikonfigurasi eksplisit)
+
+def _safe_pos_float(val: Any) -> Optional[float]:
+    try:
+        f = float(val)
+        return f if (math.isfinite(f) and f > 0.0) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _configured_pip_size(pip_size: Optional[float] = None) -> Optional[float]:
+    raw = pip_size if pip_size is not None else getattr(_app_config, "PIP_SIZE_PRICE", None)
+    return _safe_pos_float(raw)
+
+
+def get_symbol_unit_spec(
+    symbol: Optional[str] = None,
+    sym_info: Any = None,
+    spec: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Mengambil `digits`, `point`, dan `trade_tick_size` langsung dari `mt5.symbol_info()`
+    secara terpusat tanpa hardcode (fallback minimal hanya saat MT5 tidak tersedia/offline).
+    """
+    target_sym = str(symbol or SYMBOL or "XAUUSDc").strip() or SYMBOL
+    pip_size = _configured_pip_size()
+
+    if isinstance(spec, dict):
+        sp_d = spec.get("digits")
+        sp_p = _safe_pos_float(spec.get("point"))
+        sp_ts = _safe_pos_float(spec.get("trade_tick_size", spec.get("tick_size")))
+        if sp_d is not None and sp_p is not None and sp_ts is not None:
+            d_int = max(0, min(8, int(sp_d)))
+            return {
+                "symbol": str(spec.get("symbol") or target_sym),
+                "digits": d_int,
+                "point": sp_p,
+                "trade_tick_size": sp_ts,
+                "tick_size": sp_ts,
+                "tick_size_verified": bool(spec.get("tick_size_verified", spec.get("source") == "MT5_SYMBOL_INFO")),
+                "trade_tick_value": _safe_pos_float(spec.get("trade_tick_value", spec.get("tick_value"))),
+                "trade_contract_size": _safe_pos_float(spec.get("trade_contract_size", spec.get("contract_size"))),
+                "trade_stops_level": spec.get("trade_stops_level"),
+                "trade_freeze_level": spec.get("trade_freeze_level"),
+                "spread_mt5_points": _safe_pos_float(spec.get("spread_mt5_points")),
+                "pip_size": _configured_pip_size(spec.get("pip_size")),
+                "source": str(spec.get("source") or "SNAPSHOT_SPEC"),
+            }
+
+    info = sym_info
+    if info is None:
+        try:
+            import MetaTrader5 as mt5
+            info = mt5.symbol_info(target_sym)
+            if info is None and target_sym != SYMBOL:
+                info = mt5.symbol_info(SYMBOL)
+        except Exception:
+            info = None
+
+    digits: Optional[int] = None
+    point: Optional[float] = None
+    tick_size: Optional[float] = None
+    tick_value: Optional[float] = None
+    contract_size: Optional[float] = None
+    stops_level: Optional[int] = None
+    freeze_level: Optional[int] = None
+    spread_mt5_pts: Optional[float] = None
+    tick_size_verified = False
+    source = "FALLBACK"
+
+    if info is not None:
+        d_raw = getattr(info, "digits", None)
+        if d_raw is not None:
+            try:
+                d_cand = int(d_raw)
+                if d_cand >= 0:
+                    digits = max(0, min(8, d_cand))
+            except (TypeError, ValueError):
+                pass
+        point = _safe_pos_float(getattr(info, "point", None))
+        tick_size = _safe_pos_float(getattr(info, "trade_tick_size", None))
+        if tick_size is not None:
+            tick_size_verified = True
+        tick_value = _safe_pos_float(getattr(info, "trade_tick_value", None))
+        contract_size = _safe_pos_float(getattr(info, "trade_contract_size", None))
+        raw_stops = getattr(info, "trade_stops_level", None)
+        if raw_stops is not None:
+            try:
+                if int(raw_stops) >= 0:
+                    stops_level = int(raw_stops)
+            except (TypeError, ValueError):
+                pass
+        raw_freeze = getattr(info, "trade_freeze_level", None)
+        if raw_freeze is not None:
+            try:
+                if int(raw_freeze) >= 0:
+                    freeze_level = int(raw_freeze)
+            except (TypeError, ValueError):
+                pass
+        spread_mt5_pts = _safe_pos_float(getattr(info, "spread", None))
+        if digits is not None or point is not None or tick_size is not None:
+            source = "MT5_SYMBOL_INFO"
+
+    if digits is None:
+        if point is not None and point > 0:
+            digits = max(0, min(8, -int(math.floor(math.log10(point) + 1e-9))))
+        else:
+            digits = 2
+    if point is None:
+        point = round(10.0 ** (-digits), max(digits, 6))
+    if tick_size is None:
+        tick_size = point
+
+    return {
+        "symbol": target_sym,
+        "digits": digits,
+        "point": point,
+        "trade_tick_size": tick_size,
+        "tick_size": tick_size,
+        "tick_size_verified": tick_size_verified,
+        "trade_tick_value": tick_value,
+        "trade_contract_size": contract_size,
+        "trade_stops_level": stops_level,
+        "trade_freeze_level": freeze_level,
+        "spread_mt5_points": spread_mt5_pts,
+        "pip_size": pip_size,
+        "source": source,
+    }
+
+
+def extract_unit_spec_from_container(container: Any = None, symbol: Optional[str] = None) -> Dict[str, Any]:
+    """Ambil unit spec dari dict scan/snapshot/symbol_spec jika sudah ada, atau langsung dari mt5.symbol_info()."""
+    sym = symbol
+    if isinstance(container, dict):
+        sym = container.get("symbol") or sym
+        for sub_key in ("symbol_spec", "unit_spec", "snapshot"):
+            sub = container.get(sub_key)
+            if isinstance(sub, dict):
+                if sub.get("digits") is not None and _safe_pos_float(sub.get("point")) is not None:
+                    return get_symbol_unit_spec(symbol=sym, spec=sub)
+        if container.get("digits") is not None and _safe_pos_float(container.get("point")) is not None:
+            return get_symbol_unit_spec(symbol=sym, spec=container)
+    return get_symbol_unit_spec(symbol=sym)
+
+
+def calc_price_distance(zone_low: float, zone_high: float, current_price: float) -> float:
+    """
+    Price Distance (USD/oz) = abs(harga zona terdekat - harga saat ini), atau 0.0 jika harga berada dalam zona.
+    """
+    lo = float(zone_low)
+    hi = float(zone_high)
+    cp = float(current_price)
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo <= cp <= hi:
+        return 0.0
+    return abs(lo - cp) if cp < lo else abs(cp - hi)
+
+
+def price_distance_to_mt5_points(
+    price_distance: float,
+    point: Optional[float] = None,
+    symbol: Optional[str] = None,
+    sym_info: Any = None,
+    spec: Optional[Dict[str, Any]] = None,
+) -> float:
+    """MT5 Points = Price Distance / symbol.point."""
+    p_val = _safe_pos_float(point)
+    if p_val is None:
+        p_val = get_symbol_unit_spec(symbol=symbol, sym_info=sym_info, spec=spec)["point"]
+    raw = float(price_distance) / p_val
+    rounded_int = round(raw)
+    if abs(raw - rounded_int) < 1e-6:
+        return int(rounded_int)
+    return round(raw, 2)
+
+
+def mt5_points_to_price_distance(
+    mt5_points: float,
+    point: Optional[float] = None,
+    symbol: Optional[str] = None,
+    sym_info: Any = None,
+    spec: Optional[Dict[str, Any]] = None,
+) -> float:
+    """Price Distance (USD/oz) = MT5 Points * symbol.point."""
+    u_spec = get_symbol_unit_spec(symbol=symbol, sym_info=sym_info, spec=spec)
+    p_val = _safe_pos_float(point) or u_spec["point"]
+    return round(float(mt5_points) * p_val, max(2, int(u_spec["digits"])))
+
+
+def price_distance_to_pips(
+    price_distance: float,
+    pip_size: Optional[float] = None,
+) -> Optional[float]:
+    """Konversi Price Distance ke Pips HANYA bila konvensi `PIP_SIZE_PRICE` dikonfigurasi secara eksplisit."""
+    ps = _configured_pip_size(pip_size)
+    if ps is None:
+        return None
+    raw = float(price_distance) / ps
+    rounded_int = round(raw)
+    if abs(raw - rounded_int) < 1e-6:
+        return float(rounded_int)
+    return round(raw, 2)
+
+
+def format_mt5_points(mt5_pts: float, signed: bool = False) -> str:
+    """Format nilai MT5 Points secara rapi (bulat jika eksak, 1-2 desimal jika pecahan)."""
+    val = float(mt5_pts)
+    if abs(val - round(val)) < 1e-6:
+        iv = int(round(val))
+        return f"{iv:+d} MT5 pts" if signed else f"{iv} MT5 pts"
+    return f"{val:+.2f} MT5 pts" if signed else f"{val:.2f} MT5 pts"
+
+
+def format_price_distance(
+    price_distance: float,
+    symbol: Optional[str] = None,
+    sym_info: Any = None,
+    spec: Optional[Dict[str, Any]] = None,
+    include_mt5_points: bool = False,
+    include_pips: bool = False,
+    signed: bool = False,
+    digits: Optional[int] = None,
+    unit_label: str = "USD",
+) -> str:
+    """
+    Memformat Price Distance (USD/oz) secara konsisten sesuai `digits` dan `point` dari `mt5.symbol_info()`.
+    - Default: `5.25 USD`
+    - Dengan `include_mt5_points=True`: `5.25 USD (525 MT5 pts)`
+    - Pips hanya ditampilkan jika `include_pips=True` DAN `PIP_SIZE_PRICE` dikonfigurasi secara eksplisit.
+    """
+    u_spec = get_symbol_unit_spec(symbol=symbol, sym_info=sym_info, spec=spec)
+    d = max(0, min(8, int(digits))) if digits is not None else int(u_spec["digits"])
+    val = float(price_distance)
+    base = f"{val:+.{d}f} {unit_label}" if signed else f"{val:.{d}f} {unit_label}"
+    extras = []
+    if include_mt5_points:
+        pts_val = price_distance_to_mt5_points(val, spec=u_spec)
+        extras.append(format_mt5_points(pts_val, signed=signed))
+    if include_pips:
+        pips_val = price_distance_to_pips(val, pip_size=u_spec.get("pip_size"))
+        if pips_val is not None:
+            if abs(pips_val - round(pips_val)) < 1e-6:
+                extras.append(f"{int(round(pips_val)):+d} pips" if signed else f"{int(round(pips_val))} pips")
+            else:
+                extras.append(f"{pips_val:+.1f} pips" if signed else f"{pips_val:.1f} pips")
+    if extras:
+        return f"{base} ({' | '.join(extras)})"
+    return base
+
+
+def jarak_zona(lo, hi, harga, symbol=None, spec=None):
+    dist = calc_price_distance(lo, hi, harga)
+    if dist == 0.0:
         return "HARGA DI DALAM ZONA"
-    if lo > harga:
-        return f"{lo - harga:.1f} di atas harga"
-    return f"{harga - hi:.1f} di bawah harga"
+    dist_txt = format_price_distance(dist, symbol=symbol, spec=spec, include_mt5_points=True)
+    if float(lo) > float(harga):
+        return f"{dist_txt} di atas harga"
+    return f"{dist_txt} di bawah harga"
 
 
 def selisih_zona(z, harga):
-    return 0 if z["lo"] <= harga <= z["hi"] else min(abs(z["lo"] - harga), abs(z["hi"] - harga))
+    return calc_price_distance(z["lo"], z["hi"], harga)
 
 
 def us_dst(dt):
@@ -232,12 +493,15 @@ def format_startup_presentation(
     # 3. Market Overview
     out.append("3. MARKET OVERVIEW")
     if has_tick:
+        u_spec = get_symbol_unit_spec(symbol=symbol)
+        d_px = u_spec["digits"]
         bid_p = float(tick.bid)
         ask_p = float(tick.ask)
-        spread_pt = abs(ask_p - bid_p)
+        spread_usd = abs(ask_p - bid_p)
+        spread_str = format_price_distance(spread_usd, spec=u_spec, include_mt5_points=True)
         t_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WIB")
-        out.append(f"• Simbol               : {symbol}")
-        out.append(f"• Harga Terkini        : Bid {bid_p:.2f} | Ask {ask_p:.2f} (Spread: {spread_pt:.2f} pt)")
+        out.append(f"• Simbol               : {symbol} (Digits: {d_px} | Point: {u_spec['point']:g} | TickSize: {u_spec['trade_tick_size']:g})")
+        out.append(f"• Harga Terkini        : Bid {bid_p:.{d_px}f} | Ask {ask_p:.{d_px}f} (Spread: {spread_str})")
         out.append(f"• Waktu Update         : {t_str}")
     else:
         out.append(f"• Simbol               : {symbol}")

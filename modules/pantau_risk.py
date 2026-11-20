@@ -14,6 +14,11 @@ import MetaTrader5 as mt5
 
 from modules.config import SYMBOL
 from modules.mt5_conn import _info_tipe_pending
+from modules.utils import (
+    get_symbol_unit_spec,
+    price_distance_to_mt5_points,
+    mt5_points_to_price_distance,
+)
 
 
 def audit_position_profit(
@@ -270,13 +275,14 @@ def build_profit_protection_suggestion(pos, tick, sym_info=None, acc_info=None):
     if sym_info is None or tick is None or entry <= 0 or bid <= 0 or ask <= 0:
         return _unavail("PROFIT_PROTECTION_UNAVAILABLE")
 
-    digits = int(getattr(sym_info, "digits", 2) or 2)
-    point = float(getattr(sym_info, "point", 0.01) or 0.01)
-    tick_size = float(getattr(sym_info, "trade_tick_size", point) or point)
-    tick_value = float(getattr(sym_info, "trade_tick_value", 0.0) or 0.0)
-    contract_size = float(getattr(sym_info, "trade_contract_size", 100.0) or 100.0)
-    stops_level_pts = float(getattr(sym_info, "trade_stops_level", 0) or 0) * point
-    freeze_level_pts = float(getattr(sym_info, "trade_freeze_level", 0) or 0) * point
+    u_spec = get_symbol_unit_spec(symbol=getattr(pos, "symbol", SYMBOL), sym_info=sym_info)
+    digits = u_spec["digits"]
+    point = u_spec["point"]
+    tick_size = u_spec["trade_tick_size"]
+    tick_value = float(u_spec["trade_tick_value"] or 0.0)
+    contract_size = float(u_spec["trade_contract_size"] or 100.0)
+    stops_level_pts = mt5_points_to_price_distance(u_spec["trade_stops_level"] or 0, spec=u_spec)
+    freeze_level_pts = mt5_points_to_price_distance(u_spec["trade_freeze_level"] or 0, spec=u_spec)
     spread = max(0.0, ask - bid)
     acc_cur = str(getattr(acc_info, "currency", "") or "").strip().upper()
 
@@ -328,7 +334,7 @@ def build_profit_protection_suggestion(pos, tick, sym_info=None, acc_info=None):
             est_gross_money = gross_pts * contract_size * vol
         est_net_profit = round(est_gross_money + swap + comm, 2)
 
-    basis_str = f"spread({spread:.{digits}f}) + cost_pts({cost_pts:.{digits}f}) + tick_size({tick_size:.{digits}f})"
+    basis_str = f"spread({spread:.{digits}f} USD) + cost({cost_pts:.{digits}f} USD) + tick_size({tick_size:.{digits}f} USD)"
     return {
         "allowed": True,
         "status": "AVAILABLE",
@@ -339,10 +345,17 @@ def build_profit_protection_suggestion(pos, tick, sym_info=None, acc_info=None):
         "current_ask": ask,
         "suggested_sl": raw_sl,
         "gross_profit_locked_pts": round(gross_pts, digits),
+        "gross_profit_locked_usd": round(gross_pts, digits),
+        "gross_profit_locked_mt5_points": price_distance_to_mt5_points(gross_pts, spec=u_spec),
         "estimated_net_profit": est_net_profit,
         "currency": acc_cur or None,
         "buffer_pts": round(gross_pts, digits),
+        "buffer_usd": round(gross_pts, digits),
+        "buffer_mt5_points": price_distance_to_mt5_points(gross_pts, spec=u_spec),
         "cost_buffer_pts": round(buffer_pts, digits),
+        "digits": digits,
+        "point": point,
+        "trade_tick_size": tick_size,
         "calculation_basis": basis_str,
         "reason": "VALID_BROKER_CONSTRAINTS",
         "disclaimer": (
@@ -385,6 +398,9 @@ def audit_pending_orders(orders, tick, radar_zones=None, sym_info=None):
         if sl_o <= 0:
             structural_sl = resolve_structural_sl_recommendation(arah_o, p_open, radar_zones=radar_zones)
 
+        u_spec_o = get_symbol_unit_spec(symbol=str(getattr(o, "symbol", SYMBOL) or SYMBOL), sym_info=sym_info)
+        d_o = u_spec_o["digits"]
+        dist_usd = round(dist_o, d_o)
         results.append({
             "ticket": getattr(o, "ticket", None),
             "symbol": str(getattr(o, "symbol", SYMBOL) or SYMBOL),
@@ -394,7 +410,12 @@ def audit_pending_orders(orders, tick, radar_zones=None, sym_info=None):
             "entry_price": p_open,
             "sl": sl_o,
             "tp": tp_o,
-            "distance_pt": round(dist_o, 2),
+            "distance_pt": dist_usd,
+            "distance_usd": dist_usd,
+            "distance_mt5_points": price_distance_to_mt5_points(dist_usd, spec=u_spec_o),
+            "digits": d_o,
+            "point": u_spec_o["point"],
+            "trade_tick_size": u_spec_o["trade_tick_size"],
             "price_validity": "VALID_PRICE" if price_valid else "PRICE_OUT_OF_RANGE",
             "status": "ACTIVE_PENDING",
             "structural_sl": structural_sl if structural_sl is not None else "STRUCTURAL_SL_UNAVAILABLE",

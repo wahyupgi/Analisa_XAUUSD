@@ -419,7 +419,9 @@ def main():
                     print_terminal(f"     (Anti Kentut)    {info_kentut_st['catatan']}")
                 mm_s = hitung_mm_sinyal(sig_t['lo'], sig_t['hi'], sig_t['sl'], sig_t['tp1'], sig_t.get('tp2', 0))
                 if mm_s:
-                    print_terminal(f"   • Rasio R:R      : TP1 1:{mm_s['rrr_tp1']:.1f} | TP2 1:{mm_s['rrr_tp2']:.1f} (Jarak SL: {mm_s['jarak_sl']:.2f} pt)")
+                    from modules.utils import format_price_distance
+                    sl_dist_txt = format_price_distance(mm_s['jarak_sl'], spec=mm_s, include_mt5_points=True, include_pips=True)
+                    print_terminal(f"   • Rasio R:R      : TP1 1:{mm_s['rrr_tp1']:.1f} | TP2 1:{mm_s['rrr_tp2']:.1f} (Jarak SL: {sl_dist_txt})")
                     if kat_t == "HIGH RISK":
                         print_terminal(f"   • Lot High Risk  : {mm_s.get('lot_025', mm_s['lot_05']):.2f} lot (Risiko mini 0.25%: -${mm_s.get('risk_025_usd', mm_s['risk_05_usd']):.2f}) [batas maksimum bila tetap diambil]")
                     print_terminal(f"   • Rekomendasi Lot: 0.5% (Konservatif): {mm_s['lot_05']:.2f} lot (-${mm_s['risk_05_usd']:.2f}) | 1.0% (Risiko Lebih Tinggi): {mm_s['lot_10']:.2f} lot (-${mm_s['risk_10_usd']:.2f})")

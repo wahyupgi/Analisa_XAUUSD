@@ -36,6 +36,10 @@ API_KEY = _muat_api_key()
 # Nama simbol bisa berbeda tiap broker (XAUUSD, XAUUSDc, XAUUSDm, GOLD, dll.)
 SYMBOL = "XAUUSDc"
 
+# Konvensi Pips opsional (Price Distance dalam USD/oz per 1 pip).
+# None = Pips tidak ditampilkan; isi nilai eksplisit (mis. 0.10) jika ingin menampilkan pips.
+PIP_SIZE_PRICE = None
+
 # Top-down: W1/D1/H4 (zona jauh ke kiri) -> H1 -> M30 (konfirmasi) -> M5 (entry presisi)
 TIMEFRAMES = {
     "W1": (mt5.TIMEFRAME_W1, 260),    # ~5 tahun
@@ -52,30 +56,42 @@ SWING_N = 3  # sebuah candle = swing jika High/Low-nya ekstrem dibanding N candl
 # None = deteksi otomatis dari tick MT5 (hanya akurat saat market buka).
 SERVER_UTC_OFFSET_JAM = None
 
-# --- Konfigurasi Multi-Tier SMC Zone Engine ---
+# --- Konfigurasi Multi-Tier SMC Zone Engine (satuan jarak internal: Price Distance USD/oz) ---
 MULTI_TIER_MAX_ZONES = 3              # Maksimal zona ditampilkan per kategori di Radar (default: 3)
 HIGH_RISK_MAX_ATR_RATIO = 6.0         # Batas maksimal rasio jarak/ATR untuk kategori High Risk (Aggressive)
-HIGH_RISK_MAX_DISTANCE_PT = 18.0      # Batas maksimal jarak poin untuk kategori High Risk
+HIGH_RISK_MAX_DISTANCE_PT = 18.0      # Batas maksimal Price Distance (USD/oz) untuk kategori High Risk
 HIGH_RISK_MIN_SCORE = 55.0            # Skor minimal kandidat High Risk (Grade B)
 MEDIUM_RISK_MAX_ATR_RATIO = 16.0      # Batas maksimal rasio jarak/ATR untuk kategori Medium Risk (Balanced)
-MEDIUM_RISK_MAX_DISTANCE_PT = 50.0    # Batas maksimal jarak poin untuk kategori Medium Risk
+MEDIUM_RISK_MAX_DISTANCE_PT = 50.0    # Batas maksimal Price Distance (USD/oz) untuk kategori Medium Risk
 MEDIUM_RISK_MIN_SCORE = 65.0          # Skor minimal kandidat Medium Risk
 LOW_RISK_MAX_ATR_RATIO = 25.0         # Batas maksimal rasio jarak/ATR untuk kategori Low Risk intraday wajar
-LOW_RISK_MAX_DISTANCE_PT = 75.0       # Batas maksimal jarak poin untuk kategori Low Risk intraday wajar
+LOW_RISK_MAX_DISTANCE_PT = 75.0       # Batas maksimal Price Distance (USD/oz) untuk kategori Low Risk intraday wajar
 LOW_RISK_MIN_SCORE = 75.0             # Skor minimal kandidat Low Risk (Grade A/A+)
 
-# --- Gerbang sinyal & kontrol risiko: ditegakkan oleh KODE (bukan hanya prompt AI) ---
+# Distance-Aware Zone Relevance Limits per Origin Timeframe (basis ATR14 H1 + floor/cap Price Distance USD/oz)
+# Format: TF -> (active_max_atr, radar_max_atr, active_min_usd, active_max_usd, radar_min_usd, radar_max_usd)
+ZONE_RELEVANCE_TF_LIMITS = {
+    "M5":  (1.8,  3.5,  3.5, 18.0,  7.0, 30.0),
+    "M15": (2.5,  5.0,  5.0, 25.0, 10.0, 40.0),
+    "M30": (3.2,  6.5,  6.5, 32.0, 13.0, 50.0),
+    "H1":  (4.0,  8.0,  8.0, 40.0, 16.0, 60.0),
+    "H4":  (4.5, 10.0, 10.0, 45.0, 20.0, 75.0),
+    "D1":  (4.5, 10.0, 10.0, 45.0, 20.0, 75.0),
+    "W1":  (4.5, 10.0, 10.0, 45.0, 20.0, 75.0),
+}
+
+# --- Gerbang sinyal & kontrol risiko: ditegakkan oleh KODE (satuan jarak internal: Price Distance USD/oz) ---
 RR_MIN = 1.5                       # R:R minimal ke TP1
-ENTRY_LEBAR_MAKS = 2.5             # lebar area entry maksimal (poin)
-ENTRY_JARAK_MAKS = 40.0            # jarak entry dari harga live maksimal (poin)
-SL_JARAK_MAKS = 20.0               # jarak SL maksimal dari entry (poin)
-SPREAD_MAKS_POIN = 1.0             # spread maksimal (poin) untuk sinyal baru
-SPREAD_MAKS_RASIO_ATR = 0.35       # ...dan maksimal sekian x ATR M5 (lantai 0.5 poin)
+ENTRY_LEBAR_MAKS = 2.5             # lebar area entry maksimal (Price Distance USD/oz)
+ENTRY_JARAK_MAKS = 40.0            # jarak entry dari harga live maksimal (Price Distance USD/oz)
+SL_JARAK_MAKS = 20.0               # jarak SL maksimal dari entry (Price Distance USD/oz)
+SPREAD_MAKS_POIN = 1.0             # spread maksimal (Price Distance USD/oz) untuk sinyal baru
+SPREAD_MAKS_RASIO_ATR = 0.35       # ...dan maksimal sekian x ATR M5 (lantai 0.5 USD/oz)
 SINYAL_TTL_BELUM_TERISI_JAM = 6    # sinyal yang belum terjemput melewati batas ini dianggap kedaluwarsa
 BERITA_BLACKOUT_MENIT = 15         # tidak menerbitkan sinyal baru +/- sekian menit dari berita High-impact USD
 MAKS_RISIKO_TERBUKA_PCT = 3.0      # total risiko posisi + pending (jarak ke SL x lot) terhadap equity
 MAKS_RUGI_HARIAN_PCT = 3.0         # batas rugi tertutup hari ini (hari server) terhadap saldo awal hari
-LEBAR_CLUSTER_MAKS = 8.0           # lebar maksimal zona Golden Confluence (poin)
+LEBAR_CLUSTER_MAKS = 8.0           # lebar maksimal zona Golden Confluence (Price Distance USD/oz)
 FILTER_TREND_AKTIF = True          # True = hanya sinyal searah trend HTF; False = matikan filter
 IZINKAN_COUNTER_TREND_MEDIUM = False  # True = counter-trend boleh bila sinyal MEDIUM RISK
 FILTER_SESI_AKTIF = True           # True = hanya sinyal di sesi London & New York (UTC); False = semua jam
@@ -100,6 +116,8 @@ PANTAU_INTERVALS_SECONDS = {
 }
 PANTAU_FULL_REFRESH_SECONDS = 300.0
 PANTAU_EXPIRY_WARNING_MINUTES = 15.0
+PANTAU_TICK_POLL_SECONDS = 0.15       # Polling tick harga MT5 ringan (~150 ms) terpisah dari siklus analisis SMC/SNR
+PANTAU_TICK_STALE_SECONDS = 30.0      # Ambang stale berbasis timestamp tick MT5 saat market OPEN
 
 # Flag penanganan berita
 BLOKIR_JIKA_BERITA_GAGAL = False

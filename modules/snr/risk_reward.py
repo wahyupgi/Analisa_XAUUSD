@@ -402,6 +402,9 @@ def calculate_snr_risk_reward(
         else f"RR di bawah standar minimal (1:{rr_tp1:.2f} < 1:{min_rr:.2f}); wajib WAIT."
     )
 
+    from modules.utils import price_distance_to_mt5_points
+
+    point = max(1e-6, safe_float(spec.get("point"), 10.0 ** (-digits)))
     return {
         "checked": True,
         "valid": bool(rr_ok),
@@ -416,7 +419,10 @@ def calculate_snr_risk_reward(
         "tp1": tp1_price,
         "tp2": tp2_price,
         "risk_points": round(risk_pts, digits),
+        "risk_usd": round(risk_pts, digits),
+        "risk_mt5_points": price_distance_to_mt5_points(risk_pts, point=point),
         "reward_tp1_points": round(reward_tp1, digits),
+        "reward_tp1_mt5_points": price_distance_to_mt5_points(reward_tp1, point=point),
         "reward_tp2_points": round(reward_tp2, digits),
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
@@ -425,6 +431,10 @@ def calculate_snr_risk_reward(
         "structural_tp_available": True,
         "min_rr_required": min_rr,
         "spread_points": spread_pts,
+        "spread_mt5_points": price_distance_to_mt5_points(spread_pts, point=point),
+        "digits": digits,
+        "point": point,
+        "trade_tick_size": tick_size,
         "tick_size": tick_size,
         "tick_value": tick_value,
         "contract_size": contract_size,

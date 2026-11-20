@@ -83,9 +83,12 @@ def kumpulkan_konteks_mt5(is_refresh=False):
     if tick is not None and selisih.total_seconds() > 3600 * 6:
         print("   PERINGATAN: data terakhir sudah lama, market mungkin tutup. Hasil analisa kurang relevan.")
 
+    from modules.utils import get_symbol_unit_spec, format_price_distance, calc_price_distance
+    u_spec_ai = get_symbol_unit_spec(symbol=SYMBOL, sym_info=sym_info)
+    d_ai_px = u_spec_ai["digits"]
     atr_m5_val = tambah_indikator(frames["M5"].copy())["ATR14"].iloc[-1]
     spread_val = (tick.ask - tick.bid) if tick else 0.0
-    harga_sekarang = f"Bid {tick.bid:.2f} / Ask {tick.ask:.2f} (spread {spread_val:.2f}) | Volatilitas ATR14 M5: {atr_m5_val:.2f} poin" if tick else "tidak tersedia"
+    harga_sekarang = f"Bid {tick.bid:.{d_ai_px}f} / Ask {tick.ask:.{d_ai_px}f} (Spread: {format_price_distance(spread_val, spec=u_spec_ai, include_mt5_points=True)}) | Volatilitas ATR14 M5: {format_price_distance(atr_m5_val, spec=u_spec_ai, include_mt5_points=True)}" if tick else "tidak tersedia"
     harga_ref = tick.bid if tick else frames["M5"]["Close"].iloc[-1]
 
     # SATU snapshot untuk seluruh siklus konteks ini: frames & tick yang sama dengan yang sudah diambil di atas
@@ -191,10 +194,10 @@ def kumpulkan_konteks_mt5(is_refresh=False):
                 st = zd.get("status", "RADAR")
                 ob = zd.get("origin_bos", {}).get("tipe", "OB")
                 fvg = (zd.get("fvg_confirmation") or {}).get("status", "-")
-                dist = 0.0 if (z_lo <= harga_ref <= z_hi) else (z_lo - harga_ref if harga_ref < z_lo else harga_ref - z_hi)
+                dist = calc_price_distance(z_lo, z_hi, harga_ref)
                 kandidat_algo_txt += (
                     f"  * DEMAND ZONE #{i}: {tf} DEMAND {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
-                    f"OB: {ob} | FVG: {fvg} | Jarak: {dist:.2f} pt di bawah harga [HANYA PANTAU, BUKAN ENTRY]\n"
+                    f"OB: {ob} | FVG: {fvg} | Jarak: {format_price_distance(dist, spec=u_spec_ai, include_mt5_points=True)} di bawah harga [HANYA PANTAU, BUKAN ENTRY]\n"
                 )
             for i, zs in enumerate(supplies[:2], 1):
                 z_lo, z_hi = float(zs.get("price_low", 0.0)), float(zs.get("price_high", 0.0))
@@ -203,10 +206,10 @@ def kumpulkan_konteks_mt5(is_refresh=False):
                 st = zs.get("status", "RADAR")
                 ob = zs.get("origin_bos", {}).get("tipe", "OB")
                 fvg = (zs.get("fvg_confirmation") or {}).get("status", "-")
-                dist = 0.0 if (z_lo <= harga_ref <= z_hi) else (z_lo - harga_ref if harga_ref < z_lo else harga_ref - z_hi)
+                dist = calc_price_distance(z_lo, z_hi, harga_ref)
                 kandidat_algo_txt += (
                     f"  * SUPPLY ZONE #{i}: {tf} SUPPLY {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
-                    f"OB: {ob} | FVG: {fvg} | Jarak: {dist:.2f} pt di atas harga [HANYA PANTAU, BUKAN ENTRY]\n"
+                    f"OB: {ob} | FVG: {fvg} | Jarak: {format_price_distance(dist, spec=u_spec_ai, include_mt5_points=True)} di atas harga [HANYA PANTAU, BUKAN ENTRY]\n"
                 )
     zona_text += kandidat_algo_txt
 
@@ -333,12 +336,12 @@ B. Daftar sinyal. HANYA tampilkan sinyal berlabel LOW RISK atau MEDIUM RISK. DIL
       - Wajib tentukan tipe eksekusi:
         * LIMIT / PULLBACK ENTRY (Rekomendasi Utama Akurasi): Antri di area FVG / OB / 50% Equilibrium Wick Sweep saat harga retrace.
         * CONFIRMED BREAK ENTRY: Masuk HANYA jika candle M5 resmi CLOSE menembus level trigger tertentu. Dilarang menyuruh entry saat candle masih berjalan/floating!
-      - Rentang area entry dibatasi ketat maksimal 1.5 - 2.0 poin (contoh lebar area: 1.6 pt). Jangan berikan rentang lebar yang membingungkan.
+      - Rentang area entry dibatasi ketat maksimal 1.5 - 2.0 USD (Price Distance, contoh lebar area: 1.60 USD). Jangan berikan rentang lebar yang membingungkan.
    2. ATURAN STOP LOSS ANTI-HUNT & BUFFER SPREAD:
       - DILARANG meletakkan SL mepet di pucuk/lembah wick tanpa buffer (risiko tersapu spread atau secondary wick hunt).
-      - Formula SL BUY: Di bawah Swing Low terendah / demand base dikurangi buffer aman (minimal 1.5 - 2.5 poin atau 1x ATR M5).
-      - Formula SL SELL: Di atas Swing High tertinggi / supply base ditambah buffer aman (minimal 1.5 - 2.5 poin atau 1x ATR M5) + toleransi spread broker.
-      - Sebutkan level struktural perlindungan SL (misal: "SL di <level>, di balik ujung wick sweep <level> + buffer 1.7 pt").
+      - Formula SL BUY: Di bawah Swing Low terendah / demand base dikurangi buffer aman (minimal 1.5 - 2.5 USD atau 1x ATR M5).
+      - Formula SL SELL: Di atas Swing High tertinggi / supply base ditambah buffer aman (minimal 1.5 - 2.5 USD atau 1x ATR M5) + toleransi spread broker.
+      - Sebutkan level struktural perlindungan SL (misal: "SL di <level>, di balik ujung wick sweep <level> + buffer 1.70 USD").
    3. TARGET TP OBJEKTIF & PENGAMANAN MODAL DUA TAHAP:
       - TP1 (Likuiditas Internal): Di opposing FVG / Swing M15 terdekat dengan R:R minimal 1:1.5.
         Instruksi WAJIB: "Saat harga menyentuh TP1 -> Amankan 50% profit (Partial Close) & Geser SL ke BEP+ (Titik Impas)!"
@@ -356,8 +359,8 @@ B. Daftar sinyal. HANYA tampilkan sinyal berlabel LOW RISK atau MEDIUM RISK. DIL
    FORMAT SETIAP SINYAL WAJIB DITULIS RAPI SEPERTI INI:
    ----------------------------------------------------------------------
    [SINYAL <KONSERVATIF (0.5%) / STANDAR (1.0%)>] <BUY / SELL> XAUUSD (<Tipe Order: Limit Pullback / Confirmed Break>)
-   • Area Entry   : <bawah> - <atas> (Jarak dari harga sekarang: X pt)
-   • Stop Loss    : <angka> (Jarak risiko: X pt / X pips | Alasan: X pt di balik wick/level X)
+   • Area Entry   : <bawah> - <atas> (Jarak dari harga sekarang: X USD / X MT5 pts)
+   • Stop Loss    : <angka> (Jarak risiko: X USD / X MT5 pts | Alasan: X USD di balik wick/level X)
    • Target TP    :
      - TP1        : <angka> (R:R 1:X | Amankan 50% lot & Geser SL ke BEP+)
      - TP2        : <angka> (R:R 1:X | Runner ke likuiditas eksternal)
@@ -509,7 +512,7 @@ def _validasi_trigger_m5(sig):
         jarak = 0.0 if lo <= harga <= hi else min(abs(harga - lo), abs(harga - hi))
         batas_jarak = max(3.0, 1.5 * atr)
         if jarak > batas_jarak:
-            return False, f"Trigger M5 sudah ada ({bukti}), tetapi harga terlalu jauh dari zona entry ({jarak:.2f} pt > {batas_jarak:.2f} pt); jangan kejar harga"
+            return False, f"Trigger M5 sudah ada ({bukti}), tetapi harga terlalu jauh dari zona entry ({jarak:.2f} USD > {batas_jarak:.2f} USD); jangan kejar harga"
         return True, f"M5 valid: {jenis_sweep} Sweep lalu {bukti} searah; harga dekat zona"
     except Exception as exc:
         _catat_error("validasi_trigger_m5", exc)
@@ -877,26 +880,28 @@ def snapshot_live_qa():
     else:
         zona_mt5_qa_txt = "- [RADAR ZONA PEMANTAUAN MT5 — BUKAN REKOMENDASI PENDING ORDER / ENTRY AKTIF]:\n"
         demands_qa = [z for z in radar_qa_list if z.get("zone_type") == "DEMAND"]
+        from modules.utils import get_symbol_unit_spec, format_price_distance, calc_price_distance
+        u_spec_qa_z = get_symbol_unit_spec(symbol=SYMBOL)
         supplies_qa = [z for z in radar_qa_list if z.get("zone_type") == "SUPPLY"]
         for i, zd in enumerate(demands_qa[:2], 1):
             z_lo, z_hi = float(zd.get("price_low", 0.0)), float(zd.get("price_high", 0.0))
             inval = float(zd.get("invalidation_price", z_lo))
             tf = zd.get("timeframe", "H1")
             st = zd.get("status", "RADAR")
-            dist = 0.0 if (z_lo <= harga <= z_hi) else (z_lo - harga if harga < z_lo else harga - z_hi)
+            dist = calc_price_distance(z_lo, z_hi, harga)
             zona_mt5_qa_txt += (
                 f"  * DEMAND ZONE #{i}: {tf} DEMAND {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
-                f"Jarak: {dist:.2f} pt di bawah harga [HANYA PANTAU, BUKAN ENTRY]\n"
+                f"Jarak: {format_price_distance(dist, spec=u_spec_qa_z, include_mt5_points=True)} di bawah harga [HANYA PANTAU, BUKAN ENTRY]\n"
             )
         for i, zs in enumerate(supplies_qa[:2], 1):
             z_lo, z_hi = float(zs.get("price_low", 0.0)), float(zs.get("price_high", 0.0))
             inval = float(zs.get("invalidation_price", z_hi))
             tf = zs.get("timeframe", "H1")
             st = zs.get("status", "RADAR")
-            dist = 0.0 if (z_lo <= harga <= z_hi) else (z_lo - harga if harga < z_lo else harga - z_hi)
+            dist = calc_price_distance(z_lo, z_hi, harga)
             zona_mt5_qa_txt += (
                 f"  * SUPPLY ZONE #{i}: {tf} SUPPLY {z_lo:.2f}-{z_hi:.2f} | Status: [{st}] | Invalidation: {inval:.2f} | "
-                f"Jarak: {dist:.2f} pt di atas harga [HANYA PANTAU, BUKAN ENTRY]\n"
+                f"Jarak: {format_price_distance(dist, spec=u_spec_qa_z, include_mt5_points=True)} di atas harga [HANYA PANTAU, BUKAN ENTRY]\n"
             )
         scan_qa_txt += "  [ATURAN OTORITAS MUTLAK]: Status Python Scanner WAIT/INVALID. Dilarang memberikan rekomendasi BUY/SELL atau pending order limit!\n"
 
@@ -920,12 +925,15 @@ def snapshot_live_qa():
             sig_live_txt = f"- Status Sinyal Sebelumnya: SUDAH SELESAI/BATAL [{st_sd}]. Status Saat Ini: WAIT (Mencari peluang setup baru).\n"
 
 
+    from modules.utils import get_symbol_unit_spec, format_price_distance
+    u_spec_qa = get_symbol_unit_spec(symbol=SYMBOL, sym_info=sym_qa)
+    d_qa_px = u_spec_qa["digits"]
     _bias_qa = bias_htf_cached()
     _detail_qa = _bias_qa.get("detail", {}) if isinstance(_bias_qa, dict) else {}
     _detail_txt = " | ".join(str(_detail_qa.get(k, "-")) for k in ("D1", "H4", "H1"))
     return (
         f"\n[UPDATE DATA LIVE MT5 DETIK INI SAAT TRADER BERTANYA]:\n"
-        f"- Harga Sekarang: Bid {harga:.2f} / Ask {tick.ask if tick else harga:.2f} (Spread {spread:.2f}) | Volatilitas ATR14 M5: {atr5[-1]:.2f} pt\n"
+        f"- Harga Sekarang: Bid {harga:.{d_qa_px}f} / Ask {tick.ask if tick else harga:.{d_qa_px}f} (Spread: {format_price_distance(spread, spec=u_spec_qa, include_mt5_points=True)}) | Volatilitas ATR14 M5: {format_price_distance(atr5[-1], spec=u_spec_qa, include_mt5_points=True)}\n"
         f"- {teks_bias_htf(_bias_qa)} | Detail: {_detail_txt}\n"
         f"{scan_qa_txt}"
         f"{htf_running_txt}"

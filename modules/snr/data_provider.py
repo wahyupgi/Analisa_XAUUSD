@@ -256,52 +256,34 @@ def prepare_snr_frame(df, has_unclosed_last_bar=False):
 
 def get_symbol_spec(symbol=None, tick=None, config=None):
     """
-    Mengambil spesifikasi simbol dari MT5 secara read-only (digits, point, tick_size,
-    tick_value, contract_size, spread). Jika MT5 offline/mock, gunakan fallback konfigurasi.
+    Mengambil spesifikasi simbol dari MT5 secara read-only (digits, point, trade_tick_size,
+    tick_value, contract_size, spread) melalui helper terpusat `get_symbol_unit_spec`.
+    Jika MT5 offline/mock, gunakan fallback konfigurasi.
     """
+    from modules.utils import get_symbol_unit_spec, mt5_points_to_price_distance
+
     cfg = config or get_snr_config()
     risk_cfg = cfg.get("risk", {})
     sym = symbol or cfg.get("symbol", DEFAULT_APP_SYMBOL)
 
-    digits = int(risk_cfg.get("default_digits", 2))
-    point = 10 ** (-digits)
-    tick_size = safe_float(risk_cfg.get("default_tick_size", 0.01), 0.01)
-    tick_value = safe_float(risk_cfg.get("default_tick_value", 1.0), 1.0)
-    contract_size = safe_float(risk_cfg.get("default_contract_size", 100.0), 100.0)
+    u_spec = get_symbol_unit_spec(symbol=sym)
+    from_mt5 = u_spec.get("source") == "MT5_SYMBOL_INFO"
+
+    digits = int(u_spec["digits"]) if from_mt5 else int(risk_cfg.get("default_digits", u_spec["digits"]))
+    point = float(u_spec["point"]) if from_mt5 else round(10.0 ** (-digits), max(digits, 6))
+    tick_size = float(u_spec["trade_tick_size"]) if from_mt5 else safe_float(risk_cfg.get("default_tick_size", point), point)
+    tick_value = float(u_spec["trade_tick_value"]) if u_spec.get("trade_tick_value") else safe_float(risk_cfg.get("default_tick_value", 1.0), 1.0)
+    contract_size = float(u_spec["trade_contract_size"]) if u_spec.get("trade_contract_size") else safe_float(risk_cfg.get("default_contract_size", 100.0), 100.0)
     spread_points = safe_float(risk_cfg.get("default_spread_points", 0.25), 0.25)
     stops_level = None
-    tick_size_verified = False
-    source = "CONFIG_DEFAULT"
+    tick_size_verified = bool(u_spec.get("tick_size_verified", False))
+    source = "MT5_SYMBOL_INFO" if from_mt5 else "CONFIG_DEFAULT"
 
-    if mt5 is not None:
-        try:
-            info = mt5.symbol_info(sym)
-            if info is not None:
-                d_val = getattr(info, "digits", None)
-                if d_val is not None and int(d_val) >= 0:
-                    digits = int(d_val)
-                p_val = safe_float(getattr(info, "point", 0.0), 0.0)
-                if p_val > 0:
-                    point = p_val
-                raw_stops = getattr(info, "trade_stops_level", None)
-                if p_val > 0 and raw_stops is not None and safe_float(raw_stops, -1.0) >= 0:
-                    stops_level = safe_float(raw_stops) * point
-                ts_val = safe_float(getattr(info, "trade_tick_size", 0.0), 0.0)
-                if ts_val > 0:
-                    tick_size = ts_val
-                    tick_size_verified = True
-                tv_val = safe_float(getattr(info, "trade_tick_value", 0.0), 0.0)
-                if tv_val > 0:
-                    tick_value = tv_val
-                cs_val = safe_float(getattr(info, "trade_contract_size", 0.0), 0.0)
-                if cs_val > 0:
-                    contract_size = cs_val
-                sp_raw = safe_float(getattr(info, "spread", 0.0), 0.0)
-                if sp_raw > 0 and point > 0:
-                    spread_points = round(sp_raw * point, max(2, digits))
-                source = "MT5_SYMBOL_INFO"
-        except Exception:
-            pass
+    if from_mt5:
+        if u_spec.get("trade_stops_level") is not None and point > 0:
+            stops_level = mt5_points_to_price_distance(u_spec["trade_stops_level"], point=point, spec=u_spec)
+        if u_spec.get("spread_mt5_points") is not None and point > 0:
+            spread_points = mt5_points_to_price_distance(u_spec["spread_mt5_points"], point=point, spec=u_spec)
 
     if tick is not None:
         bid = safe_float(getattr(tick, "bid", None) if not isinstance(tick, dict) else tick.get("bid"), 0.0)
@@ -313,6 +295,7 @@ def get_symbol_spec(symbol=None, tick=None, config=None):
         "symbol": sym,
         "digits": digits,
         "point": point,
+        "trade_tick_size": tick_size,
         "tick_size": tick_size,
         "tick_size_verified": tick_size_verified,
         "tick_value": tick_value,
@@ -954,8 +937,12 @@ def fetch_snr_market_data(
 
     for tf in SNR_TIMEFRAMES:
         df_src = raw_frames.get(tf)
+        tf_max_bars = int(tf_bars.get(tf, 220))
         if (df_src is None or (isinstance(df_src, pd.DataFrame) and df_src.empty)) and live and mt5_ready and not has_snapshot:
-            df_src = _fetch_mt5_historical_candles(sym, tf, int(tf_bars.get(tf, 220)))
+            df_src = _fetch_mt5_historical_candles(sym, tf, tf_max_bars)
+        elif isinstance(df_src, pd.DataFrame) and not df_src.empty and len(df_src) > tf_max_bars + 5:
+            # Normalisasi lookback agar konsisten antara scan snr dan pantau/unified_monitor
+            df_src = df_src.iloc[-(tf_max_bars + 5):]
 
         df_clean, forming_bar = prepare_snr_frame(df_src, has_unclosed_last_bar=has_unclosed_last_bar)
         prepared_frames[tf] = df_clean

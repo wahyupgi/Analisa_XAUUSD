@@ -159,8 +159,8 @@ def analisa_adr_exhaustion(df_d1, harga):
 
     return (
         f"\n===== ADR (AVERAGE DAILY RANGE 14 HARI) & BATAS BENSIN HARIAN =====\n"
-        f"Rata-rata Range Harian (ADR14): {adr14:.2f} poin ($)\n"
-        f"Range Hari Ini: {range_skrg:.2f} poin (Low {lo_today:.2f} s/d High {hi_today:.2f}) -> {status}\n"
+        f"Rata-rata Range Harian (ADR14): {adr14:.2f} USD\n"
+        f"Range Hari Ini: {range_skrg:.2f} USD (Low {lo_today:.2f} s/d High {hi_today:.2f}) -> {status}\n"
         f"Proyeksi Batas Atap Harian (ADR High): {proj_high:.2f} | Batas Lantai Harian (ADR Low): {proj_low:.2f}\n"
     )
 

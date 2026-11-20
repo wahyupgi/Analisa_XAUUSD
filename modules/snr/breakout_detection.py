@@ -501,9 +501,10 @@ def detect_zone_breakout(
             "timeframe": tf,
             "zone_type": z_type,
             "status": "VALID_BREAKOUT",
+            "breakout_state": "BROKEN" if is_historical_break else "CONFIRMED",
             "break_type": "CONFIRMED_BREAKDOWN" if is_support else "CONFIRMED_BREAKOUT",
-            "potential_breakdown": is_support,
-            "potential_breakout": not is_support,
+            "potential_breakdown": False,
+            "potential_breakout": False,
             "reclaim_detected": False,
             "zone_failed": True,
             "label": "VALID BREAKDOWN" if is_support else "VALID BREAKOUT",
@@ -558,9 +559,10 @@ def detect_zone_breakout(
             "timeframe": tf,
             "zone_type": z_type,
             "status": "VALID_BREAKOUT",
+            "breakout_state": "BROKEN" if is_historical_break else "CONFIRMED",
             "break_type": "CONFIRMED_BREAKDOWN" if is_support else "CONFIRMED_BREAKOUT",
-            "potential_breakdown": is_support,
-            "potential_breakout": not is_support,
+            "potential_breakdown": False,
+            "potential_breakout": False,
             "prior_confirmed_breakout": True,
             "reclaim_detected": False,
             "zone_failed": True,
@@ -596,13 +598,14 @@ def detect_zone_breakout(
         "timeframe": tf,
         "zone_type": z_type,
         "status": "BREAKOUT_PENDING_CONFIRMATION",
+        "breakout_state": "BREAKDOWN_PENDING" if is_support else "BREAKOUT_PENDING",
         "break_type": "POTENTIAL_BREAKDOWN" if is_support else "POTENTIAL_BREAKOUT",
         "potential_breakdown": is_support,
         "potential_breakout": not is_support,
         "prior_confirmed_breakout": bool(prior_confirmed_bo),
         "reclaim_detected": False,
         "zone_failed": bool(prior_confirmed_bo),
-        "label": "POTENTIAL BREAKDOWN (PENDING)" if is_support else "POTENTIAL BREAKOUT (PENDING)",
+        "label": "BREAKDOWN PENDING" if is_support else "BREAKOUT PENDING",
         "summary_status": "PENDING CONFIRMATION",
         "direction": expected_dir,
         "breakout_bar_index": pend_bo_idx,
@@ -626,5 +629,281 @@ def detect_zone_breakout(
             f"(penetrasi={curr_pen_atr:.2f} ATR, body={best_bo['body_atr']:.2f} ATR, "
             f"momentum_supported={momentum_supported}); menunggu candle konfirmasi lanjutan."
         ),
+    }
+
+
+def classify_snr_breakout_state(zone):
+    """
+    Klasifikasi kanonis status breakout zona SNR (single source of truth antara `scan snr` & `pantau`):
+    - BREAKDOWN_PENDING / BREAKOUT_PENDING : belum terkonfirmasi closed candle TF asal (TIDAK pernah untuk zona broken)
+    - CONFIRMED                            : baru saja terkonfirmasi break oleh candle closed TF asal
+    - RETEST_WATCH                         : zona confirmed broken yang sedang menunggu / menjalani retest role-reversal
+    - BROKEN                               : zona sudah confirmed broken / invalidated / reclaimed
+    - NONE                                 : belum ada breakout
+    """
+    if not isinstance(zone, dict):
+        return {
+            "state": "NONE",
+            "label": "NONE",
+            "direction_word": "BREAKOUT",
+            "is_pending": False,
+            "is_confirmed": False,
+            "is_retest_watch": False,
+            "is_broken": False,
+            "is_historical": False,
+        }
+    z_type = str(zone.get("zone_type") or "SUPPORT").upper()
+    dir_word = "BREAKDOWN" if z_type == "SUPPORT" else "BREAKOUT"
+    life = str(zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
+    bo = zone.get("breakout_info") if isinstance(zone.get("breakout_info"), dict) else {}
+    rt = zone.get("retest_info") if isinstance(zone.get("retest_info"), dict) else {}
+    bo_status = str(bo.get("status") or "NO_BREAKOUT").upper()
+    rt_status = str(rt.get("status") or "NO_RETEST").upper()
+    bars_ago = int(safe_float(zone.get("lifecycle_bars_ago"), 0))
+    d_atr = safe_float(zone.get("distance_atr"), 0.0)
+    is_hist = bool(
+        zone.get("lifecycle_is_historical")
+        or zone.get("is_distant_historical")
+        or bo.get("is_historical_break")
+        or d_atr > 12.0
+    )
+    is_confirmed_broken = bool(
+        zone.get("is_broken")
+        or zone.get("is_invalidated")
+        or bo_status == "VALID_BREAKOUT"
+        or bo.get("zone_failed")
+        or bo.get("reclaim_detected")
+        or life in ("BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED", "INVALIDATED")
+    )
+
+    if is_confirmed_broken:
+        if life in ("RECLAIMED", "RECLAIM_PENDING") or (bo.get("reclaim_detected") and life in ("BROKEN", "RETEST", "INVALIDATED")):
+            # RECLAIMED hanya jika lifecycle (urutan candle closed pasca-break) mengonfirmasi; reclaim_detected saja = PENDING
+            tag_sub = life.replace("_", " ") if life in ("RECLAIMED", "RECLAIM_PENDING") else "RECLAIM PENDING"
+            return {
+                "state": "BROKEN",
+                "label": f"BROKEN ({tag_sub})",
+                "direction_word": dir_word,
+                "is_pending": False,
+                "is_confirmed": False,
+                "is_retest_watch": False,
+                "is_broken": True,
+                "is_historical": bool(is_hist or (life == "RECLAIMED" and bars_ago > 1)),
+            }
+        if (
+            (life == "RETEST" or rt_status in ("RETEST_WAITING", "RETEST_IN_PROGRESS", "RETEST_CONFIRMED"))
+            and not zone.get("is_invalidated")
+            and not zone.get("is_distant_historical")
+            and d_atr <= 6.0
+        ):
+            rt_tag = "RETEST WATCH (CONFIRMED)" if rt_status == "RETEST_CONFIRMED" else "RETEST WATCH"
+            return {
+                "state": "RETEST_WATCH",
+                "label": rt_tag,
+                "direction_word": dir_word,
+                "is_pending": False,
+                "is_confirmed": True,
+                "is_retest_watch": True,
+                "is_broken": True,
+                "is_historical": False,
+            }
+        if not is_hist and bars_ago <= 1 and life == "BROKEN" and bo_status == "VALID_BREAKOUT":
+            return {
+                "state": "CONFIRMED",
+                "label": f"{dir_word} CONFIRMED",
+                "direction_word": dir_word,
+                "is_pending": False,
+                "is_confirmed": True,
+                "is_retest_watch": False,
+                "is_broken": True,
+                "is_historical": False,
+            }
+        return {
+            "state": "BROKEN",
+            "label": f"BROKEN ({z_type})",
+            "direction_word": dir_word,
+            "is_pending": False,
+            "is_confirmed": False,
+            "is_retest_watch": False,
+            "is_broken": True,
+            "is_historical": is_hist,
+        }
+
+    if life in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING") or bo_status == "BREAKOUT_PENDING_CONFIRMATION":
+        pend_st = "BREAKDOWN_PENDING" if z_type == "SUPPORT" else "BREAKOUT_PENDING"
+        pend_lbl = "BREAKDOWN PENDING" if z_type == "SUPPORT" else "BREAKOUT PENDING"
+        return {
+            "state": pend_st,
+            "label": pend_lbl,
+            "direction_word": dir_word,
+            "is_pending": True,
+            "is_confirmed": False,
+            "is_retest_watch": False,
+            "is_broken": False,
+            "is_historical": is_hist,
+        }
+
+    return {
+        "state": "NONE",
+        "label": "NONE",
+        "direction_word": dir_word,
+        "is_pending": False,
+        "is_confirmed": False,
+        "is_retest_watch": False,
+        "is_broken": False,
+        "is_historical": False,
+    }
+
+
+def build_snr_breakout_watch(ranked_zones, price_action=None):
+    """
+    Bangun ringkasan breakout watch terpadu (CONFIRMED / RETEST WATCH / BREAKDOWN PENDING / BROKEN)
+    agar `scan snr` dan `pantau` menampilkan status yang identik dan tidak pernah menampilkan
+    POTENTIAL BREAKDOWN pada zona yang sudah confirmed broken.
+    """
+    rz = ranked_zones if isinstance(ranked_zones, dict) else {}
+    pa = price_action if isinstance(price_action, dict) else {}
+
+    confirmed = []
+    retest_watch = []
+    pending = []
+    broken = []
+    historical = []
+
+    seen_ids = set()
+    pool = (
+        list(rz.get("broken_zones") or [])
+        + list(rz.get("pending_break_zones") or [])
+        + list(rz.get("reclaimed_zones") or [])
+        + list(rz.get("invalidated_zones") or [])
+    )
+    for z in pool:
+        if not isinstance(z, dict):
+            continue
+        zid = z.get("zone_id") or (
+            z.get("timeframe"),
+            z.get("zone_type"),
+            round(safe_float(z.get("low")), 2),
+            round(safe_float(z.get("high")), 2),
+        )
+        if zid in seen_ids:
+            continue
+        seen_ids.add(zid)
+
+        info = classify_snr_breakout_state(z)
+        st = info["state"]
+        if st == "NONE":
+            continue
+
+        d_atr = safe_float(z.get("distance_atr"), 0.0)
+        entry = {
+            "zone_id": z.get("zone_id"),
+            "timeframe": str(z.get("timeframe") or "").upper(),
+            "zone_type": str(z.get("zone_type") or "").upper(),
+            "low": safe_float(z.get("low"), 0.0),
+            "high": safe_float(z.get("high"), 0.0),
+            "distance_points": safe_float(z.get("distance_points"), 0.0),
+            "distance_atr": d_atr,
+            "state": st,
+            "label": info["label"],
+            "lifecycle_status": str(z.get("lifecycle_status") or z.get("status") or "").upper(),
+            "event_time": str(
+                z.get("lifecycle_event_time")
+                or (z.get("breakout_info") or {}).get("breakout_bar_time")
+                or (z.get("m5_breakout_info") or {}).get("breakout_bar_time")
+                or ""
+            ).strip(),
+            "is_historical": bool(info["is_historical"]),
+            "zone": z,
+        }
+
+        if z.get("is_distant_historical") or d_atr > 12.0:
+            historical.append(entry)
+            continue
+
+        if st == "CONFIRMED":
+            confirmed.append(entry)
+        elif st == "RETEST_WATCH":
+            retest_watch.append(entry)
+        elif st in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING"):
+            if not info["is_historical"]:
+                pending.append(entry)
+            else:
+                historical.append(entry)
+        elif st == "BROKEN":
+            broken.append(entry)
+            if info["is_historical"]:
+                historical.append(entry)
+
+    for bucket in (confirmed, retest_watch, pending, broken):
+        bucket.sort(key=lambda item: (item["distance_points"], item["timeframe"], str(item["zone_id"] or "")))
+
+    def _fmt_watch_line(item):
+        rng = f"{item['low']:.2f}-{item['high']:.2f}"
+        return f"{item['label']} ({item['timeframe']} {item['zone_type']} {rng})".replace("  ", " ").strip()
+
+    primary = None
+    if confirmed:
+        primary = confirmed[0]
+    elif retest_watch:
+        primary = retest_watch[0]
+    elif pending:
+        primary = pending[0]
+    else:
+        recent_broken = [b for b in broken if not b["is_historical"]]
+        if recent_broken:
+            primary = recent_broken[0]
+        else:
+            nearby_broken = [b for b in broken if b["distance_atr"] <= 6.0]
+            if nearby_broken:
+                primary = nearby_broken[0]
+
+    if primary is not None:
+        return {
+            "state": primary["state"],
+            "label": primary["label"],
+            "summary_line": _fmt_watch_line(primary),
+            "zone_id": primary["zone_id"],
+            "pending": pending,
+            "confirmed": confirmed,
+            "retest_watch": retest_watch,
+            "broken": broken,
+            "historical": historical,
+        }
+
+    # Fallback price_action hanya jika non-historical dan tidak bertentangan dengan zona broken
+    pa_code = str(pa.get("breakout_code") or "NO_BREAKOUT").upper()
+    if pa_code in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION") and not pa.get("breakout_is_historical"):
+        pa_dir = str(pa.get("breakout_direction") or "").upper()
+        dir_w = "BREAKDOWN" if pa_dir == "BEARISH" else "BREAKOUT"
+        if pa_code == "VALID_BREAKOUT":
+            st_f, lbl_f = "CONFIRMED", f"{dir_w} CONFIRMED"
+        else:
+            st_f = "BREAKDOWN_PENDING" if pa_dir == "BEARISH" else "BREAKOUT_PENDING"
+            lbl_f = f"{dir_w} PENDING"
+        pa_lbl = str(pa.get("breakout_zone_label") or "").strip()
+        sum_ln = f"{lbl_f} ({pa_lbl})" if pa_lbl and pa_lbl != "NONE" else lbl_f
+        return {
+            "state": st_f,
+            "label": lbl_f,
+            "summary_line": sum_ln,
+            "zone_id": None,
+            "pending": pending,
+            "confirmed": confirmed,
+            "retest_watch": retest_watch,
+            "broken": broken,
+            "historical": historical,
+        }
+
+    return {
+        "state": "NONE",
+        "label": "",
+        "summary_line": "",
+        "zone_id": None,
+        "pending": pending,
+        "confirmed": confirmed,
+        "retest_watch": retest_watch,
+        "broken": broken,
+        "historical": historical,
     }
 

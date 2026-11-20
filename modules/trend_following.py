@@ -743,7 +743,7 @@ def assess_m30_condition(
     if m30_bias in ("NETRAL", "RANGING") and rng_20 <= 2.6 * atr30 and rng_40 <= 3.6 * atr30:
         if (want_bull and (rsi < 46.0 or c_now < ema20 - 0.5 * atr30)) or ((not want_bull) and (rsi > 54.0 or c_now > ema20 + 0.5 * atr30)):
             return {"status": "WEAK", "condition": "WEAK", "ok": False,
-                    "msg": f"Momentum M30 lemah / datar (RSI {rsi:.1f}, range {rng_20:.2f} pt)", "impulse_leg": active_imp}
+                    "msg": f"Momentum M30 lemah / datar (RSI {rsi:.1f}, range {rng_20:.2f} USD)", "impulse_leg": active_imp}
 
     # Healthy pullback: ada leg impuls terukur di M30 atau H1 & retracement berada dalam rentang sehat & struktur H1/H4 utuh
     if active_imp is not None and not broke_h1_origin:
@@ -760,7 +760,7 @@ def assess_m30_condition(
     # 6. Flat / weak market tanpa impuls maupun breakout dengan RSI/posisi EMA berlawanan -> WEAK
     if (want_bull and (rsi < 46.0 or c_now < ema20 - 0.5 * atr30)) or ((not want_bull) and (rsi > 54.0 or c_now > ema20 + 0.5 * atr30)):
         return {"status": "WEAK", "condition": "WEAK", "ok": False,
-                "msg": f"Momentum M30 lemah / datar (RSI {rsi:.1f}, range {rng_20:.2f} pt)", "impulse_leg": active_imp}
+                "msg": f"Momentum M30 lemah / datar (RSI {rsi:.1f}, range {rng_20:.2f} USD)", "impulse_leg": active_imp}
 
     if reg == "RANGING":
         return {"status": "CONFIRMED", "condition": "CONSOLIDATION", "ok": True,
@@ -1317,6 +1317,7 @@ def build_trend_following_candidates(
             str(azd.get("zone_type", "")).upper() != ztype
             or not azd.get("is_valid", True)
             or str(azd.get("risk_tier") or "").upper() == "FAR_ZONE"
+            or str(azd.get("zone_relevance") or "").upper() in ("FAR_REFERENCE", "INVALID")
         ):
             continue
         _dedup_push_candidate(cands, {
@@ -1513,12 +1514,14 @@ def build_trend_following_candidates(
         if cont_fvg:
             cf = cont_fvg[-1]
             c_lo, c_hi = float(cf["low"]), float(cf["high"])
-        else:
+        elif str((m30_info or {}).get("status") or "").upper() == "CONFIRMED":
             c_now_m5 = float(df_m5["Close"].iloc[-1])
             c_lo = round(current_price - half_c, 2) if direction == "BUY" else round(current_price - 0.3 * half_c, 2)
             c_hi = round(current_price + 0.3 * half_c, 2) if direction == "BUY" else round(current_price + half_c, 2)
             if abs(c_now_m5 - current_price) > 2.5 * atr_m5:
                 c_lo = c_hi = 0.0
+        else:
+            c_lo = c_hi = 0.0
         if c_lo > 0 and c_hi >= c_lo and (recent_m5_bos or (m30_info or {}).get("condition") == "CONSOLIDATION_BREAKOUT"):
             # Anti-overextension guard: hindari kejar harga terlalu jauh dari EMA20 M30 (> 2.2 ATR M30)
             overext_ok = True
@@ -1798,7 +1801,7 @@ def _compute_targets_and_rr(
     risk = round(abs(entry - sl), 2)
     if risk <= 0 or risk > SL_JARAK_MAKS:
         return {"ok": False, "rr": 0.0, "tp1": None, "tp2": None,
-                "reason": f"Jarak SL {risk:.2f} pt di luar batas aman (maks {SL_JARAK_MAKS:g} pt)"}
+                "reason": f"Jarak SL {risk:.2f} USD di luar batas aman (maks {SL_JARAK_MAKS:g} USD)"}
 
     pre_barrier = evaluate_snr_opposing_barrier(
         direction=direction,
@@ -1968,8 +1971,10 @@ def validate_m5_entry_confirmation(
         return res
 
     if spread > SPREAD_MAKS_POIN:
-        stages["zone_validation"] = {"status": "WAIT", "msg": f"Spread {spread:.2f} pt melebihi batas {SPREAD_MAKS_POIN:g}"}
-        W.append(f"Spread {spread:.2f} pt melebihi batas {SPREAD_MAKS_POIN:g}")
+        from modules.utils import format_price_distance
+        sp_txt = format_price_distance(spread, include_mt5_points=True)
+        stages["zone_validation"] = {"status": "WAIT", "msg": f"Spread {sp_txt} melebihi batas {SPREAD_MAKS_POIN:g} USD"}
+        W.append(f"Spread {sp_txt} melebihi batas {SPREAD_MAKS_POIN:g} USD")
         return res
 
     df_m5_raw = frames.get("M5")
@@ -2056,7 +2061,7 @@ def validate_m5_entry_confirmation(
         return res
 
     if dist > min(ENTRY_JARAK_MAKS, approach_tol):
-        stages["zone_touch"] = {"status": "FAIL", "msg": f"Harga sudah menjauh dari area setup ({dist:.2f} > {approach_tol:.2f} pt)"}
+        stages["zone_touch"] = {"status": "FAIL", "msg": f"Harga sudah menjauh dari area setup ({dist:.2f} USD > {approach_tol:.2f} USD)"}
         W.append(stages["zone_touch"]["msg"])
         return res
 
@@ -2068,7 +2073,7 @@ def validate_m5_entry_confirmation(
         first_touch_k = 0
     stages["zone_touch"] = {
         "status": "CONFIRMED" if touched else "NOT_REQUIRED",
-        "msg": f"Harga berada di area {setup_type} (jarak {dist:.2f} pt)" if touched else "Touch tidak diwajibkan untuk trend continuation",
+        "msg": f"Harga berada di area {setup_type} (jarak {dist:.2f} USD)" if touched else "Touch tidak diwajibkan untuk trend continuation",
     }
 
     # 3. Analisis M5 Structure (BOS/CHoCH), CISD, Liquidity Sweep, Rejection, Displacement

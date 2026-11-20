@@ -7,7 +7,7 @@ bergantung pada maupun mengubah hasil SMC Scanner.
 import json
 import os
 
-from modules.snr.breakout_detection import detect_zone_breakout
+from modules.snr.breakout_detection import build_snr_breakout_watch, detect_zone_breakout
 from modules.snr.config import (
     FILE_STATE_SNR_LIFECYCLE,
     SNR_LIFECYCLE_STATE_KEY,
@@ -80,7 +80,7 @@ def _load_snr_lifecycle_state():
 
 
 def _save_snr_lifecycle_state(zones):
-    temporary_path = FILE_STATE_SNR_LIFECYCLE + ".snr.tmp"
+    temporary_path = FILE_STATE_SNR_LIFECYCLE + f".snr.{os.getpid()}.tmp"
     try:
         if os.path.exists(FILE_STATE_SNR_LIFECYCLE):
             with open(FILE_STATE_SNR_LIFECYCLE, "r", encoding="utf-8") as state_file:
@@ -92,7 +92,14 @@ def _save_snr_lifecycle_state(zones):
         data[SNR_LIFECYCLE_STATE_KEY] = zones
         with open(temporary_path, "w", encoding="utf-8") as state_file:
             json.dump(data, state_file, indent=2, ensure_ascii=True)
-        os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
+        for attempt in range(4):
+            try:
+                os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.05)
     except (OSError, TypeError, ValueError) as exc:
         log_snr_error("snr_lifecycle_save", exc)
         raise RuntimeError("Lifecycle SNR state tidak dapat disimpan; scan dihentikan demi fail-safe.") from exc
@@ -151,10 +158,17 @@ def _track_snr_focus(focus_zone, ranked_zones, selection_reason=None):
             "zone_type": focus_zone.get("zone_type"), "low": focus_zone.get("low"), "high": focus_zone.get("high"),
             "change": change,
         }
-        temporary_path = FILE_STATE_SNR_LIFECYCLE + ".snr.tmp"
+        temporary_path = FILE_STATE_SNR_LIFECYCLE + f".snr_foc.{os.getpid()}.tmp"
         with open(temporary_path, "w", encoding="utf-8") as state_file:
             json.dump(data, state_file, indent=2, ensure_ascii=True)
-        os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
+        for attempt in range(4):
+            try:
+                os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.05)
         return change
     except (OSError, TypeError, ValueError) as exc:
         log_snr_error("snr_focus_state", exc)
@@ -179,6 +193,12 @@ def _build_snr_provisional_plan(entry_validation, ranked_zones, market_bias, cur
         plan["note"] = blocked
     elif direction == "NONE":
         plan["note"] = "ZONE TYPE UNKNOWN"
+    elif (
+        str(zone.get("zone_relevance") or "").upper() in ("FAR_REFERENCE", "INVALID")
+        or zone.get("is_far_reference")
+        or zone.get("is_distant_historical")
+    ):
+        plan["note"] = "FAR REFERENCE ONLY (WAIT)"
     elif lifecycle not in ("ACTIVE", "TOUCHED", "SWEEP"):
         plan["note"] = f"ZONE {lifecycle}"
     elif (direction == "SELL" and h4 == "BULLISH") or (direction == "BUY" and h4 == "BEARISH"):
@@ -212,9 +232,12 @@ def _build_snr_provisional_plan(entry_validation, ranked_zones, market_bias, cur
                 direction=direction, entry_price=entry_ref, active_zone=zone, opposing_zones=opposing,
                 trigger_candle=None, symbol_spec=symbol_spec, config=cfg,
             )
+            spec_digits = int((symbol_spec or {}).get("digits", 2))
             plan.update(
-                entry=rr.get("effective_entry"), distance=round(abs(entry_ref - price), 2),
-                reference="CURRENT PRICE" if inside else "ZONE EDGE", rr_calculation=rr,
+                entry=rr.get("effective_entry"),
+                distance=round(abs(entry_ref - price), spec_digits),
+                reference="CURRENT PRICE" if inside else "ZONE EDGE",
+                rr_calculation=rr,
             )
             if rr.get("valid"):
                 plan.update(status="PROVISIONAL", note="PROVISIONAL ONLY", sl=rr["sl"], tp1=rr["tp1"], tp2=rr["tp2"], rr=rr["rr_tp1"])
@@ -914,9 +937,38 @@ def run_snr_scan(
             validated["lifecycle_bars_ago"] = int(life_bars_ago)
             validated["lifecycle_is_historical"] = life_is_historical
 
+            is_confirmed_broken_zone = bool(
+                final_life_st in ("INVALIDATED", "BROKEN", "RETEST", "RECLAIM_PENDING", "RECLAIMED")
+                or validated.get("is_broken")
+                or validated.get("is_invalidated")
+            )
+            if is_confirmed_broken_zone and isinstance(bo_z, dict):
+                if bo_z.get("status") == "BREAKOUT_PENDING_CONFIRMATION":
+                    bo_z = dict(bo_z)
+                    bo_z["status"] = "VALID_BREAKOUT"
+                    bo_z["break_type"] = "CONFIRMED_BREAKDOWN" if z_type_cur == "SUPPORT" else "CONFIRMED_BREAKOUT"
+                    bo_z["potential_breakdown"] = False
+                    bo_z["potential_breakout"] = False
+                    bo_z["zone_failed"] = True
+                    bo_z["label"] = "VALID BREAKDOWN" if z_type_cur == "SUPPORT" else "VALID BREAKOUT"
+                    bo_z["summary_status"] = "CONFIRMED"
+                    bo_z["breakout_state"] = "BROKEN" if life_is_historical else "CONFIRMED"
+                elif bo_z.get("status") == "VALID_BREAKOUT":
+                    bo_z = dict(bo_z)
+                    bo_z["potential_breakdown"] = False
+                    bo_z["potential_breakout"] = False
+                    bo_z["breakout_state"] = "BROKEN" if life_is_historical else "CONFIRMED"
+                if validated.get("break_event") in ("POTENTIAL_BREAKDOWN", "POTENTIAL_BREAKOUT"):
+                    validated["break_event"] = "CONFIRMED_BREAKDOWN" if z_type_cur == "SUPPORT" else "CONFIRMED_BREAKOUT"
+
             validated["breakout_info"] = bo_z
             validated["retest_info"] = rt_z
             validated["rejection_info"] = rej_z
+            if is_confirmed_broken_zone:
+                validated["invalid_label"] = "INVALID — BROKEN"
+                validated["is_active"] = False
+            else:
+                validated["invalid_label"] = ""
             lifecycle_state[lifecycle_key] = {
                 "lifecycle_status": validated.get("lifecycle_status", "ACTIVE"),
                 "touch_count": int(validated.get("touch_count", 0) or 0),
@@ -926,6 +978,7 @@ def run_snr_scan(
                 "lifecycle_event": validated.get("lifecycle_event", "ACTIVE"),
                 "lifecycle_event_time": life_ev_time,
                 "reclaim_status": validated.get("reclaim_status", "WAIT"),
+                "invalid_label": validated.get("invalid_label", ""),
             }
             val_tf_list.append(validated)
 
@@ -964,7 +1017,8 @@ def run_snr_scan(
     # Jika structural timeframes kosong (misal hanya diberikan M5 pada unit test spesifik),
     # gunakan zona M5 sebagai fallback ranking
     zones_for_ranking = structural_scored_zones if structural_scored_zones else scored_zones_by_tf.get("M5", [])
-    ranked_zones = rank_zones(zones_for_ranking, current_price=current_price)
+    h1_atr_for_rank = safe_float((atr_diag.get("H1") or {}).get("atr14"), 0.0) or None
+    ranked_zones = rank_zones(zones_for_ranking, current_price=current_price, h1_atr=h1_atr_for_rank)
 
     # Market Bias awal dari H4, H1, M30
     market_bias = evaluate_snr_market_bias(
@@ -1136,6 +1190,80 @@ def run_snr_scan(
         config=cfg,
     )
 
+    mt5_orders_snapshot = None
+    mt5_reconciliation = None
+    invalid_pending_warnings = []
+    try:
+        from modules.mt5_conn import (
+            fetch_mt5_pending_orders_snapshot,
+            find_pending_orders_on_invalid_zones,
+            reconcile_pending_plan_with_mt5,
+        )
+        snap_ord = snapshot.get("mt5_orders_snapshot") if isinstance(snapshot, dict) else None
+        if isinstance(snap_ord, dict) and "query_ok" in snap_ord and "orders" in snap_ord:
+            mt5_orders_snapshot = snap_ord
+        elif live:
+            mt5_orders_snapshot = fetch_mt5_pending_orders_snapshot(
+                symbol=market_data["symbol"],
+                allow_live_query=True,
+            )
+        if isinstance(mt5_orders_snapshot, dict):
+            snr_plan_for_recon = {"symbol": market_data["symbol"], "plan_status": "WAIT"}
+            if decision.get("signal") in ("BUY", "SELL") and safe_float(decision.get("effective_entry") or decision.get("entry"), 0.0) > 0:
+                tz_r = decision.get("target_zone") or {}
+                snr_plan_for_recon = {
+                    "symbol": market_data["symbol"],
+                    "zone_id": tz_r.get("zone_id", ""),
+                    "zone_type": tz_r.get("zone_type", ""),
+                    "zone_low": safe_float(tz_r.get("low"), 0.0),
+                    "zone_high": safe_float(tz_r.get("high"), 0.0),
+                    "plan_status": "READY",
+                    "direction": decision.get("signal"),
+                    "order_type": "BUY LIMIT" if decision.get("signal") == "BUY" else "SELL LIMIT",
+                    "entry_price": safe_float(decision.get("effective_entry") or decision.get("entry"), 0.0),
+                    "sl": safe_float(decision.get("sl"), 0.0),
+                    "tp1": safe_float(decision.get("tp1"), 0.0),
+                    "tp2": safe_float(decision.get("tp2"), 0.0),
+                }
+            else:
+                prov_r = entry_validation.get("provisional_plan")
+                tz_r = entry_validation.get("target_zone") or {}
+                if isinstance(prov_r, dict) and prov_r.get("status") == "PROVISIONAL" and safe_float(prov_r.get("entry"), 0.0) > 0:
+                    p_dir_r = str(prov_r.get("direction") or "").upper()
+                    snr_plan_for_recon = {
+                        "symbol": market_data["symbol"],
+                        "zone_id": tz_r.get("zone_id", ""),
+                        "zone_type": tz_r.get("zone_type", ""),
+                        "zone_low": safe_float(tz_r.get("low"), 0.0),
+                        "zone_high": safe_float(tz_r.get("high"), 0.0),
+                        "plan_status": "PROVISIONAL",
+                        "direction": p_dir_r,
+                        "order_type": "BUY LIMIT" if p_dir_r == "BUY" else ("SELL LIMIT" if p_dir_r == "SELL" else ""),
+                        "entry_price": safe_float(prov_r.get("entry"), 0.0),
+                        "sl": safe_float(prov_r.get("sl"), 0.0),
+                        "tp1": safe_float(prov_r.get("tp1"), 0.0),
+                        "tp2": safe_float(prov_r.get("tp2"), 0.0),
+                    }
+            mt5_reconciliation = reconcile_pending_plan_with_mt5(
+                snr_plan_for_recon,
+                mt5_snapshot=mt5_orders_snapshot,
+                symbol=market_data["symbol"],
+            )
+            inv_pool_snr = [
+                z_i for z_i in (list(ranked_zones.get("broken_zones") or []) + list(ranked_zones.get("invalidated_zones") or []))
+                if not (isinstance(z_i, dict) and str(z_i.get("lifecycle_status") or z_i.get("status") or "").upper() == "RECLAIMED")
+            ]
+            invalid_pending_warnings = find_pending_orders_on_invalid_zones(
+                inv_pool_snr,
+                mt5_snapshot=mt5_orders_snapshot,
+                symbol=market_data["symbol"],
+                default_source="SNR",
+            )
+    except Exception as exc_mt5_snr:
+        log_snr_error("snr_mt5_reconcile", exc_mt5_snr)
+
+    breakout_watch = build_snr_breakout_watch(ranked_zones, price_action=price_action)
+
     scan_payload = {
         "method": "SNR",
         "symbol": market_data["symbol"],
@@ -1176,9 +1304,13 @@ def run_snr_scan(
         "momentum_by_tf": momentum_by_tf,
         "market_bias": market_bias,
         "price_action": price_action,
+        "breakout_watch": breakout_watch,
         "entry_validation": entry_validation,
         "decision": decision,
         "radar": radar,
+        "mt5_orders_snapshot": mt5_orders_snapshot,
+        "mt5_reconciliation": mt5_reconciliation,
+        "invalid_pending_warnings": invalid_pending_warnings,
     }
     try:
         from modules.trend_following import build_unified_market_context

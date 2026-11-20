@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import threading
 import time
 
 try:
@@ -29,11 +30,26 @@ try:
 except Exception:  # pragma: no cover
     mt5 = None
 
-from modules.config import SYMBOL as DEFAULT_APP_SYMBOL, FILE_STATE_ZONE_TRACKER
-from modules.config import PANTAU_FULL_REFRESH_SECONDS, PANTAU_INTERVALS_SECONDS
-from modules.terminal_ui import print_terminal
+from modules.config import (
+    FILE_STATE_ZONE_TRACKER,
+    LOW_RISK_MAX_ATR_RATIO,
+    LOW_RISK_MAX_DISTANCE_PT,
+    PANTAU_FULL_REFRESH_SECONDS,
+    PANTAU_INTERVALS_SECONDS,
+    PANTAU_TICK_POLL_SECONDS,
+    PANTAU_TICK_STALE_SECONDS,
+    SERVER_UTC_OFFSET_JAM,
+    SYMBOL as DEFAULT_APP_SYMBOL,
+)
+from modules.terminal_ui import LiveTerminalDashboard, get_terminal_width, print_terminal
 from modules.utils import format_wib_timestamp
-from modules.mt5_conn import _acceptable_trade_symbols, _info_tipe_pending, pastikan_mt5_aktif
+from modules.mt5_conn import (
+    MT5_IPC_LOCK,
+    _acceptable_trade_symbols,
+    _info_tipe_pending,
+    fetch_mt5_pending_orders_snapshot,
+    pastikan_mt5_aktif,
+)
 from modules.pantau import (
     ZoneMonitorState,
     collect_radar_watchlist_with_reconciliation,
@@ -50,9 +66,11 @@ from modules.snr.monitor import (
 from modules.zone_scanner import (
     _extract_risk_monitor_snapshot,
     create_market_snapshot,
+    evaluate_smc_zone_closed_invalidation,
     evaluate_trade_decision,
     format_smc_zone_lines,
     format_scan_presentation,
+    is_far_reference_zone,
     scan_xauusd_zones,
     smc_zone_summary,
 )
@@ -140,7 +158,7 @@ class PantauFocusTracker:
                     "zone_id", "zone_type", "timeframe", "rank_label", "grade", "score", "source",
                     "freshness", "snapshot_id", "snapshot_time",
                     "confirmed_time", "confirmation_time", "formation_time", "formation_timeframe",
-                    "risk_tier", "distance", "distance_points",
+                    "risk_tier", "zone_relevance", "distance", "distance_points",
                     "invalidation_price", "setup_type", "source_kind", "source_zone_id",
                     "lifecycle_status", "status",
                 )
@@ -187,17 +205,22 @@ class PantauFocusTracker:
         scan = result.get("scan_result") or {}
         if method == "SMC":
             zone = dec.get("zone") or {}
+            if zone and is_far_reference_zone(zone):
+                zone = {}
             if not zone:
                 pz = dec.get("primary_zone")
-                if isinstance(pz, dict) and pz.get("risk_tier") != "FAR_ZONE":
+                if isinstance(pz, dict) and not is_far_reference_zone(pz):
                     zone = pz
             if not zone:
                 priority = dec.get("radar_priority") or scan.get("radar_priority") or {}
-                zone = priority.get("primary_directional_zone") or priority.get("primary_zone") or {}
+                for cand_p in (priority.get("primary_directional_zone"), priority.get("primary_zone")):
+                    if isinstance(cand_p, dict) and not is_far_reference_zone(cand_p):
+                        zone = cand_p
+                        break
                 if not zone:
                     near_cand = priority.get("nearest_radar_zone")
                     h4_bias = str((scan.get("htf_context") or {}).get("H4") or "").upper()
-                    if isinstance(near_cand, dict) and near_cand.get("risk_tier") != "FAR_ZONE":
+                    if isinstance(near_cand, dict) and not is_far_reference_zone(near_cand):
                         zt = str(near_cand.get("zone_type") or "").upper()
                         aligned_ok = (
                             h4_bias not in ("BULLISH", "BEARISH")
@@ -363,9 +386,15 @@ class PantauFocusTracker:
             or str(zone.get("grade") or "").upper() == "REJECTED"
         ):
             return False
-        if str(zone.get("risk_tier") or "").upper() == "FAR_ZONE":
+        if str(zone.get("risk_tier") or "").upper() == "FAR_ZONE" or str(zone.get("zone_relevance") or "").upper() in ("FAR_REFERENCE", "INVALID"):
             return False
         if str(zone.get("radar_eligibility") or "QUALIFIED").upper() == "NOT_QUALIFIED":
+            return False
+        if zone.get("is_distant_historical"):
+            return False
+        if method == "SNR" and safe_float(zone.get("distance_atr"), 0.0) > 12.0:
+            return False
+        if method == "SMC" and is_far_reference_zone(zone):
             return False
         return True
 
@@ -434,6 +463,7 @@ class PantauFocusTracker:
                 zone.get("is_valid") is False
                 or lifecycle in ("INVALIDATED", "EXPIRED", "MITIGATED", "BROKEN", "UNCONFIRMED")
                 or str(zone.get("risk_tier") or "").upper() == "FAR_ZONE"
+                or str(zone.get("zone_relevance") or "").upper() in ("FAR_REFERENCE", "INVALID")
                 or str(zone.get("radar_eligibility") or "QUALIFIED").upper() == "NOT_QUALIFIED"
             ):
                 continue
@@ -453,12 +483,13 @@ class PantauFocusTracker:
             return [current]
         if stamp < previous[0]:
             raise ValueError("Waktu tick MT5 bergerak mundur.")
-        ticks = mt5.copy_ticks_range(
-            self.symbol,
-            datetime.fromtimestamp(previous[0] // 1000, tz=timezone.utc),
-            datetime.fromtimestamp(stamp // 1000 + 1, tz=timezone.utc),
-            mt5.COPY_TICKS_ALL,
-        )
+        with MT5_IPC_LOCK:
+            ticks = mt5.copy_ticks_range(
+                self.symbol,
+                datetime.fromtimestamp(previous[0] // 1000, tz=timezone.utc),
+                datetime.fromtimestamp(stamp // 1000 + 1, tz=timezone.utc),
+                mt5.COPY_TICKS_ALL,
+            )
         if ticks is None:
             raise RuntimeError(f"Riwayat tick MT5 tidak tersedia: {mt5.last_error()}")
         history = [
@@ -542,7 +573,7 @@ class PantauFocusTracker:
                 and (full_refresh or snr_live_switch)
                 and snapshot_valid
                 and method_ok
-                and not record["ever_taken"]
+                and (not record["ever_taken"] or record.get("account_status") == "POSITION NOT OBSERVED")
                 and record.get("account_status") not in ("RUNNING", "AMBIGUOUS")
             ):
                 cur_chk = self._current_zone(method, results.get(method), record["zone_id"], record=record)
@@ -564,17 +595,15 @@ class PantauFocusTracker:
                 trk_obj = ((results.get(method) or {}).get("decision") or {}).get("zone_tracker") if method == "SMC" else None
                 trk_rec = trk_obj.get_zone(record["zone_id"]) if (trk_obj and hasattr(trk_obj, "get_zone")) else None
                 trk_life = str((trk_rec or {}).get("lifecycle_status") or (trk_rec or {}).get("status") or "").upper()
-                smc_inval = safe_float((cur_chk or {}).get("invalidation_price"), 0.0) if method == "SMC" else 0.0
-                smc_inval_breached = bool(
-                    method == "SMC" and price > 0 and smc_inval > 0 and (
-                        (record["direction"] == "BUY" and price < smc_inval)
-                        or (record["direction"] == "SELL" and price > smc_inval)
-                    )
-                )
+                snap_frames_f = snap.get("frames") if isinstance(snap.get("frames"), dict) else None
+                smc_inval_breached = False
+                if method == "SMC" and cur_chk is not None and snap_frames_f is not None:
+                    smc_inval_breached, _, _, _, _ = evaluate_smc_zone_closed_invalidation(cur_chk, snap_frames_f)
                 snr_side_breached = bool(
-                    method == "SNR" and price > 0 and (
-                        (record["direction"] == "BUY" and price < record["low"])
-                        or (record["direction"] == "SELL" and price > record["high"])
+                    method == "SNR" and cur_chk is not None and (
+                        cur_chk.get("is_broken") is True
+                        or cur_chk.get("is_invalidated") is True
+                        or cur_life in ("BROKEN", "INVALIDATED", "RECLAIMED", "RECLAIM_PENDING", "RETEST")
                     )
                 )
                 stale_zone = (
@@ -592,6 +621,7 @@ class PantauFocusTracker:
                     or cur_chk.get("is_active") is False
                     or str(cur_chk.get("grade") or "").upper() == "REJECTED"
                     or cur_tier == "FAR_ZONE"
+                    or str((cur_chk or {}).get("zone_relevance") or "").upper() in ("FAR_REFERENCE", "INVALID")
                     or cur_elig == "NOT_QUALIFIED"
                 )
                 cand_valid = self._is_valid_focus_candidate(method, zone)
@@ -803,13 +833,10 @@ class PantauFocusTracker:
             trk_obj_inv = ((results.get(method) or {}).get("decision") or {}).get("zone_tracker") if (method == "SMC" and full_refresh and method_ok) else None
             trk_rec_inv = trk_obj_inv.get_zone(record["zone_id"]) if (trk_obj_inv and hasattr(trk_obj_inv, "get_zone")) else None
             trk_life_inv = str((trk_rec_inv or {}).get("lifecycle_status") or (trk_rec_inv or {}).get("status") or "").upper()
-            cur_smc_inval = safe_float((current or {}).get("invalidation_price"), 0.0) if method == "SMC" else 0.0
-            smc_inval_breached_inv = bool(
-                method == "SMC" and fresh and price > 0 and cur_smc_inval > 0 and (
-                    (record["direction"] == "BUY" and price < cur_smc_inval)
-                    or (record["direction"] == "SELL" and price > cur_smc_inval)
-                )
-            )
+            snap_frames_inv = snap.get("frames") if isinstance(snap.get("frames"), dict) else None
+            smc_inval_breached_inv = False
+            if method == "SMC" and current is not None and snap_frames_inv is not None:
+                smc_inval_breached_inv, _, _, _, _ = evaluate_smc_zone_closed_invalidation(current, snap_frames_inv)
             invalid = bool(
                 vanished
                 or smc_inval_breached_inv
@@ -881,6 +908,8 @@ class PantauFocusTracker:
                     outcome = f"ZONA TIDAK LAGI TERDETEKSI SEBELUM POSISI TERDETEKSI{unc_tag}"
                 else:
                     outcome = f"ZONA INVALID SEBELUM POSISI TERDETEKSI{unc_tag}"
+            elif not outcome and account_status == "POSITION NOT OBSERVED" and (invalid or broken_or_reclaimed or vanished or not (record["low"] <= price <= record["high"])):
+                outcome = f"POSISI SELESAI / TERTUTUP (ZONA {lifecycle or 'HISTORICAL'})"
             if outcome:
                 note = "POSISI BELUM TERDETEKSI" if not record["ever_taken"] else "STATUS PENUTUPAN MT5 BELUM DIPASTIKAN"
                 self._emit_lifecycle_alert(
@@ -1117,7 +1146,7 @@ class PantauFocusTracker:
         else:
             use_live_snr_focus = bool(
                 record
-                and not record.get("ever_taken")
+                and (not record.get("ever_taken") or record.get("account_status") == "POSITION NOT OBSERVED")
                 and record.get("account_status") not in ("RUNNING", "AMBIGUOUS")
                 and self._is_valid_focus_candidate("SNR", zone)
             )
@@ -1490,11 +1519,14 @@ def extract_smc_monitor_summary(scan_result, decision):
         elif str(zt).upper() in ("CONFIRMED", "PASS", "PASSED"):
             zt = "TOUCHED_PREVIOUSLY"
 
+    from modules.utils import extract_unit_spec_from_container, format_price_distance, calc_price_distance
+    _u_smc_lbl = extract_unit_spec_from_container(scan, symbol=scan.get("symbol"))
     if isinstance(pz, dict) and pz.get("price_low") is not None:
+        _pz_d = calc_price_distance(safe_float(pz.get("price_low")), safe_float(pz.get("price_high")), current_price)
         pz_label = (
             f"{pz.get('timeframe', 'H1')} {pz.get('zone_type', 'ZONE')} "
             f"{safe_float(pz.get('price_low')):.2f}-{safe_float(pz.get('price_high')):.2f} "
-            f"(Grade {pz.get('grade', '-')}, Score {safe_float(pz.get('score')):.2f}, Dist: {max(safe_float(pz.get('price_low')) - current_price, current_price - safe_float(pz.get('price_high')), 0.0):.2f} pts)"
+            f"(Grade {pz.get('grade', '-')}, Score {safe_float(pz.get('score')):.2f}, Dist: {format_price_distance(_pz_d, spec=_u_smc_lbl, include_mt5_points=True)})"
         )
         pz_id = str(pz.get("zone_id") or "NONE")
     else:
@@ -1502,10 +1534,11 @@ def extract_smc_monitor_summary(scan_result, decision):
         pz_id = "NONE"
 
     if isinstance(nz, dict) and nz.get("price_low") is not None:
+        _nz_d = calc_price_distance(safe_float(nz.get("price_low")), safe_float(nz.get("price_high")), current_price)
         nz_label = (
             f"{nz.get('timeframe', 'H1')} {nz.get('zone_type', 'ZONE')} "
             f"{safe_float(nz.get('price_low')):.2f}-{safe_float(nz.get('price_high')):.2f} "
-            f"(Grade {nz.get('grade', '-')}, Score {safe_float(nz.get('score')):.2f}, Dist: {max(safe_float(nz.get('price_low')) - current_price, current_price - safe_float(nz.get('price_high')), 0.0):.2f} pts)"
+            f"(Grade {nz.get('grade', '-')}, Score {safe_float(nz.get('score')):.2f}, Dist: {format_price_distance(_nz_d, spec=_u_smc_lbl, include_mt5_points=True)})"
         )
     else:
         nz_label = "NONE"
@@ -1685,7 +1718,8 @@ def collect_account_monitor_data(symbol=None, snapshot=None, pos_list=None, orde
 
     if mt5 is not None:
         try:
-            acc = mt5.account_info()
+            with MT5_IPC_LOCK:
+                acc = mt5.account_info()
             if acc is not None:
                 balance = safe_float(getattr(acc, "balance", 0.0))
                 equity = safe_float(getattr(acc, "equity", balance))
@@ -1754,6 +1788,8 @@ def collect_account_monitor_data(symbol=None, snapshot=None, pos_list=None, orde
         else:
             ord_no_sl_count += 1
 
+    from modules.utils import extract_unit_spec_from_container, format_price_distance
+    _u_acc = extract_unit_spec_from_container(snapshot, symbol=sym)
     spread_val = None
     if isinstance(snapshot, dict) and snapshot.get("spread") is not None:
         spread_val = safe_float(snapshot.get("spread"), 0.0)
@@ -1761,7 +1797,7 @@ def collect_account_monitor_data(symbol=None, snapshot=None, pos_list=None, orde
         try:
             t_info = mt5.symbol_info_tick(sym)
             if t_info is not None and getattr(t_info, "bid", 0.0) > 0:
-                spread_val = round(float(t_info.ask - t_info.bid), 2)
+                spread_val = round(float(t_info.ask - t_info.bid), _u_acc["digits"])
         except Exception:
             pass
 
@@ -1784,13 +1820,16 @@ def collect_account_monitor_data(symbol=None, snapshot=None, pos_list=None, orde
         total_risk_status = "NO EXPOSURE (Tidak ada posisi atau pending order aktif)"
     else:
         risk_pct = (total_sl_risk_usd / equity * 100.0) if equity > 0 else 0.0
-        total_risk_status = f"${total_sl_risk_usd:,.2f} ({risk_pct:.2f}% Equity | {total_sl_risk_pts:.2f} pts)"
+        total_risk_status = f"${total_sl_risk_usd:,.2f} ({risk_pct:.2f}% Equity | {format_price_distance(total_sl_risk_pts, spec=_u_acc, include_mt5_points=True)})"
 
     if spread_val is not None and spread_val >= 0.80:
-        risk_warnings.append(f"WARNING: Spread saat ini melebar ({spread_val:.2f} pts).")
+        risk_warnings.append(f"WARNING: Spread saat ini melebar ({format_price_distance(spread_val, spec=_u_acc, include_mt5_points=True)}).")
 
     return {
         "symbol": sym,
+        "digits": _u_acc["digits"],
+        "point": _u_acc["point"],
+        "trade_tick_size": _u_acc["trade_tick_size"],
         "available": bool(snap_r.get("available", False)),
         "open_positions": len(positions),
         "pending_orders": len(orders),
@@ -1825,8 +1864,12 @@ from modules.smart_monitor_report import (  # noqa: E402,F401  (compat re-export
     _stage_status,
     classify_monitor_alerts,
     format_account_monitor_section,
+    format_loading_live_dashboard,
+    format_smart_monitor_dashboard,
+    format_smart_monitor_dashboard_with_meta,
     format_smart_monitor_detail,
     format_smart_monitor_report,
+    patch_dashboard_live_ticker,
     resolve_monitor_pending_plans,
 )
 
@@ -1863,26 +1906,312 @@ def _get_m5_tick_bucket(snapshot):
     return None
 
 
+def _fetch_mt5_prev_d1_close_and_digits(symbol, frames=None, market_status=None, cached_digits=None, cached_prev_d1=None):
+    """
+    Ambil spesifikasi presisi `digits` broker dan harga penutupan D1 sebelumnya langsung dari MT5
+    (`copy_rates_from_pos(symbol, TIMEFRAME_D1, 1, 1)`), tanpa angka perkiraan.
+    """
+    digits = cached_digits if isinstance(cached_digits, int) and 0 <= cached_digits <= 5 else None
+    prev_d1 = cached_prev_d1 if (isinstance(cached_prev_d1, (int, float)) and cached_prev_d1 > 0) else None
+
+    if mt5 is not None:
+        try:
+            with MT5_IPC_LOCK:
+                term = mt5.terminal_info()
+                if term is not None and getattr(term, "connected", True) is not False:
+                    sym_info = mt5.symbol_info(symbol)
+                    if sym_info is not None:
+                        d_raw = getattr(sym_info, "digits", None)
+                        if d_raw is not None:
+                            digits = max(0, min(5, int(d_raw)))
+                    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 1)
+                    if rates is not None and len(rates) > 0:
+                        c_val = safe_float(rates[0]["close"], 0.0)
+                        if c_val > 0:
+                            prev_d1 = c_val
+        except Exception:
+            pass
+
+    if prev_d1 is None and isinstance(frames, dict):
+        df_d1 = frames.get("D1")
+        if df_d1 is not None and len(df_d1) > 0 and "Close" in df_d1.columns:
+            try:
+                mkt_up = str(market_status or "").upper()
+                idx_d1 = -2 if (mkt_up == "CLOSED" and len(df_d1) >= 2) else -1
+                c_fb = float(df_d1["Close"].iloc[idx_d1])
+                if c_fb > 0:
+                    prev_d1 = c_fb
+            except Exception:
+                pass
+
+    return (digits if digits is not None else 2), prev_d1
+
+
+def _is_market_weekend_closed():
+    now_utc = datetime.now(timezone.utc)
+    wd, hr = now_utc.weekday(), now_utc.hour
+    return bool(wd == 5 or (wd == 4 and hr >= 22) or (wd == 6 and hr < 21))
+
+
+def _estimate_mt5_tick_age_seconds(tick_time_sec, tick_time_msc=0, clock_offset_sec=None):
+    """
+    Hitung umur tick berdasarkan timestamp tick MT5 (bukan waktu refresh UI).
+    Jika `clock_offset_sec` sudah terkalibrasi dari tick MT5 yang bergerak aktif,
+    hitung langsung terhadap jam server MT5 (kebal offset broker UTC+2/+3 & skew jam PC).
+    """
+    ts_sec = (float(tick_time_msc) / 1000.0) if (isinstance(tick_time_msc, (int, float)) and tick_time_msc > 0) else safe_float(tick_time_sec, 0.0)
+    if ts_sec <= 0:
+        return None
+    now_utc = time.time()
+    if isinstance(clock_offset_sec, (int, float)) and math.isfinite(clock_offset_sec):
+        return max(0.0, (now_utc - float(clock_offset_sec)) - ts_sec)
+    if SERVER_UTC_OFFSET_JAM is not None:
+        return max(0.0, now_utc - (ts_sec - float(SERVER_UTC_OFFSET_JAM) * 3600.0))
+    raw_diff = now_utc - ts_sec
+    if abs(raw_diff) <= 1200.0:
+        return max(0.0, raw_diff)
+    if abs(raw_diff) <= 14.5 * 3600.0:
+        offset_guess = round(raw_diff / 3600.0) * 3600.0
+        return max(0.0, raw_diff - offset_guess)
+    return max(0.0, raw_diff)
+
+
+def _poll_fast_mt5_tick(
+    symbol,
+    base_snapshot=None,
+    cached_digits=None,
+    last_meta_check_mono=0.0,
+    cached_mkt_closed=False,
+    cached_connected=True,
+    last_known_tick_ts=None,
+):
+    """
+    Polling tick harga XAUUSD super-ringan (~100-200 ms) memakai `mt5.symbol_info_tick()` saja
+    pada jalur cepat. Cek `terminal_info()` / `symbol_info()` dilakukan berkala (~3 detik) atau
+    saat tick kosong agar CPU sangat ringan dan bebas blocking analisis SMC/SNR.
+    """
+    now_m = time.monotonic()
+    digits = cached_digits if isinstance(cached_digits, int) and 0 <= cached_digits <= 5 else None
+    mkt_closed = bool(cached_mkt_closed)
+    connected = bool(cached_connected)
+    meta_checked_mono = last_meta_check_mono
+    tick = None
+
+    from modules.utils import get_symbol_unit_spec
+    point = None
+    trade_tick_size = None
+    if isinstance(base_snapshot, dict):
+        point = base_snapshot.get("point")
+        trade_tick_size = base_snapshot.get("trade_tick_size")
+    try:
+        if mt5 is None:
+            connected = False
+        else:
+            need_meta = (digits is None) or (point is None) or (not connected) or ((now_m - last_meta_check_mono) >= 3.0)
+            with MT5_IPC_LOCK:
+                tick = mt5.symbol_info_tick(symbol)
+                if tick is None or need_meta:
+                    term = mt5.terminal_info()
+                    connected = bool(term is not None and getattr(term, "connected", True) is not False)
+                    if connected:
+                        sym_info = mt5.symbol_info(symbol)
+                        if sym_info is not None:
+                            u_sp = get_symbol_unit_spec(symbol=symbol, sym_info=sym_info)
+                            digits = u_sp["digits"]
+                            point = u_sp["point"]
+                            trade_tick_size = u_sp["trade_tick_size"]
+                            mkt_closed = bool(getattr(sym_info, "trade_mode", None) == 0)
+                        else:
+                            mkt_closed = False
+                    meta_checked_mono = now_m
+    except Exception as exc:
+        from modules.utils import _catat_error
+        _catat_error("unified_monitor_fast_tick", exc)
+        tick = None
+
+    if not mkt_closed and _is_market_weekend_closed():
+        mkt_closed = True
+    if digits is None or point is None or trade_tick_size is None:
+        u_fb = get_symbol_unit_spec(symbol=symbol)
+        if digits is None:
+            digits = u_fb["digits"]
+        if point is None:
+            point = u_fb["point"]
+        if trade_tick_size is None:
+            trade_tick_size = u_fb["trade_tick_size"]
+
+    base = base_snapshot if isinstance(base_snapshot, dict) else {}
+    meta_state = {
+        "digits": digits,
+        "point": point,
+        "trade_tick_size": trade_tick_size,
+        "meta_check_mono": meta_checked_mono,
+        "mkt_closed": mkt_closed,
+        "connected": connected,
+        "last_known_tick_ts": last_known_tick_ts,
+    }
+
+    if not connected or tick is None:
+        snap_out = {
+            **base,
+            "symbol": symbol,
+            "digits": digits,
+            "snapshot_status": "DATA_INCOMPLETE",
+            "data_ok": False,
+            "live": False,
+            "data_freshness": "NO DATA",
+            "connection_status": "DISCONNECTED",
+            "market_status": "CLOSED" if mkt_closed else "UNKNOWN",
+            "bid": None,
+            "ask": None,
+            "mid": None,
+            "spread": None,
+            "tick_bid_raw": None,
+            "tick_ask_raw": None,
+            "tick_time": None,
+            "tick_time_msc": 0,
+            "snapshot_price": None,
+            "current_price": None,
+            "snapshot_time": last_known_tick_ts or base.get("snapshot_time") or "NO TICK",
+            "error_reason": "Koneksi MT5 terputus (DISCONNECTED); tidak ada tick live",
+        }
+        return snap_out, None, meta_state
+
+    bid = safe_float(getattr(tick, "bid", None), 0.0)
+    ask = safe_float(getattr(tick, "ask", None), 0.0)
+    tick_time = safe_float(getattr(tick, "time", None), 0.0)
+    tick_msc = int(safe_float(getattr(tick, "time_msc", None), 0))
+    if tick_msc <= 0 and tick_time > 0:
+        tick_msc = int(tick_time * 1000)
+
+    if bid <= 0 or ask < bid or ask <= 0:
+        snap_out = {
+            **base,
+            "symbol": symbol,
+            "digits": digits,
+            "snapshot_status": "DATA_INCOMPLETE",
+            "data_ok": False,
+            "live": False,
+            "data_freshness": "INVALID",
+            "connection_status": "CONNECTED",
+            "market_status": "CLOSED" if mkt_closed else "OPEN",
+            "bid": None,
+            "ask": None,
+            "mid": None,
+            "spread": None,
+            "tick_bid_raw": None,
+            "tick_ask_raw": None,
+            "tick_time": tick_time or None,
+            "tick_time_msc": tick_msc,
+            "snapshot_price": None,
+            "current_price": None,
+            "snapshot_time": last_known_tick_ts or base.get("snapshot_time") or "NO TICK",
+            "error_reason": "MT5 tick Bid/Ask tidak valid",
+        }
+        m5_bkt = str(int(tick_time // 300)) if tick_time > 0 else None
+        return snap_out, m5_bkt, meta_state
+
+    mid = round((bid + ask) / 2.0, digits)
+    tick_ts_str = format_wib_timestamp(tick_time, default_now=False, source_tz="UTC") if tick_time > 0 else (last_known_tick_ts or "NO TICK")
+    meta_state["last_known_tick_ts"] = tick_ts_str
+
+    snap_out = {
+        **base,
+        "symbol": symbol,
+        "digits": digits,
+        "point": point,
+        "trade_tick_size": trade_tick_size,
+        "bid": round(bid, digits),
+        "ask": round(ask, digits),
+        "mid": mid,
+        "spread": round(ask - bid, digits),
+        "snapshot_price": mid,
+        "current_price": mid,
+        "tick_time": tick_time or None,
+        "tick_time_msc": tick_msc,
+        "tick_bid_raw": bid,
+        "tick_ask_raw": ask,
+        "server_time": tick_time or base.get("server_time"),
+        "snapshot_time": tick_ts_str,
+        "market_status": "CLOSED" if mkt_closed else "OPEN",
+        "snapshot_status": "MARKET_CLOSED" if mkt_closed else "OK",
+        "data_ok": not mkt_closed,
+        "live": not mkt_closed,
+        "data_freshness": "STALE" if mkt_closed else "FRESH",
+        "connection_status": "CONNECTED",
+        "error_reason": "Market sedang tutup (MARKET CLOSED)" if mkt_closed else "",
+    }
+    m5_bkt = str(int(tick_time // 300)) if tick_time > 0 else None
+    return snap_out, m5_bkt, meta_state
+
+
 def _refresh_tick_snapshot(snapshot, symbol):
     """Refresh only MT5 tick fields; closed OHLC frames stay cached between M5 closes."""
     updated = dict(snapshot) if isinstance(snapshot, dict) else {}
+    digits = updated.get("digits") if isinstance(updated.get("digits"), int) else None
+    mkt_closed = False
     try:
-        tick = mt5.symbol_info_tick(symbol) if mt5 is not None else None
+        with MT5_IPC_LOCK:
+            term = mt5.terminal_info() if mt5 is not None else None
+            if mt5 is None or term is None or getattr(term, "connected", True) is False:
+                updated.update({
+                    "snapshot_status": "DATA_INCOMPLETE",
+                    "data_ok": False,
+                    "live": False,
+                    "data_freshness": "NO DATA",
+                    "connection_status": "DISCONNECTED",
+                    "bid": None,
+                    "ask": None,
+                    "mid": None,
+                    "spread": None,
+                    "tick_bid_raw": None,
+                    "tick_ask_raw": None,
+                    "snapshot_price": None,
+                    "current_price": None,
+                    "snapshot_time": updated.get("snapshot_time") or format_wib_timestamp(default_now=True),
+                    "error_reason": "Koneksi MT5 terputus (DISCONNECTED); tidak ada tick live",
+                })
+                return updated, None
+            sym_info = mt5.symbol_info(symbol)
+            if sym_info is not None:
+                from modules.utils import get_symbol_unit_spec
+                u_sp_r = get_symbol_unit_spec(symbol=symbol, sym_info=sym_info)
+                digits = u_sp_r["digits"]
+                updated["point"] = u_sp_r["point"]
+                updated["trade_tick_size"] = u_sp_r["trade_tick_size"]
+                if getattr(sym_info, "trade_mode", None) == 0:
+                    mkt_closed = True
+            if not mkt_closed and _is_market_weekend_closed():
+                mkt_closed = True
+            tick = mt5.symbol_info_tick(symbol)
     except Exception as exc:
         from modules.utils import _catat_error
         _catat_error("unified_monitor_tick", exc)
         tick = None
+    if digits is None or updated.get("point") is None or updated.get("trade_tick_size") is None:
+        from modules.utils import get_symbol_unit_spec
+        u_fb_r = get_symbol_unit_spec(symbol=symbol)
+        if digits is None:
+            digits = u_fb_r["digits"]
+        updated.setdefault("point", u_fb_r["point"])
+        updated.setdefault("trade_tick_size", u_fb_r["trade_tick_size"])
+    updated["digits"] = digits
     if tick is None:
         updated.update({
             "snapshot_status": "DATA_INCOMPLETE",
             "data_ok": False,
+            "live": False,
             "data_freshness": "NO DATA",
             "connection_status": "DISCONNECTED",
             "bid": None,
             "ask": None,
             "mid": None,
+            "spread": None,
+            "tick_bid_raw": None,
+            "tick_ask_raw": None,
             "snapshot_price": None,
             "current_price": None,
+            "snapshot_time": format_wib_timestamp(default_now=True),
             "error_reason": "MT5 tick tidak tersedia; menunggu koneksi/data baru",
         })
         return updated, None
@@ -1893,22 +2222,27 @@ def _refresh_tick_snapshot(snapshot, symbol):
         updated.update({
             "snapshot_status": "DATA_INCOMPLETE",
             "data_ok": False,
+            "live": False,
             "data_freshness": "INVALID",
             "connection_status": "CONNECTED",
             "bid": None,
             "ask": None,
             "mid": None,
+            "spread": None,
+            "tick_bid_raw": None,
+            "tick_ask_raw": None,
             "snapshot_price": None,
             "current_price": None,
             "error_reason": "MT5 tick Bid/Ask tidak valid",
         })
         return updated, str(int(tick_time // 300)) if tick_time > 0 else None
-    mid = (bid + ask) / 2.0
+    mid = round((bid + ask) / 2.0, digits)
     updated.update({
-        "bid": bid,
-        "ask": ask,
+        "digits": digits,
+        "bid": round(bid, digits),
+        "ask": round(ask, digits),
         "mid": mid,
-        "spread": round(ask - bid, 4),
+        "spread": round(ask - bid, digits),
         "snapshot_price": mid,
         "current_price": mid,
         "tick_time": tick_time or None,
@@ -1917,10 +2251,13 @@ def _refresh_tick_snapshot(snapshot, symbol):
         "tick_ask_raw": ask,
         "server_time": tick_time or updated.get("server_time"),
         "snapshot_time": format_wib_timestamp(tick_time, default_now=True, source_tz="UTC"),
-        "snapshot_status": "OK",
-        "data_ok": True,
+        "market_status": "CLOSED" if mkt_closed else "OPEN",
+        "snapshot_status": "MARKET_CLOSED" if mkt_closed else "OK",
+        "data_ok": not mkt_closed,
+        "live": not mkt_closed,
+        "data_freshness": "STALE" if mkt_closed else "FRESH",
         "connection_status": "CONNECTED",
-        "error_reason": "",
+        "error_reason": "Market sedang tutup (MARKET CLOSED)" if mkt_closed else "",
     })
     return updated, str(int(tick_time // 300)) if tick_time > 0 else None
 
@@ -2033,6 +2370,22 @@ class UnifiedMonitor:
         self.last_snr_inline_event = None
         self.last_mt5_status_sig = None
         self._last_zone_transition = {}
+        self._event_state_dedup = {}
+        self._emitted_terminal_events = set()
+        self._recent_events = []
+        self._prev_live_price = None
+        self._last_price_dir = "FLAT"
+        self._last_tick_delta = 0.0
+        self._symbol_digits = None
+        self._prev_d1_close = None
+        self._last_d1_fetch_mono = 0.0
+        self._last_tick_msc_seen = None
+        self._last_tick_bid_seen = None
+        self._last_tick_ask_seen = None
+        self._last_tick_msc_mono = 0.0
+        self._mt5_clock_offset_sec = None
+        self._async_ticker_active = False
+        self._ticker_lock = threading.Lock()
         self.focus_tracker = PantauFocusTracker(self.symbol) if focus_tracking else None
         if news_alert_engine is not None:
             self.news_alert_engine = news_alert_engine
@@ -2042,6 +2395,236 @@ class UnifiedMonitor:
                 self.news_alert_engine = NewsAlertEngine()
             except Exception:
                 self.news_alert_engine = None
+
+    def _build_live_ticker(self, snapshot, is_live_poll=False):
+        """
+        Susun data ticker real-time thread-safe (MT5 live tick, digits broker, D1 close sebelumnya,
+        perubahan nominal & %, arah warna naik/turun per tick baru, serta deteksi DISCONNECTED/STALE
+        berbasis timestamp tick MT5).
+        """
+        with self._ticker_lock:
+            return self._build_live_ticker_locked(snapshot, is_live_poll=is_live_poll)
+
+    def _build_live_ticker_locked(self, snapshot, is_live_poll=False):
+        snap = snapshot if isinstance(snapshot, dict) else {}
+        sym = str(snap.get("symbol") or self.symbol)
+        now_m = time.monotonic()
+        mkt_st = str(snap.get("market_status") or "").upper()
+        conn_st = str(snap.get("connection_status") or "").upper()
+        fresh_st = str(snap.get("data_freshness") or "").upper()
+        snap_st = str(snap.get("snapshot_status") or "").upper()
+
+        need_d1_refresh = (
+            self._prev_d1_close is None
+            or self._symbol_digits is None
+            or (now_m - self._last_d1_fetch_mono) >= 300.0
+        )
+        if need_d1_refresh:
+            digs, prev_d1 = _fetch_mt5_prev_d1_close_and_digits(
+                sym,
+                frames=snap.get("frames") if isinstance(snap.get("frames"), dict) else None,
+                market_status=mkt_st,
+                cached_digits=self._symbol_digits,
+                cached_prev_d1=self._prev_d1_close,
+            )
+            self._symbol_digits = digs
+            if prev_d1 is not None:
+                self._prev_d1_close = prev_d1
+            self._last_d1_fetch_mono = now_m
+        digits = int(snap.get("digits")) if isinstance(snap.get("digits"), int) else (self._symbol_digits or 2)
+        prev_d1_close = snap.get("prev_d1_close") if snap.get("prev_d1_close") is not None else self._prev_d1_close
+
+        if conn_st == "DISCONNECTED" or fresh_st == "NO DATA" or (snap_st == "DATA_INCOMPLETE" and mkt_st != "CLOSED" and conn_st != "CONNECTED"):
+            feed_st = "DISCONNECTED"
+        elif mkt_st == "CLOSED" or snap_st == "MARKET_CLOSED":
+            feed_st = "CLOSED"
+        elif fresh_st in ("STALE", "INVALID") or snap_st == "DATA_INCOMPLETE" or snap.get("data_ok") is False:
+            feed_st = "STALE"
+        else:
+            feed_st = "OPEN"
+
+        bid_raw = safe_float(snap.get("tick_bid_raw", snap.get("bid")), 0.0)
+        ask_raw = safe_float(snap.get("tick_ask_raw", snap.get("ask")), 0.0)
+        tick_time_raw = safe_float(snap.get("tick_time"), 0.0)
+        tick_msc = int(safe_float(snap.get("tick_time_msc"), 0))
+        if tick_msc <= 0 and tick_time_raw > 0:
+            tick_msc = int(tick_time_raw * 1000)
+
+        is_older_snapshot = bool(
+            tick_msc > 0
+            and self._last_tick_msc_seen is not None
+            and tick_msc < self._last_tick_msc_seen
+        )
+        is_new_tick = False
+
+        # Deteksi tick baru & STALE berbasis timestamp tick MT5 (bukan waktu refresh UI)
+        if feed_st == "OPEN" and is_live_poll and not is_older_snapshot and tick_msc > 0:
+            tick_advanced = (
+                self._last_tick_msc_seen is not None
+                and (
+                    tick_msc > self._last_tick_msc_seen
+                    or (
+                        tick_msc == self._last_tick_msc_seen
+                        and (bid_raw != self._last_tick_bid_seen or ask_raw != self._last_tick_ask_seen)
+                    )
+                )
+            )
+            if self._last_tick_msc_seen is None:
+                is_new_tick = True
+                self._last_tick_msc_seen = tick_msc
+                self._last_tick_bid_seen = bid_raw
+                self._last_tick_ask_seen = ask_raw
+                self._last_tick_msc_mono = now_m
+                init_age = _estimate_mt5_tick_age_seconds(tick_time_raw, tick_msc, clock_offset_sec=None)
+                if init_age is not None and init_age > max(float(PANTAU_TICK_STALE_SECONDS), 120.0):
+                    feed_st = "STALE"
+            elif tick_advanced:
+                is_new_tick = True
+                self._last_tick_msc_seen = tick_msc
+                self._last_tick_bid_seen = bid_raw
+                self._last_tick_ask_seen = ask_raw
+                self._last_tick_msc_mono = now_m
+                # Kalibrasi offset jam server MT5 dari tick hidup agar umur timestamp MT5 selalu akurat
+                self._mt5_clock_offset_sec = time.time() - (float(tick_msc) / 1000.0)
+            else:
+                ts_age = _estimate_mt5_tick_age_seconds(
+                    tick_time_raw, tick_msc, clock_offset_sec=self._mt5_clock_offset_sec
+                )
+                ts_threshold = (
+                    float(PANTAU_TICK_STALE_SECONDS)
+                    if self._mt5_clock_offset_sec is not None
+                    else max(float(PANTAU_TICK_STALE_SECONDS), 120.0)
+                )
+                frozen_age = now_m - self._last_tick_msc_mono
+                if (ts_age is not None and ts_age > ts_threshold) or frozen_age > float(PANTAU_TICK_STALE_SECONDS):
+                    feed_st = "STALE"
+
+        if feed_st in ("DISCONNECTED", "STALE"):
+            return {
+                "symbol": sym,
+                "digits": digits,
+                "feed_status": feed_st,
+                "connection_status": conn_st or feed_st,
+                "market_status": mkt_st or "UNKNOWN",
+                "data_freshness": "NO DATA" if feed_st == "DISCONNECTED" else "STALE",
+                "live_price": None,
+                "bid": None,
+                "ask": None,
+                "spread": None,
+                "prev_d1_close": prev_d1_close,
+                "daily_change": None,
+                "daily_change_pct": None,
+                "price_direction": "FLAT",
+                "tick_delta": 0.0,
+                "tick_time": tick_time_raw,
+                "tick_time_msc": tick_msc,
+                "is_new_tick": False,
+                "snapshot_time": snap.get("snapshot_time"),
+            }
+
+        if feed_st == "CLOSED":
+            live_p = safe_float(snap.get("snapshot_price", snap.get("current_price")), 0.0)
+            if live_p <= 0 and bid_raw > 0:
+                live_p = bid_raw
+            spr_v = round(ask_raw - bid_raw, digits) if (bid_raw > 0 and ask_raw >= bid_raw) else snap.get("spread")
+            daily_chg = (live_p - prev_d1_close) if (live_p > 0 and prev_d1_close and prev_d1_close > 0) else None
+            daily_pct = ((daily_chg / prev_d1_close) * 100.0) if (daily_chg is not None and prev_d1_close) else None
+            return {
+                "symbol": sym,
+                "digits": digits,
+                "feed_status": "CLOSED",
+                "connection_status": conn_st or "CONNECTED",
+                "market_status": "CLOSED",
+                "data_freshness": fresh_st or "STALE",
+                "live_price": live_p if live_p > 0 else None,
+                "bid": bid_raw if bid_raw > 0 else None,
+                "ask": ask_raw if ask_raw > 0 else None,
+                "spread": spr_v,
+                "prev_d1_close": prev_d1_close,
+                "daily_change": daily_chg,
+                "daily_change_pct": daily_pct,
+                "price_direction": "FLAT",
+                "tick_delta": 0.0,
+                "tick_time": tick_time_raw,
+                "tick_time_msc": tick_msc,
+                "is_new_tick": False,
+                "snapshot_time": snap.get("snapshot_time"),
+            }
+
+        # MARKET OPEN: MT5 live tick sebagai sumber harga utama (Bid cocok persis dengan D1 Close MT5)
+        live_p = bid_raw if bid_raw > 0 else safe_float(snap.get("snapshot_price", snap.get("current_price")), 0.0)
+        if live_p <= 0:
+            return {
+                "symbol": sym,
+                "digits": digits,
+                "feed_status": "STALE",
+                "connection_status": conn_st or "CONNECTED",
+                "market_status": mkt_st or "OPEN",
+                "data_freshness": "STALE",
+                "live_price": None,
+                "bid": None,
+                "ask": None,
+                "spread": None,
+                "prev_d1_close": prev_d1_close,
+                "daily_change": None,
+                "daily_change_pct": None,
+                "price_direction": "FLAT",
+                "tick_delta": 0.0,
+                "tick_time": tick_time_raw,
+                "tick_time_msc": tick_msc,
+                "is_new_tick": False,
+                "snapshot_time": snap.get("snapshot_time"),
+            }
+
+        eps = 10 ** (-(digits + 1))
+        should_update_dir = (
+            not is_older_snapshot
+            and (
+                (is_live_poll and (is_new_tick or tick_msc <= 0))
+                or (not is_live_poll and not self._async_ticker_active)
+                or self._prev_live_price is None
+            )
+        )
+        if should_update_dir:
+            if self._prev_live_price is not None:
+                delta = live_p - self._prev_live_price
+                if delta > eps:
+                    self._last_price_dir = "UP"
+                    self._last_tick_delta = delta
+                elif delta < -eps:
+                    self._last_price_dir = "DOWN"
+                    self._last_tick_delta = delta
+            else:
+                if prev_d1_close and prev_d1_close > 0:
+                    self._last_price_dir = "UP" if live_p > prev_d1_close + eps else ("DOWN" if live_p < prev_d1_close - eps else "FLAT")
+                self._last_tick_delta = 0.0
+            self._prev_live_price = live_p
+
+        daily_chg = (live_p - prev_d1_close) if (prev_d1_close and prev_d1_close > 0) else None
+        daily_pct = ((daily_chg / prev_d1_close) * 100.0) if (daily_chg is not None and prev_d1_close) else None
+        spr_v = round(ask_raw - bid_raw, digits) if (bid_raw > 0 and ask_raw >= bid_raw) else snap.get("spread")
+
+        return {
+            "symbol": sym,
+            "digits": digits,
+            "feed_status": "OPEN",
+            "connection_status": "CONNECTED",
+            "market_status": "OPEN",
+            "data_freshness": "FRESH",
+            "live_price": live_p,
+            "bid": bid_raw if bid_raw > 0 else None,
+            "ask": ask_raw if ask_raw > 0 else None,
+            "spread": spr_v,
+            "prev_d1_close": prev_d1_close,
+            "daily_change": daily_chg,
+            "daily_change_pct": daily_pct,
+            "price_direction": self._last_price_dir,
+            "tick_delta": self._last_tick_delta,
+            "tick_time": tick_time_raw,
+            "tick_time_msc": tick_msc,
+            "is_new_tick": bool(is_new_tick),
+            "snapshot_time": snap.get("snapshot_time"),
+        }
 
     def _run_smc_isolated(self, shared_snapshot, detailed=False):
         """Menjalankan SMC Scanner dalam blok terisolasi agar error SMC tidak menghentikan SNR."""
@@ -2286,13 +2869,9 @@ class UnifiedMonitor:
                             prev_p = safe_float(previous_snapshot.get("snapshot_price"), 0.0)
                             was_in = bool(z_lo > 0 and prev_p > 0 and z_lo <= prev_p <= z_hi)
                             now_in = bool(z_lo > 0 and z_lo <= new_price <= z_hi)
-                            inv_hit = bool(
-                                inv_p > 0 and (
-                                    (z_tp in ("DEMAND", "SUPPORT") and new_price < inv_p)
-                                    or (z_tp in ("SUPPLY", "RESISTANCE") and new_price > inv_p)
-                                )
-                            )
-                            if (was_in != now_in) or inv_hit:
+                            # Jangan memicu full scan tiap tick hanya karena intrabar wick melewati invalidation;
+                            # invalidasi tetap dievaluasi berbasis candle closed pada penutupan candle berikutnya.
+                            if was_in != now_in:
                                 tick_refresh_needed = True
                     smc_res["decision"] = dec
                     smc_res["summary"] = extract_smc_monitor_summary(smc_res.get("scan_result"), dec)
@@ -2409,24 +2988,30 @@ class UnifiedMonitor:
                 self.last_snr_focus_touch = None
 
         positions = pos_list
-        if self.focus_tracker is not None and positions is None and mt5 is not None and isinstance(shared_snap, dict) and shared_snap.get("live") is True:
-            try:
-                positions = mt5.positions_get(symbol=self.symbol)
-                if positions is None:
-                    from modules.utils import _catat_error
-                    _catat_error("pantau_focus_positions", RuntimeError(f"MT5 positions_get gagal: {mt5.last_error()}"))
-            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
-                from modules.utils import _catat_error
-                _catat_error("pantau_focus_positions", exc)
-                positions = None
+        eff_orders_list = orders_list
+        mt5_unified_snap = None
+        if (positions is None or eff_orders_list is None) and isinstance(shared_snap, dict) and shared_snap.get("live") is True:
+            mt5_unified_snap = fetch_mt5_pending_orders_snapshot(
+                symbol=self.symbol,
+                orders_override=eff_orders_list,
+                positions_override=positions,
+                allow_live_query=True,
+            )
+            if mt5_unified_snap.get("query_ok"):
+                if eff_orders_list is None:
+                    eff_orders_list = mt5_unified_snap.get("orders") or []
+                if positions is None and mt5_unified_snap.get("positions_query_ok"):
+                    positions = mt5_unified_snap.get("positions") or []
 
         acc_res = collect_account_monitor_data(
             symbol=self.symbol,
             snapshot=shared_snap,
-            pos_list=positions if self.focus_tracker is not None else pos_list,
-            orders_list=orders_list,
+            pos_list=positions,
+            orders_list=eff_orders_list,
             risk_data=risk_data,
         )
+        if mt5_unified_snap is not None and mt5_unified_snap.get("query_ok"):
+            acc_res["orders_snapshot"] = mt5_unified_snap
         if isinstance(shared_snap, dict) and acc_res.get("orders_snapshot") is not None:
             shared_snap["mt5_orders_snapshot"] = acc_res["orders_snapshot"]
         if isinstance(smc_res, dict) and acc_res.get("orders_snapshot") is not None:
@@ -2434,6 +3019,9 @@ class UnifiedMonitor:
                 smc_res["decision"]["mt5_orders_snapshot"] = acc_res["orders_snapshot"]
             if isinstance(smc_res.get("scan_result"), dict):
                 smc_res["scan_result"]["mt5_orders_snapshot"] = acc_res["orders_snapshot"]
+        if isinstance(snr_res, dict) and acc_res.get("orders_snapshot") is not None:
+            if isinstance(snr_res.get("scan_result"), dict):
+                snr_res["scan_result"]["mt5_orders_snapshot"] = acc_res["orders_snapshot"]
 
         focus_alerts = []
         if self.focus_tracker is not None:
@@ -2533,10 +3121,12 @@ class UnifiedMonitor:
             elif self.last_connection_state == "DISCONNECTED":
                 combined_alerts.append("[DATA] MT5 RECONNECTED")
         self.last_connection_state = current_connection
+        from modules.utils import extract_unit_spec_from_container, format_price_distance
+        _u_cyc = extract_unit_spec_from_container(shared_snap, symbol=self.symbol)
         spread = safe_float((shared_snap or {}).get("spread"), -1.0)
         spread_state = spread >= 0.80 if spread >= 0 else None
         if spread_state is True and self.last_spread_state is not True:
-            combined_alerts.append(f"[RISK] SPREAD TOO HIGH ({spread:.2f})")
+            combined_alerts.append(f"[RISK] SPREAD TOO HIGH ({format_price_distance(spread, spec=_u_cyc, include_mt5_points=True)})")
         elif spread_state is False and self.last_spread_state is True:
             combined_alerts.append("[RISK] SPREAD NORMAL")
         if spread_state is not None:
@@ -2616,7 +3206,7 @@ class UnifiedMonitor:
             f"   {header_title}",
             "====================================================",
             f"SYMBOL : {self.symbol} | PRICE : {price_txt} | TIME : {ts_str} | CYCLE : #{self.cycle_count}",
-            f"SNAPSHOT ID : {snap_id_disp} | SAME={same_snap_disp} | DIFF={p_diff_disp:.2f} pts",
+            f"SNAPSHOT ID : {snap_id_disp} | SAME={same_snap_disp} | DIFF={format_price_distance(p_diff_disp, spec=_u_cyc)}",
             f"FRESHNESS   : SMC={fresh_smc_disp} | SNR={fresh_snr_disp}",
             news_summary,
         ]
@@ -2912,12 +3502,193 @@ class UnifiedMonitor:
             or bool(material_alerts)
         )
         self.last_combined_signature = curr_sig_tuple
+
+        # Event deduplication berbasis (ticket, event_type, state): hanya terbitkan perubahan penting
+        # dengan teks singkat anti-spam (maksimal 5 recent events unik).
+        snap_ts_short = ts_str[11:19] if len(ts_str) >= 19 else datetime.now().strftime("%H:%M:%S")
+        important_events = []
+
+        def _extract_ticket_key(raw_text, default_key="GLOBAL"):
+            m_tkt = re.search(r"#(\d+)", str(raw_text or ""))
+            return int(m_tkt.group(1)) if m_tkt else default_key
+
+        def _register_event(ticket_key, event_type, state_id, text_msg, terminal=False):
+            clean_msg = " ".join(str(text_msg or "").replace("\n", " ").split())
+            if not clean_msg:
+                return
+            if len(clean_msg) > 96:
+                clean_msg = clean_msg[:93].rstrip(" |;,:-") + "..."
+            dedup_scope = (ticket_key, event_type)
+            canonical_key = (ticket_key, event_type, state_id)
+            if terminal:
+                if canonical_key in self._emitted_terminal_events:
+                    return
+                self._emitted_terminal_events.add(canonical_key)
+                if len(self._emitted_terminal_events) > 500:
+                    self._emitted_terminal_events = set(list(self._emitted_terminal_events)[-400:])
+            else:
+                if self._event_state_dedup.get(dedup_scope) == state_id:
+                    return
+                self._event_state_dedup[dedup_scope] = state_id
+            stamped = f"[{snap_ts_short}] {clean_msg}"
+            important_events.append({
+                "event_id": canonical_key,
+                "scope": dedup_scope,
+                "message": stamped,
+            })
+            # Deduplikasi recent events per (ticket_key, event_type) agar status terbaru menggantikan yang lama
+            self._recent_events = [
+                ev for ev in self._recent_events
+                if not (isinstance(ev, dict) and ev.get("scope") == dedup_scope)
+            ]
+            self._recent_events.append({"scope": dedup_scope, "state": state_id, "text": stamped})
+            if len(self._recent_events) > 10:
+                self._recent_events = self._recent_events[-10:]
+
+        # 1. Pergantian setup / fokus zona
+        setup_state = (active_zone_src, active_zone_id, smart_view.get("direction"), active_zone_lo, active_zone_hi)
+        if self.cycle_count > 1 and active_zone_id != "NONE":
+            prev_setup = self._event_state_dedup.get(("FOCUS", "SETUP_FOCUS"))
+            if prev_setup is not None and prev_setup != setup_state:
+                _register_event(
+                    "FOCUS",
+                    "SETUP_FOCUS",
+                    setup_state,
+                    f"FOCUS -> {active_zone_src} {smart_view.get('direction', '')} {active_zone_lo:.2f}-{active_zone_hi:.2f}",
+                )
+        elif active_zone_id != "NONE":
+            self._event_state_dedup[("FOCUS", "SETUP_FOCUS")] = setup_state
+
+        # 2. Zone touch (SMC / SNR)
+        touch_st_ev = str(smart_view.get("touch_status") or "").upper()
+        if touch_st_ev == "IN_ZONE" and active_zone_id != "NONE":
+            _register_event(
+                active_zone_id,
+                "ZONE_TOUCH",
+                "IN_ZONE",
+                f"TOUCH {active_zone_src} {active_zone_lo:.2f}-{active_zone_hi:.2f} @ {price_disp:.2f}",
+            )
+        elif active_zone_id != "NONE" and (active_zone_id, "ZONE_TOUCH") in self._event_state_dedup:
+            self._event_state_dedup[(active_zone_id, "ZONE_TOUCH")] = touch_st_ev
+
+        # 3. Trigger M5 & Confirmed Signal
+        trig_ev = str(smart_view.get("trigger") or "WAIT").upper()
+        if trig_ev == "CONFIRMED" and active_zone_id != "NONE":
+            _register_event(
+                active_zone_id,
+                "M5_TRIGGER",
+                (trig_ev, smart_view.get("confirmed")),
+                f"M5 TRIGGER {active_zone_lo:.2f}-{active_zone_hi:.2f} | Conf={smart_view.get('confirmed')}",
+            )
+
+        # 4. Breakout / Breakdown / Invalidasi (SMC & SNR)
+        bo_watch_ev = str(smart_view.get("snr_breakout_watch") or "").strip()
+        if bo_watch_ev:
+            _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"BREAKOUT: {bo_watch_ev}")
+
+        # 5. Material & inline alerts terdeduplikasi (skip pesan risk panjang yang sudah ditangani grup RISK)
+        for al_raw in list(material_alerts) + list(inline_alerts) + list(news_alerts):
+            al_up = str(al_raw or "").upper()
+            if any(skip_tok in al_up for skip_tok in ("[RISK WARNING]", "TANPA STOP LOSS", "SL MISSING", "MASIH AKTIF PADA ZONA INVALID", "AKTIF DI ZONA INVALID")):
+                continue
+            is_inv_al = any(k in al_up for k in ("INVALID", "BROKEN", "JEBOL"))
+            is_key_al = is_inv_al or any(
+                k in al_up for k in ("TOUCH", "SENTUH", "KELUAR", "BREAKOUT", "BREAKDOWN", "RECLAIM", "CONFIRMED", "TERKONFIRMASI", "NEWS", "HIGH", "MT5", "POSISI", "PENDING", "SPREAD")
+            )
+            if not is_key_al:
+                continue
+            tkt_k = _extract_ticket_key(al_raw, default_key=active_zone_id or "MARKET")
+            ev_t = "INVALIDATION" if is_inv_al else ("NEWS" if "NEWS" in al_up else "MARKET_ALERT")
+            st_k = re.sub(r"\d+\.\d+", "", al_up).strip()[:64]
+            _register_event(tkt_k, ev_t, st_k, al_raw, terminal=is_inv_al)
+
+        # 6. Perubahan Order / Posisi MT5 (ringkas tanpa spam daftar panjang)
+        prev_mt5_ev = self._event_state_dedup.get(("ACCOUNT", "MT5_ORDERS_POS"))
+        if prev_mt5_ev is None:
+            self._event_state_dedup[("ACCOUNT", "MT5_ORDERS_POS")] = (mt5_status_sig, plan_sig)
+        elif prev_mt5_ev != (mt5_status_sig, plan_sig):
+            p_setup_ev = smart_view.get("pending_setup") or {}
+            alt_ev = list(smart_view.get("alt_pending_setups") or [])
+            m_cnt_ev = sum(
+                len(((it.get("mt5_reconciliation") or {}).get("matched_tickets") or []))
+                for it in [p_setup_ev, *alt_ev]
+                if isinstance(it, dict) and it.get("is_placed")
+            )
+            nosl_ev = int(safe_float(acc_res.get("position_without_sl"), 0)) + int(safe_float(acc_res.get("pending_without_sl"), 0))
+            _register_event(
+                "ACCOUNT",
+                "MT5_ORDERS_POS",
+                (mt5_status_sig, plan_sig),
+                f"MT5 ORDER: Pos={acc_res.get('open_positions', 0)} | Pend={acc_res.get('pending_orders', 0)} | Match={m_cnt_ev} | NoSL={nosl_ev}",
+            )
+
+        # 7. Perubahan Risk Warning (terdeduplikasi per ticket + jenis risiko + state)
+        inv_pend_warns = list(smart_view.get("invalid_pending_warnings") or [])
+        inv_pend_scope = smart_view.get("invalid_pending_scope")
+        inv_scope_tag = ""
+        if isinstance(inv_pend_scope, dict):
+            inv_scope_tag = f" [SMC+SNR: SMC={int(inv_pend_scope.get('smc', 0))}, SNR={int(inv_pend_scope.get('snr', 0))}, Total={int(inv_pend_scope.get('combined', len(inv_pend_warns)))}]"
+        if inv_pend_warns:
+            if self.cycle_count == 1 and len(inv_pend_warns) > 2:
+                # Pada siklus awal bila banyak order lama di zona invalid, ringkas jadi 1 event grup agar tidak membanjiri dashboard
+                inv_tkts_sorted = tuple(sorted(str(iw.get("ticket")) for iw in inv_pend_warns if isinstance(iw, dict)))
+                _register_event(
+                    "ACCOUNT",
+                    "INVALID_ZONE_ORDER",
+                    inv_tkts_sorted,
+                    f"RISK: {len(inv_pend_warns)} Pending on INVALID Zone{inv_scope_tag} [HIGH RISK]",
+                )
+                for iw in inv_pend_warns:
+                    if isinstance(iw, dict) and iw.get("ticket") is not None:
+                        z_sig_iw = tuple(sorted(str(z) for z in (iw.get("zone_ids") or [iw.get("zone_id")]) if z))
+                        self._emitted_terminal_events.add((iw.get("ticket"), "INVALID_ZONE_ORDER", z_sig_iw))
+            else:
+                for iw in inv_pend_warns:
+                    if not isinstance(iw, dict):
+                        continue
+                    tkt_iw = iw.get("ticket")
+                    ent_iw = safe_float(iw.get("entry_price"), 0.0)
+                    z_cnt_iw = int(iw.get("invalid_zone_count") or 1)
+                    srcs_iw = [str(s).upper() for s in (iw.get("sources") or []) if s]
+                    src_tag_iw = f"[{'+'.join(srcs_iw)}] " if srcs_iw else ""
+                    z_note = f"{z_cnt_iw} INVALID zones" if z_cnt_iw > 1 else "INVALID zone"
+                    sl_note = " [NO SL]" if iw.get("sl_missing") else ""
+                    z_sig_iw = tuple(sorted(str(z) for z in (iw.get("zone_ids") or [iw.get("zone_id")]) if z))
+                    _register_event(
+                        tkt_iw,
+                        "INVALID_ZONE_ORDER",
+                        z_sig_iw,
+                        f"INV ORDER #{tkt_iw} @ {ent_iw:.2f} ({src_tag_iw}{z_note}{sl_note})",
+                        terminal=True,
+                    )
+
+        mt5_risk_sum = smart_view.get("mt5_risk_summary") if isinstance(smart_view.get("mt5_risk_summary"), dict) else {}
+        eff_risk_now = str(smart_view.get("critical_risk_display") or "").strip()
+        eff_risk_sig = mt5_risk_sum.get("signature") if mt5_risk_sum else risk_sig
+        if eff_risk_now:
+            _register_event("ACCOUNT", "RISK_SUMMARY", eff_risk_sig, eff_risk_now)
+        else:
+            self._event_state_dedup[("ACCOUNT", "RISK_SUMMARY")] = "CLEAN"
+
+        recent_event_strings = [
+            ev["text"] if isinstance(ev, dict) else str(ev)
+            for ev in self._recent_events[-5:]
+        ]
+        cycle_result["live_ticker"] = self._build_live_ticker(
+            shared_snap,
+            is_live_poll=(not self._async_ticker_active and (snapshot is None or tick_only)),
+        )
         cycle_result["state_changed"] = state_changed
         cycle_result["material_alerts"] = material_alerts
         cycle_result["inline_alerts"] = inline_alerts
-        cycle_result["risk_signature"] = risk_sig
+        cycle_result["important_events"] = important_events
+        cycle_result["recent_events"] = recent_event_strings
+        cycle_result["risk_signature"] = eff_risk_sig
         cycle_result["smart_view"] = smart_view
         cycle_result["compact_report"] = format_smart_monitor_report(cycle_result)
+        dash_txt, dash_meta = format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=recent_event_strings)
+        cycle_result["dashboard_report"] = dash_txt
+        cycle_result["dashboard_widget_meta"] = dash_meta
         cycle_result["detail_report"] = format_smart_monitor_detail(cycle_result)
         self.last_cycle_result = cycle_result
         return cycle_result
@@ -3120,9 +3891,220 @@ def run_unified_pantau(
     last_out = None
     last_full_refresh = 0.0
     last_m5_bucket = None
-    last_risk_signature = None
-    last_risk_emit = 0.0
-    status_bar_active = False
+    use_dashboard_ui = (not detailed)
+    dashboard = LiveTerminalDashboard(force_fallback=(max_cycles == 1 or not use_dashboard_ui))
+    if use_dashboard_ui and dashboard.supports_live:
+        dashboard.start()
+
+    # Mode real-time decoupled:
+    # - Main thread: polling `mt5.symbol_info_tick()` ~150 ms & update Rich Live in-place (tanpa blocking)
+    # - Background thread: menjalankan siklus analisis SMC/SNR/Account/News pada interval existing
+    use_async_fast_ticker = bool(
+        use_dashboard_ui
+        and dashboard.supports_live
+        and snapshot is None
+        and max_cycles != 1
+    )
+
+    if use_async_fast_ticker:
+        poll_interval = max(0.10, min(0.20, float(PANTAU_TICK_POLL_SECONDS)))
+        worker_lock = threading.Lock()
+        stop_event = threading.Event()
+        job_event = threading.Event()
+        worker_state = {
+            "busy": False,
+            "pending_job": None,
+            "completed_out": None,
+            "completed_tick_only": False,
+            "completed_started_mono": 0.0,
+            "seq": 0,
+        }
+
+        def _analysis_worker():
+            while not stop_event.is_set():
+                if not job_event.wait(timeout=0.25):
+                    continue
+                while not stop_event.is_set():
+                    with worker_lock:
+                        job = worker_state["pending_job"]
+                        worker_state["pending_job"] = None
+                        if job is None:
+                            job_event.clear()
+                            break
+                        worker_state["busy"] = True
+                    try:
+                        c_out = monitor.run_cycle(
+                            snapshot=job["snapshot"],
+                            mode=mode,
+                            detailed=detailed,
+                            tick_only=job["tick_only"],
+                        )
+                    except Exception as w_exc:
+                        from modules.utils import _catat_error
+                        _catat_error("unified_pantau_worker", w_exc)
+                        c_out = None
+                    with worker_lock:
+                        worker_state["busy"] = False
+                        if c_out is not None:
+                            worker_state["completed_out"] = c_out
+                            worker_state["completed_tick_only"] = bool(job["tick_only"])
+                            worker_state["completed_started_mono"] = job["started_mono"]
+                            worker_state["seq"] += 1
+
+        worker_thread = threading.Thread(target=_analysis_worker, name="pantau-smc-snr-worker", daemon=True)
+        worker_thread.start()
+
+        monitor._async_ticker_active = True
+        try:
+            meta_state = {
+                "digits": None,
+                "meta_check_mono": 0.0,
+                "mkt_closed": False,
+                "connected": True,
+                "last_known_tick_ts": None,
+            }
+            base_dash_text = None
+            base_dash_meta = None
+            last_rendered_key = None
+            last_applied_seq = 0
+            next_cycle_due_mono = 0.0  # Segera jadwalkan siklus analisis pertama di background
+
+            while True:
+                loop_start = time.monotonic()
+
+                # 1. Polling ringan MT5 tick (100-200 ms) — tidak pernah diblokir oleh SMC/SNR/News/AI
+                base_snap_ref = last_out.get("snapshot") if isinstance(last_out, dict) else None
+                live_snap, live_m5_bucket, meta_state = _poll_fast_mt5_tick(
+                    monitor.symbol,
+                    base_snapshot=base_snap_ref,
+                    cached_digits=meta_state["digits"],
+                    last_meta_check_mono=meta_state["meta_check_mono"],
+                    cached_mkt_closed=meta_state["mkt_closed"],
+                    cached_connected=meta_state["connected"],
+                    last_known_tick_ts=meta_state["last_known_tick_ts"],
+                )
+                live_tk = monitor._build_live_ticker(live_snap, is_live_poll=True)
+                live_ts = live_snap.get("snapshot_time") or live_tk.get("snapshot_time") or "NO TICK"
+
+                # 2. Ambil hasil analisis terbaru dari background worker (bila selesai)
+                completed_out = None
+                completed_tick_only = False
+                completed_started = 0.0
+                completed_seq = last_applied_seq
+                worker_busy = False
+                with worker_lock:
+                    worker_busy = bool(worker_state["busy"] or worker_state["pending_job"] is not None)
+                    if worker_state["seq"] > last_applied_seq and worker_state["completed_out"] is not None:
+                        completed_out = worker_state["completed_out"]
+                        completed_tick_only = worker_state["completed_tick_only"]
+                        completed_started = worker_state["completed_started_mono"]
+                        completed_seq = worker_state["seq"]
+
+                analysis_updated = False
+                if completed_out is not None:
+                    last_out = completed_out
+                    cycles_done += 1
+                    last_applied_seq = completed_seq
+                    analysis_updated = True
+                    if not completed_tick_only:
+                        last_full_refresh = completed_started or loop_start
+                        last_m5_bucket = _get_m5_tick_bucket(last_out.get("snapshot")) or live_m5_bucket
+                    if last_out.get("refresh_required") or (monitor.focus_tracker is not None and monitor.focus_tracker.refresh_required):
+                        last_full_refresh = 0.0
+
+                    base_dash_text = last_out.get("dashboard_report")
+                    base_dash_meta = last_out.get("dashboard_widget_meta")
+                    if not base_dash_text or base_dash_meta is None:
+                        base_dash_text, base_dash_meta = format_smart_monitor_dashboard_with_meta(
+                            last_out, recent_events=last_out.get("recent_events")
+                        )
+
+                    if sleep_sec is None:
+                        monitor_state = (last_out.get("smart_view") or _smart_monitor_context(last_out)).get("monitor_state", "IDLE")
+                        wait_seconds = PANTAU_INTERVALS_SECONDS.get(monitor_state, 5.0)
+                    else:
+                        monitor_state = (last_out.get("smart_view") or _smart_monitor_context(last_out)).get("monitor_state", "IDLE")
+                        wait_seconds = min(float(sleep_sec), PANTAU_INTERVALS_SECONDS.get(monitor_state, 5.0))
+                    next_cycle_due_mono = time.monotonic() + max(0.2, float(wait_seconds))
+
+                # 3. Render in-place HANYA jika tick/status/analisis/lebar terminal berubah (anti-flicker & hemat CPU)
+                cur_term_w = get_terminal_width()
+                tick_key = (
+                    live_tk.get("tick_time_msc"),
+                    live_tk.get("bid"),
+                    live_tk.get("ask"),
+                    live_tk.get("feed_status"),
+                    live_tk.get("price_direction"),
+                    live_ts,
+                    last_applied_seq,
+                    cur_term_w,
+                )
+                if analysis_updated or tick_key != last_rendered_key:
+                    if base_dash_meta is not None:
+                        patched_txt, patched_meta = patch_dashboard_live_ticker(
+                            base_dash_text, base_dash_meta, live_tk, snapshot_time=live_ts
+                        )
+                        if patched_txt is None or patched_meta is None:
+                            # Lebar terminal berubah -> susun ulang layout dashboard 1x lalu patch live tick
+                            live_cycle = dict(last_out)
+                            live_cycle["snapshot"] = live_snap
+                            live_cycle["snapshot_time"] = live_ts
+                            live_cycle["live_ticker"] = live_tk
+                            base_dash_text, base_dash_meta = format_smart_monitor_dashboard_with_meta(
+                                live_cycle, recent_events=last_out.get("recent_events")
+                            )
+                            patched_txt, patched_meta = base_dash_text, base_dash_meta
+                    else:
+                        patched_txt, patched_meta = format_loading_live_dashboard(
+                            live_tk, snapshot_time=live_ts, mode=mode
+                        )
+                    dashboard.update(patched_txt, widget_meta=patched_meta)
+                    last_rendered_key = tick_key
+
+                if max_cycles is not None and cycles_done >= int(max_cycles):
+                    break
+
+                # 4. Jadwalkan siklus analisis SMC/SNR di background sesuai interval existing (atau candle M5 baru)
+                now_m = time.monotonic()
+                m5_changed = bool(
+                    cycles_done > 0
+                    and live_m5_bucket is not None
+                    and last_m5_bucket is not None
+                    and live_m5_bucket != last_m5_bucket
+                )
+                full_refresh_due = bool(
+                    cycles_done == 0
+                    or m5_changed
+                    or (now_m - last_full_refresh >= PANTAU_FULL_REFRESH_SECONDS)
+                )
+                cycle_due = bool(cycles_done == 0 or m5_changed or (now_m >= next_cycle_due_mono))
+                if cycle_due and not worker_busy:
+                    job_snap = None if full_refresh_due else dict(live_snap)
+                    job_tick_only = (not full_refresh_due)
+                    with worker_lock:
+                        worker_state["pending_job"] = {
+                            "snapshot": job_snap,
+                            "tick_only": job_tick_only,
+                            "started_mono": now_m,
+                        }
+                        job_event.set()
+
+                elapsed = time.monotonic() - loop_start
+                sleep_rem = max(0.03, poll_interval - elapsed)
+                time.sleep(sleep_rem)
+        except KeyboardInterrupt:
+            stop_event.set()
+            job_event.set()
+            dashboard.stop()
+            print_terminal("\n[UNIFIED MONITOR] Pemantauan dihentikan oleh pengguna.")
+        finally:
+            monitor._async_ticker_active = False
+            stop_event.set()
+            job_event.set()
+            dashboard.stop()
+
+        return last_out
+
     try:
         while True:
             tick_only = False
@@ -3153,145 +4135,52 @@ def run_unified_pantau(
             last_out = cycle_out
             cycles_done += 1
 
-            # Cetak laporan penuh pada siklus pertama, atau ketika terjadi perubahan state material (SIGNAL/ZONE/STATE/alert baru)
-            output = cycle_out.get("detail_report") if detailed and mode == "unified" else (
-                cycle_out.get("compact_report") if mode == "unified" else cycle_out["formatted_report"]
-            )
-            news_alerts_cycle = cycle_out.get("news_alerts") or []
-            view = cycle_out.get("smart_view") or _smart_monitor_context(cycle_out)
-            eff_risk_warnings = []
-            for rw_item in list(cycle_out.get("risk_warnings") or []) + list(view.get("risk_alerts") or []):
-                rw_txt = str(rw_item or "").strip()
-                if rw_txt and rw_txt not in eff_risk_warnings:
-                    eff_risk_warnings.append(rw_txt)
-            risk_signature = cycle_out.get("risk_signature")
-            if risk_signature is None:
-                risk_signature = tuple(_normalize_risk_warning_sig(rw) for rw in eff_risk_warnings)
-            material_alerts_cycle = cycle_out.get("material_alerts")
-            if material_alerts_cycle is None:
-                material_alerts_cycle = list(cycle_out.get("alerts") or [])
-            inline_alerts_cycle = list(cycle_out.get("inline_alerts") or [])
-
-            if cycles_done == 1:
-                for al in material_alerts_cycle:
-                    print_terminal(al)
-                print_terminal("\n" + output)
-                if mode == "unified" and not detailed and news_alerts_cycle:
-                    for na in news_alerts_cycle:
-                        print_terminal(na)
-                last_risk_signature = risk_signature
-                if eff_risk_warnings:
-                    last_risk_emit = time.monotonic()
-            elif cycle_out.get("state_changed"):
-                if status_bar_active:
-                    print_terminal()
-                    status_bar_active = False
-                for al in material_alerts_cycle:
-                    print_terminal(al)
-                if risk_signature != last_risk_signature and eff_risk_warnings:
-                    for rw in eff_risk_warnings:
-                        if rw not in material_alerts_cycle:
-                            print_terminal(f"[ACCOUNT RISK] {rw}")
-                print_terminal("\n" + output)
-                if mode == "unified" and not detailed and news_alerts_cycle:
-                    for na in news_alerts_cycle:
-                        print_terminal(na)
-                last_risk_signature = risk_signature
-                if eff_risk_warnings:
-                    last_risk_emit = time.monotonic()
+            important_events = list(cycle_out.get("important_events") or [])
+            if use_dashboard_ui:
+                dash_text = cycle_out.get("dashboard_report")
+                dash_meta = cycle_out.get("dashboard_widget_meta")
+                if not dash_text or dash_meta is None:
+                    dash_text, dash_meta = format_smart_monitor_dashboard_with_meta(
+                        cycle_out, recent_events=cycle_out.get("recent_events")
+                    )
+                if dashboard.supports_live:
+                    # In-place refresh tanpa spam scrollback: TradingView price widget + Smart Monitor + RECENT EVENTS
+                    dashboard.update(dash_text, widget_meta=dash_meta)
+                else:
+                    # Fallback anti-spam jika terminal tidak mendukung in-place refresh:
+                    # cetak dashboard ringkas hanya 1x di awal, lalu cetak hanya baris event penting baru.
+                    if cycles_done == 1:
+                        dashboard.update(dash_text, force_print_fallback=True, widget_meta=dash_meta)
+                    elif important_events:
+                        for ev in important_events:
+                            dashboard.emit_event(ev["message"] if isinstance(ev, dict) else str(ev))
             else:
-                if inline_alerts_cycle:
-                    if status_bar_active:
-                        print_terminal()
-                        status_bar_active = False
-                    snap_ts_raw = str(cycle_out.get("snapshot_time") or "").strip()
-                    ts_short = snap_ts_raw[11:19] + " WIB" if len(snap_ts_raw) >= 19 else datetime.now().strftime("%H:%M:%S WIB")
-                    for ial in inline_alerts_cycle:
-                        print_terminal(f"[{ts_short}] {ial}")
-                if news_alerts_cycle:
-                    if status_bar_active:
-                        print_terminal()
-                        status_bar_active = False
-                    for na in news_alerts_cycle:
-                        print_terminal(na)
-                if risk_signature != last_risk_signature:
-                    if eff_risk_warnings:
-                        if status_bar_active:
-                            print_terminal()
-                            status_bar_active = False
-                        for rw in eff_risk_warnings:
-                            print_terminal(f"[ACCOUNT RISK] {rw}")
-                        last_risk_emit = time.monotonic()
-                    last_risk_signature = risk_signature
-
-                snap_cur = cycle_out.get("snapshot") if isinstance(cycle_out.get("snapshot"), dict) else {}
-                quote_ok = (
-                    snap_cur.get("data_ok") is not False
-                    and str(snap_cur.get("data_freshness") or "").upper() not in ("STALE", "INVALID", "NO DATA")
-                )
-                price_num = safe_float(view.get("price"), safe_float(snap_cur.get("snapshot_price"), 0.0))
-                price_bar = f"{price_num:.2f}" if price_num > 0 and (quote_ok or not view["data_invalid"]) else "N/A"
-                has_sl_missing = bool(
-                    int(safe_float((cycle_out.get("account") or {}).get("position_without_sl"), 0)) > 0
-                    or int(safe_float((cycle_out.get("account") or {}).get("pending_without_sl"), 0)) > 0
-                    or any("SL MISSING" in str(rw).upper() or "TANPA STOP LOSS" in str(rw).upper() for rw in eff_risk_warnings)
-                )
-                risk_tag = " | [RISK WARNING] SL MISSING" if has_sl_missing else (" | [RISK WARNING]" if eff_risk_warnings else "")
-                news_risk_lbl = str((cycle_out.get("news") or {}).get("risk") or "")
-                news_tag = f" | NEWS {news_risk_lbl}" if news_risk_lbl in ("HIGH", "MEDIUM") else ""
-
-                if mode == "unified":
-                    z_bar = view.get("zone") or {}
-                    z_lo_b = safe_float(z_bar.get("price_low", z_bar.get("low")), 0.0)
-                    z_hi_b = safe_float(z_bar.get("price_high", z_bar.get("high")), 0.0)
-                    zone_tag = f" | {view.get('direction', '')} {z_lo_b:.2f}-{z_hi_b:.2f}".strip() if (z_lo_b > 0 and z_hi_b > 0) else ""
-                    if zone_tag:
-                        zone_tag = " | " + zone_tag.lstrip("| ")
-                    status_bar = (
-                        f"[SMART MONITOR] {price_bar} | {view['monitor_state']} | "
-                        f"SIG {view['confirmed']}{risk_tag}{zone_tag}{news_tag}"
-                    )
-                elif mode == "smc":
-                    status_bar = (
-                        f"[SMART MONITOR] SMC {price_bar} | SIG {cycle_out.get('smc_signal', 'WAIT')}{risk_tag}{news_tag}"
-                    )
-                else:
-                    snr_tz = ((cycle_out.get("snr") or {}).get("decision") or {}).get("target_zone") or {}
-                    snr_lo_b = safe_float(snr_tz.get("low"), 0.0)
-                    snr_hi_b = safe_float(snr_tz.get("high"), 0.0)
-                    snr_z_tag = f" | {snr_tz.get('rank_label', 'SNR')} {snr_lo_b:.2f}-{snr_hi_b:.2f}" if (snr_lo_b > 0 and snr_hi_b > 0) else ""
-                    status_bar = (
-                        f"[SNR MONITOR] {price_bar} | SIG {cycle_out.get('snr_signal', 'WAIT')}{snr_z_tag}{risk_tag}{news_tag}"
-                    )
-                bar_width = max(40, shutil.get_terminal_size((100, 20)).columns - 1)
-                if len(status_bar) <= bar_width:
-                    line_out = status_bar.ljust(bar_width)
-                else:
-                    # Jangan pernah memotong tag risiko kritis jika lebar terminal sempit
-                    compact_core = (
-                        f"[SMART MONITOR] {price_bar} | {view['monitor_state']} | SIG {view['confirmed']}{risk_tag}"
-                        if mode == "unified" else status_bar
-                    )
-                    line_out = compact_core[:bar_width].ljust(bar_width) if len(compact_core) > bar_width else compact_core.ljust(bar_width)
-                print_terminal("\r" + line_out, end="", flush=True)
-                status_bar_active = True
+                # Mode `pantau detail` / `pantau smc detail` / `pantau snr detail`:
+                # cetak laporan detail 1x di awal, lalu hanya cetak event baru (tidak spam full report tiap tick).
+                output = cycle_out.get("detail_report") if mode == "unified" else cycle_out["formatted_report"]
+                if cycles_done == 1:
+                    print_terminal("\n" + output)
+                elif important_events:
+                    for ev in important_events:
+                        print_terminal(ev["message"] if isinstance(ev, dict) else str(ev))
+                    if cycle_out.get("state_changed") and not tick_only:
+                        print_terminal("\n" + (cycle_out.get("dashboard_report") or output))
 
             if max_cycles is not None and cycles_done >= int(max_cycles):
                 break
             if sleep_sec is None:
-                monitor_state = _smart_monitor_context(cycle_out).get("monitor_state", "IDLE")
+                monitor_state = (cycle_out.get("smart_view") or _smart_monitor_context(cycle_out)).get("monitor_state", "IDLE")
                 wait_seconds = PANTAU_INTERVALS_SECONDS.get(monitor_state, 5.0)
             else:
-                monitor_state = _smart_monitor_context(cycle_out).get("monitor_state", "IDLE")
+                monitor_state = (cycle_out.get("smart_view") or _smart_monitor_context(cycle_out)).get("monitor_state", "IDLE")
                 wait_seconds = min(float(sleep_sec), PANTAU_INTERVALS_SECONDS.get(monitor_state, 5.0))
             time.sleep(max(0.1, float(wait_seconds)))
     except KeyboardInterrupt:
-        if status_bar_active:
-            print_terminal()
+        dashboard.stop()
         print_terminal("\n[UNIFIED MONITOR] Pemantauan dihentikan oleh pengguna.")
+    finally:
+        dashboard.stop()
 
-    if status_bar_active and max_cycles is not None and cycles_done >= int(max_cycles):
-        print_terminal()
     return last_out
 
 

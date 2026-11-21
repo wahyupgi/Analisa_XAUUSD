@@ -1872,6 +1872,7 @@ def _smart_monitor_context(cycle_result):
         "pending_display": pending_display,
         "alt_pending_setups": alt_pending_setups,
         "alt_pending_display": alt_pending_display,
+        "pending_setup": pending_setup,
         "signal": final_signal,
         "signal_display": final_signal,
         "data_invalid": data_invalid,
@@ -2182,7 +2183,9 @@ def patch_dashboard_live_ticker(base_text, base_meta, live_ticker, snapshot_time
     focus_bounds = lp.get("focus_bounds")
     if dist_idx is not None and 0 <= dist_idx < len(body_lines) and focus_bounds:
         f_lo, f_hi = focus_bounds
-        if tk["bid"] > 0 and tk["ask"] > 0:
+        if tk.get("feed_status") == "CLOSED":
+            price_val = tk["live_price"] if tk.get("live_price", 0.0) > 0 else (round((tk["bid"] + tk["ask"]) / 2.0, int(tk.get("digits") or 2)) if tk.get("bid", 0) > 0 else 0.0)
+        elif tk["bid"] > 0 and tk["ask"] > 0:
             price_val = round((tk["bid"] + tk["ask"]) / 2.0, int(tk.get("digits") or 2))
         else:
             price_val = tk["live_price"] if tk["live_price"] > 0 else 0.0
@@ -2407,15 +2410,36 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         risk_txt = "AMAN (No critical risk)"
     news_sum = str(cycle.get("news_summary") or "").strip()
 
+    # Rencana scanner (sumber sama dengan scan): read-only, bukan order aktual MT5
+    _plan_txt = "WAIT (tidak ada rencana valid)"
+    try:
+        _cp = data.get("plan") if isinstance(data.get("plan"), dict) else {}
+        _ps = data.get("pending_setup") if isinstance(data.get("pending_setup"), dict) else {}
+        _kind = "CONFIRMED"
+        _dir = str(_cp.get("arah") or "").upper()
+        _e = safe_float(_cp.get("entry_acuan") or _cp.get("entry"), 0.0)
+        _s, _t, _r = safe_float(_cp.get("sl"), 0.0), safe_float(_cp.get("tp1"), 0.0), safe_float(_cp.get("rr"), 0.0)
+        if not (_dir in ("BUY", "SELL") and _e > 0 and _s > 0 and _t > 0):
+            _kind = "PENDING"
+            _dir = str(_ps.get("direction") or _ps.get("order_type") or "").upper()
+            _dir = "BUY" if "BUY" in _dir else ("SELL" if "SELL" in _dir else "")
+            _e = safe_float(_ps.get("entry"), 0.0)
+            _s, _t, _r = safe_float(_ps.get("sl"), 0.0), safe_float(_ps.get("tp1"), 0.0), safe_float(_ps.get("rr"), 0.0)
+        if _dir and _e > 0 and _s > 0 and _t > 0:
+            _plan_txt = f"{_dir} {_kind} | E {_e:.2f} | SL {_s:.2f} | TP {_t:.2f} | RR 1:{_r:.2f} (rencana scanner)"
+    except Exception:
+        pass
+
     body_lines = [
         dash_div,
         *wrap_dashboard_field(" MTF BIAS    : ", f"H4={h4} | H1={h1} | M30={m30} | M5={m5}", term_w, max_lines=1),
         *focus_lines,
         *wrap_dashboard_field(" SNR REF     : ", snr_ref_txt, term_w, max_lines=1),
         dash_div,
+        *wrap_dashboard_field(" PLAN        : ", _plan_txt, term_w, max_lines=2),
         *wrap_dashboard_field(" MT5 PENDING : ", pending_disp, term_w, max_lines=2),
         *wrap_dashboard_field(" MT5 ACCOUNT : ", pos_txt, term_w, max_lines=1),
-        *wrap_dashboard_field(" ENTRY       : ", f"CONF={confirmed_disp} | SIG={signal_disp} | STATE={data.get('monitor_state', 'IDLE')}", term_w, max_lines=1),
+        *wrap_dashboard_field(" ENTRY       : ", f"CONF={confirmed_disp} | SIG={signal_disp} | STATE={data.get('monitor_state', 'IDLE')}" + (" | LIVE SIGNAL: WAIT (MARKET CLOSED/DATA HISTORIS — validasi ulang saat OPEN)" if feed_st in ("CLOSED", "STALE") else ""), term_w, max_lines=2),
         *wrap_dashboard_field(" REASON      : ", f"{reason_disp} -> {next_act}", term_w, max_lines=2),
         *wrap_dashboard_field(" RISK WARNING: ", risk_txt, term_w, max_lines=2),
     ]

@@ -1805,7 +1805,16 @@ def create_market_snapshot(
             if server_time is None:
                 server_time = lc.get("server_time")
             if current_price is None:
-                current_price = mid
+                if detected_mkt_status == "CLOSED":
+                    ref_c = frames.get("M5") if frames.get("M5") is not None and len(frames["M5"]) else frames.get("H1")
+                    last_c = float(ref_c["Close"].iloc[-1]) if ref_c is not None and len(ref_c) else None
+                    if last_c is not None and math.isfinite(last_c) and last_c > 0:
+                        current_price = round(last_c, 2)
+                        price_source = f"MT5 HISTORICAL (MARKET CLOSED) — Last Close: {current_price:.2f}" + (f" (Last Tick: {mid:.2f})" if mid else "")
+                    else:
+                        current_price = mid
+                else:
+                    current_price = mid
         elif current_price is None:
             if detected_mkt_status == "CLOSED":
                 ref_c = frames.get("M5") if frames.get("M5") is not None and len(frames["M5"]) else frames.get("H1")
@@ -1948,6 +1957,12 @@ def create_market_snapshot(
     if detected_mkt_status == "CLOSED":
         snapshot_status = "MARKET_CLOSED"
         error_reason = error_reason or fresh_info["reason"]
+        ref_c = frames.get("M5") if frames.get("M5") is not None and len(frames["M5"]) else frames.get("H1")
+        last_c = float(ref_c["Close"].iloc[-1]) if ref_c is not None and len(ref_c) else None
+        if last_c is not None and math.isfinite(last_c) and last_c > 0:
+            current_price = round(last_c, 2)
+            snap_price = current_price
+            price_source = f"MT5 HISTORICAL (MARKET CLOSED) — Last Close: {current_price:.2f}" + (f" (Last Tick: {mid:.2f})" if mid else "")
 
     if use_live and "M5" not in forming_candles and detected_mkt_status != "CLOSED":
         try:
@@ -3541,6 +3556,7 @@ def prioritize_radar_zones(
     ask: Optional[float] = None,
     snapshot_time: Optional[str] = None,
     snapshot_id: Optional[str] = None,
+    market_status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Sistem Seleksi & Evaluasi Multi-Zona RADAR dengan 4 Kategori Terpisah & Multi-Tier SMC:
@@ -3660,6 +3676,7 @@ def prioritize_radar_zones(
         # Status pemantauan zona MT5:
         # RADAR, APPROACHING, ZONE_TOUCHED, MITIGATED, INVALIDATED, EXPIRED
         closed_inv_p, _, _, _, _ = evaluate_smc_zone_closed_invalidation(zd, frames)
+        is_mkt_closed = str(market_status or "").upper() in ("CLOSED", "MARKET_CLOSED")
         if not is_valid or not origin_ok or "invalid" in rejection.lower() or fresh == "INVALIDATED" or closed_inv_p or zd.get("is_broken") is True or str(zd.get("status") or "").upper() in ("INVALIDATED", "BROKEN"):
             zone_status = "INVALIDATED"
             zd["is_broken"] = True
@@ -3669,7 +3686,12 @@ def prioritize_radar_zones(
         elif approach in ("TOUCHED", "ZONE_TOUCHED"):
             zone_status = ZoneStatus("ZONE_TOUCHED")
         elif approach == "APPROACHING":
-            zone_status = "APPROACHING"
+            if is_mkt_closed:
+                zone_status = "RADAR"
+                approach = "UNTOUCHED"
+                zd["approach"] = "UNTOUCHED"
+            else:
+                zone_status = "APPROACHING"
         else:
             zone_status = "RADAR"
         zd["status"] = zone_status
@@ -3822,27 +3844,41 @@ def prioritize_radar_zones(
     def _in_range_valid_pred(z: Dict[str, Any]) -> bool:
         return (
             is_zone_active_and_valid(z, current_price)
-            and z.get("zone_relevance") in ("ACTIVE", "RADAR")
-            and z.get("risk_tier") != "FAR_ZONE"
+            and not z.get("is_broken")
+            and str(z.get("status", "")).upper() not in ("INVALIDATED", "BROKEN", "EXPIRED", "MITIGATED")
         )
 
     def _primary_intraday_rank(z: Dict[str, Any]) -> Tuple:
-        rel_is_active = z.get("zone_relevance") == "ACTIVE"
+        is_far = (
+            z.get("zone_relevance") == "FAR_REFERENCE"
+            or z.get("risk_tier") == "FAR_ZONE"
+            or z.get("approach") == "FAR"
+            or float(z.get("distance", 0.0)) > far_threshold
+        )
+        rel_is_active = (z.get("zone_relevance") == "ACTIVE") and not is_far
         qual_ok = (
             z.get("grade") in ("A+", "A")
             or (float(z.get("score", 0.0)) >= 70.0 and z.get("freshness") in ("FRESH", "TESTED_1X"))
         )
-        # Quality-first: ACTIVE hanya mengungguli RADAR bila kualitas strukturalnya memenuhi standar
-        bucket = 0 if (rel_is_active and qual_ok) else (1 if qual_ok else (2 if rel_is_active else 3))
+        if is_far:
+            bucket = 4  # FAR_REFERENCE: dilarang mendominasi zona ACTIVE / RADAR
+        elif rel_is_active and qual_ok:
+            bucket = 0
+        elif rel_is_active:
+            bucket = 1
+        elif qual_ok:
+            bucket = 2
+        else:
+            bucket = 3
         fresh_r = {"FRESH": 0, "TESTED_1X": 1, "TESTED_2X": 2}.get(z.get("freshness", ""), 9)
         tf_r = _intraday_tf_rank(z.get("timeframe", ""), m30_status=m30_status, h1_aligned=h1_aligned_flag)
         return (
             bucket,
             fresh_r,
+            round(float(z.get("distance", 9999.0)), 2),
             tf_r,
             -round(float(z.get("priority_score", 0.0)), 1),
             -round(float(z.get("score", 0.0)), 1),
-            round(float(z.get("distance", 9999.0)), 2),
         )
 
     if htf_bias in ("BULLISH", "BEARISH"):
@@ -4979,10 +5015,11 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
                     z.risk_tier = "FAR_ZONE"
                     z.risk_tier_reason = rel_pre["reason"]
                     z.approach = "FAR"
-                    z.radar_eligibility = "NOT_QUALIFIED"
-                    z.pending_eligibility = "NOT_QUALIFIED"
+                    z.radar_eligibility = "QUALIFIED"
+                    z.pending_eligibility = "WATCHLIST"
                     rej_desc = rel_pre["reason"]
                     z.audit.append(rej_desc)
+                    valid_all.append(z)
                     radar_all.append(z)
             else:
                 z.is_valid = False
@@ -5081,8 +5118,8 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
                     z.risk_tier = "FAR_ZONE"
                     z.risk_tier_reason = rel_bad["reason"]
                     z.approach = "FAR"
-                    z.radar_eligibility = "NOT_QUALIFIED"
-                    z.pending_eligibility = "NOT_QUALIFIED"
+                    z.radar_eligibility = "QUALIFIED"
+                    z.pending_eligibility = "WATCHLIST"
                 z.audit.append(f"Kandidat zona reaksi (RADAR SMC | Skor: {z.score:.1f})")
                 radar_all.append(z)
             else:
@@ -5196,6 +5233,7 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
         ask=ask,
         snapshot_time=snapshot_time,
         snapshot_id=snapshot_id,
+        market_status=eff_mkt_status,
     )
     radar_prio["atr_diagnostics"] = atr_diag
     out["radar_priority"] = radar_prio
@@ -5637,21 +5675,71 @@ def evaluate_smc_snr_confluence(
 # =============================================================================
 # ENTRY VALIDATOR (M5) + RISK
 # =============================================================================
-def _structural_targets(frames: Dict[str, pd.DataFrame], zone_type: str, entry: float) -> List[float]:
-    """Likuiditas struktural searah transaksi (swing H1/H4 yang belum ditembus), diurutkan dari terdekat."""
+def _structural_targets(
+    frames: Dict[str, pd.DataFrame],
+    zone_type: str,
+    entry: float,
+    opposing_zones: Optional[List[Any]] = None,
+    snr_context: Optional[Dict[str, Any]] = None,
+    atr: Optional[float] = None,
+) -> List[float]:
+    """Likuiditas struktural searah transaksi (swing M15/M30/H1/H4 yang belum ditembus + opposing barrier), diurutkan dari terdekat."""
     levels: List[float] = []
-    for tf in ("H1", "H4"):
-        df = frames.get(tf)
+    z_type_u = str(zone_type or "").upper()
+    is_demand = (z_type_u == "DEMAND")
+
+    # 1. Swings dari M15, M30, H1, H4
+    for tf in ("M15", "M30", "H1", "H4"):
+        df = (frames or {}).get(tf)
         if df is None or len(df) < 2 * SWING_N + 1:
             continue
         H, L = df["High"].values, df["Low"].values
         for s in detect_swings(df):
             i, p = s["idx"], s["price"]
-            if zone_type == "DEMAND" and s["type"] == "H" and p > entry and (i + 1 >= len(H) or H[i + 1:].max() <= p):
+            if is_demand and s["type"] == "H" and p > entry and (i + 1 >= len(H) or H[i + 1:].max() <= p):
                 levels.append(p)
-            elif zone_type == "SUPPLY" and s["type"] == "L" and p < entry and (i + 1 >= len(L) or L[i + 1:].min() >= p):
+            elif (not is_demand) and s["type"] == "L" and p < entry and (i + 1 >= len(L) or L[i + 1:].min() >= p):
                 levels.append(p)
-    levels = sorted(set(round(x, 2) for x in levels), reverse=(zone_type == "SUPPLY"))
+
+    # 2. Opposing SMC zones (penghalang / target likuiditas terdekat)
+    if opposing_zones:
+        for oz in opposing_zones:
+            oz_d = oz if isinstance(oz, dict) else (oz.to_dict() if hasattr(oz, "to_dict") else {})
+            if not oz_d or not oz_d.get("is_valid", True):
+                continue
+            oz_type = str(oz_d.get("zone_type") or "").upper()
+            oz_lo = float(oz_d.get("price_low") or 0.0)
+            oz_hi = float(oz_d.get("price_high") or 0.0)
+            if is_demand and oz_type == "SUPPLY" and oz_lo > entry:
+                levels.append(oz_lo)
+            elif (not is_demand) and oz_type == "DEMAND" and 0 < oz_hi < entry:
+                levels.append(oz_hi)
+
+    # 3. Opposing SNR context (penghalang / support-resistance material)
+    if isinstance(snr_context, dict):
+        if is_demand:
+            for r in (snr_context.get("resistances") or []):
+                if isinstance(r, dict):
+                    r_lo = float(r.get("low") or 0.0)
+                    if r_lo > entry:
+                        levels.append(r_lo)
+        else:
+            for s in (snr_context.get("supports") or []):
+                if isinstance(s, dict):
+                    s_hi = float(s.get("high") or 0.0)
+                    if 0 < s_hi < entry:
+                        levels.append(s_hi)
+
+    levels = sorted(set(round(x, 2) for x in levels), reverse=(not is_demand))
+
+    # 4. Fallback jika tidak ada swing searah
+    if not levels and atr is not None and isinstance(atr, (int, float)) and atr > 0:
+        step = max(3.0, 2.0 * float(atr))
+        if is_demand:
+            levels = [round(entry + step, 2), round(entry + 2 * step, 2)]
+        else:
+            levels = [round(entry - step, 2), round(entry - 2 * step, 2)]
+
     return levels
 
 
@@ -5961,11 +6049,11 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     else:
         e_lo, e_hi = (lo, hi) if hi - lo <= ENTRY_LEBAR_MAKS else (lo, round(lo + ENTRY_LEBAR_MAKS, 2))
     entry = round((e_lo + e_hi) / 2.0, 2)
-    sl = round(float(getattr(zone, "sl_recommended", 0.0) or 0.0), 2)
-    if demand and (sl <= 0.0 or sl >= inval):
-        sl = round(inval - 1.50, 2)
-    elif (not demand) and (sl <= 0.0 or sl <= inval):
-        sl = round(inval + 1.50, 2)
+    sl = compute_structural_sl(zone, htf_frames, float(spread_points or 0.0))
+    if sl <= 0.0 or (demand and sl >= inval) or ((not demand) and sl <= inval):
+        stages["risk_reward"] = {"status": "WAIT", "msg": "SL struktural tidak dapat ditentukan"}
+        W.append("SL struktural tidak dapat ditentukan")
+        return res
     risk = round((entry - sl) if demand else (sl - entry), 2)
 
     if risk <= 0.5:
@@ -6207,6 +6295,34 @@ def calculate_suggested_expiration(
     }
 
 
+def compute_structural_sl(zone: Zone, frames: Optional[Dict[str, pd.DataFrame]] = None,
+                          spread: float = 0.0) -> float:
+    """Sumber tunggal SL (dipakai pending & confirmed -> scan/pantau konsisten).
+    SL = di luar invalidasi struktur ATAU wick sweep OB->BOS (mana yang lebih jauh) + buffer ATR/spread adaptif."""
+    demand = (getattr(zone, "zone_type", "") == "DEMAND")
+    inval = float(getattr(zone, "invalidation_price", 0.0) or 0.0)
+    if inval <= 0:
+        return 0.0
+    base = inval
+    atr = float(getattr(zone, "atr_value", 0.0) or 0.0)
+    try:
+        df = (frames or {}).get(str(getattr(zone, "timeframe", "") or ""))
+        t0, t1 = getattr(zone, "ob_candle_time", None), getattr(zone, "bos_candle_time", None)
+        if df is not None and len(df) and t0 is not None and t1 is not None:
+            seg = df.loc[(df.index >= t0) & (df.index <= t1)]
+            if len(seg):
+                if demand:
+                    base = min(base, float(seg["Low"].min()))
+                else:
+                    base = max(base, float(seg["High"].max()))
+            if atr <= 0:
+                atr = float(_atr_array(df)[-1])
+    except Exception:
+        pass
+    buf = max(1.0, 0.3 * atr if math.isfinite(atr) else 0.0) + max(0.0, float(spread or 0.0))
+    return round(base - buf if demand else base + buf, 2)
+
+
 def plan_pending_order(
     zone: Zone,
     current_price: float,
@@ -6221,6 +6337,9 @@ def plan_pending_order(
     bid: Optional[float] = None,
     ask: Optional[float] = None,
     h1_structure: Optional[str] = None,
+    premarket: bool = False,
+    opposing_zones: Optional[List[Any]] = None,
+    snr_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Rencana Pending Order (BUY LIMIT / SELL LIMIT) untuk Early Setup Detection (Mode A - Aggressive Pending).
@@ -6282,7 +6401,7 @@ def plan_pending_order(
     }
     
     # 0. Validasi Data Freshness (MT5)
-    if frames:
+    if frames and not premarket:
         fresh_check = validate_data_freshness(frames, server_time=server_time)
         if not fresh_check.get("ok", True) or fresh_check.get("status") in ("STALE", "INVALID", "NO DATA", "NO_DATA"):
             res["status"] = "WAIT"
@@ -6375,15 +6494,11 @@ def plan_pending_order(
         frames=frames, bid=bid, ask=ask,
     )
     d_val_res = float(rel_p.get("distance", 0.0))
-    if (
+    is_far_cand = (
         rel_p["relevance"] == "FAR_REFERENCE"
         or str(getattr(zone, "risk_tier", "") or "").upper() == "FAR_ZONE"
         or d_val_res > LOW_RISK_MAX_DISTANCE_PT
-    ):
-        res["status"] = "WAIT"
-        res["early_pending_status"] = "WAIT"
-        res["rejection_reason"] = f"Zona FAR REFERENCE tidak boleh menghasilkan pending entry intraday ({rel_p['reason']})"
-        return res
+    )
 
     # Jangan memaksakan pending pada zona M5 murni bila struktur H1/M30 atau freshness tidak mendukung
     if _is_pure_m5_tf(str(getattr(zone, "timeframe", "") or "")) and htf_bias is not None:
@@ -6449,20 +6564,14 @@ def plan_pending_order(
             return res
 
     # 6. Stop Loss & Invalidation Buffer
-    raw_sl = round(getattr(zone, "sl_recommended", 0.0), 2)
-    min_buf = 1.50
-    if demand:
-        if raw_sl > 0.0 and raw_sl < inval:
-            sl = raw_sl
-        else:
-            sl = round(inval - min_buf, 2)
-        inval_buffer = round(inval - sl, 2)
-    else:
-        if raw_sl > 0.0 and raw_sl > inval:
-            sl = raw_sl
-        else:
-            sl = round(inval + min_buf, 2)
-        inval_buffer = round(sl - inval, 2)
+    _spr = round(float(ask) - float(bid), 2) if (bid and ask and ask >= bid) else 0.0
+    sl = compute_structural_sl(zone, frames, _spr)
+    if sl <= 0.0 or (demand and sl >= inval) or ((not demand) and sl <= inval):
+        res["status"] = "WAIT"
+        res["early_pending_status"] = "WAIT"
+        res["rejection_reason"] = "SL struktural tidak dapat ditentukan (invalidasi zona tidak valid)"
+        return res
+    inval_buffer = round(inval - sl, 2) if demand else round(sl - inval, 2)
     
     risk_points = round((entry - sl) if demand else (sl - entry), 2)
     if risk_points <= 0.5:
@@ -6477,9 +6586,21 @@ def plan_pending_order(
         return res
 
     # 7. Take Profit Struktural & Risk/Reward
-    targets = _structural_targets(frames or {}, getattr(zone, "zone_type", ""), entry) if frames else []
+    ref_atr_z = getattr(zone, "atr_value", None)
+    if not ref_atr_z and frames and "H1" in frames and "ATR14" in frames["H1"].columns:
+        ref_atr_z = float(frames["H1"]["ATR14"].iloc[-1])
+    targets = _structural_targets(
+        frames or {}, getattr(zone, "zone_type", ""), entry,
+        opposing_zones=opposing_zones,
+        snr_context=snr_context,
+        atr=ref_atr_z,
+    ) if frames else []
     if not targets:
-        res["rejection_reason"] = "Tidak ada target likuiditas struktural H1/H4 searah transaksi"
+        res["status"] = "REJECTED"
+        res["early_pending_status"] = "REJECTED"
+        res["entry_price"] = entry
+        res["sl"] = sl
+        res["rejection_reason"] = "NO_TARGET: Tidak ada target likuiditas struktural searah transaksi"
         return res
     buf = 0.3
     if demand:
@@ -6495,14 +6616,19 @@ def plan_pending_order(
 
     rr_tp1 = round(reward_tp1 / risk_points, 2) if risk_points > 0 else 0.0
     rr_tp2 = round(reward_tp2 / risk_points, 2) if risk_points > 0 else 0.0
+    if rr_tp1 > 8.0:
+        res["rr_justification"] = f"TP1 struktural {tp1:.2f} (R:R 1:{rr_tp1:.2f})"
 
     if reward_tp1 <= 0 or reward_tp1 / risk_points < RR_MIN - 1e-9:
-        res["status"] = "INVALID"
-        res["early_pending_status"] = "INVALID"
+        res["status"] = "REJECTED"
+        res["early_pending_status"] = "REJECTED"
         res["early_pending_rr"] = "FAILED"
+        res["entry_price"] = entry
+        res["sl"] = sl
+        res["tp1"] = tp1
         res["rr"] = rr_tp1
         res["rr_tp1"] = rr_tp1
-        res["rejection_reason"] = f"Risk/Reward ke TP1 struktural (1:{rr_tp1:.2f}) di bawah minimum 1:{RR_MIN:g}"
+        res["rejection_reason"] = f"RR_TOO_LOW: Risk/Reward ke TP1 struktural (1:{rr_tp1:.2f}) di bawah minimum 1:{RR_MIN:g}"
         return res
 
     # Pending-plan lifecycle memakai jam absolut lokal WIB, bukan wall-clock candle broker.
@@ -6558,6 +6684,27 @@ def plan_pending_order(
         "early_pending_rr": f"PASSED (1:{rr_tp1:.1f})",
         "rejection_reason": "EXPIRATION ERROR" if exp_info.get("is_error", False) else "",
     })
+    if is_far_cand:
+        res["is_far"] = True
+        res["risk_tier"] = "FAR_ZONE"
+        if premarket:
+            res["valid"] = True
+            res["provisional"] = True
+            res["status"] = "PROVISIONAL"
+            res["early_pending_status"] = "PROVISIONAL"
+            res["early_pending_status_label"] = "PROVISIONAL (FAR_ZONE)"
+        else:
+            res["valid"] = False
+            res["status"] = "WATCHLIST"
+            res["early_pending_status"] = "WATCHLIST"
+            res["early_pending_status_label"] = "WATCHLIST (FAR_ZONE)"
+            res["rejection_reason"] = f"FAR_ZONE: Jarak zona jauh ({d_val_res:.2f} USD); masuk WATCHLIST"
+    elif premarket:
+        res["valid"] = True
+        res["provisional"] = True
+        res["status"] = "PROVISIONAL"
+        res["early_pending_status"] = "PROVISIONAL"
+        res["early_pending_status_label"] = "PROVISIONAL (MARKET CLOSED)"
     return res
 
 
@@ -7302,6 +7449,225 @@ def _entry_audit(dec: Dict[str, Any]) -> Dict[str, Any]:
             "tp1": plan.get("tp1"), "tp2": plan.get("tp2"), "rr": plan.get("rr"), "alasan": dec["reasons"]}
 
 
+def build_premarket_analysis(frames, snap, max_plans: int = 3, scan_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """PRE-MARKET ANALYSIS (market CLOSED): rencana PROVISIONAL dari candle MT5 terakhir yang valid.
+    Memakai scanner + plan_pending_order yang sama (filter H4/H1/M30, ATR, RR, SL struktural); bukan sinyal live."""
+    out: Dict[str, Any] = {"status": "PROVISIONAL", "plans": [], "candidates": [], "rejected_candidates": [], "far_references": [], "reason": "", "price": None,
+                           "candle_times": dict((snap or {}).get("last_candle_times") or {})}
+    try:
+        price = (snap or {}).get("snapshot_price")
+        if (price is None or not math.isfinite(float(price)) or float(price) <= 0) and frames:
+            ref_c = frames.get("M5") if frames.get("M5") is not None and len(frames["M5"]) else frames.get("H1")
+            if ref_c is not None and len(ref_c):
+                price = float(ref_c["Close"].iloc[-1])
+        if not frames or price is None or not math.isfinite(float(price)) or float(price) <= 0:
+            out["reason"] = "Candle MT5 valid tidak tersedia"
+            return out
+        price = float(price)
+        out["price"] = price
+        out["last_tick_time"] = (snap or {}).get("tick_time")
+        out["price_time"] = out["candle_times"].get("M5") or out["candle_times"].get("H1")
+        if not out["price_time"] and frames:
+            for tf_k in ("M5", "M15", "M30", "H1", "H4"):
+                df_k = frames.get(tf_k)
+                if df_k is not None and len(df_k):
+                    out["price_time"] = format_wib_timestamp(_get_df_last_timestamp(df_k))
+                    break
+        if not out["price_time"]:
+            out["reason"] = "Timestamp candle terakhir tidak tersedia; referensi harga tidak valid"
+            return out
+        scan = scan_result or scan_xauusd_zones(frames=frames, current_price=price, snapshot=snap, market_status="CLOSED")
+        ctx = scan.get("htf_context") or evaluate_htf_context(frames)
+        h4, m30 = ctx.get("H4"), ctx.get("m30_status")
+        out["htf"] = {"H4": h4, "H1": ctx.get("H1"), "M30": m30}
+        
+        # ZONE DISCOVERY: kumpulkan seluruh kandidat zona dari MT5 scan
+        raw_cands = []
+        seen_ids = set()
+        for pool in (scan.get("radar_zones") or [], scan.get("active_zones") or [], (scan.get("radar_priority") or {}).get("all_prioritized") or [], scan.get("detected_zones") or []):
+            for z in pool:
+                zd = z.to_dict() if hasattr(z, "to_dict") else dict(z)
+                zid = zd.get("zone_id")
+                if zid and zid not in seen_ids:
+                    seen_ids.add(zid)
+                    raw_cands.append(zd)
+        
+        # ZONE VALIDATION: periksa keutuhan struktur (bukan broken / invalidated)
+        valid_struct_cands = []
+        for zd in raw_cands:
+            is_inval = (str(zd.get("freshness") or "").upper() == "INVALIDATED" or zd.get("is_broken") or str(zd.get("status") or "").upper() in ("INVALIDATED", "BROKEN"))
+            if not is_inval:
+                valid_struct_cands.append(zd)
+                
+        # Deduplikasi lintas timeframe
+        cands_to_rank = valid_struct_cands if valid_struct_cands else raw_cands
+        dedup_cands, _ = _deduplicate_overlapping_zones(cands_to_rank)
+
+        ref_atr = float(
+            (scan.get("atr_diagnostics") or {}).get("atr_value")
+            or (frames.get("H1")["ATR14"].iloc[-1] if frames.get("H1") is not None and "ATR14" in frames["H1"].columns else 2.0)
+        )
+        far_threshold = max(35.0, 15.0 * ref_atr)
+
+        # Update distance & relevance pada seluruh kandidat sesuai Single Source of Truth
+        for zd in dedup_cands:
+            z_lo = float(zd.get("price_low", 0.0))
+            z_hi = float(zd.get("price_high", 0.0))
+            if price > 0 and z_lo > 0:
+                dist_val = max(z_lo - price, price - z_hi, 0.0)
+                zd["distance"] = dist_val
+                dist_ratio, _ = calculate_distance_atr_ratio(dist_val, ref_atr)
+                zd["distance_atr_ratio"] = dist_ratio
+                if not zd.get("zone_relevance") or zd.get("zone_relevance") == "INVALID":
+                    rel = classify_zone_relevance(zd, price, atr=ref_atr, htf_bias=h4, h1_structure=ctx.get("H1"), m30_status=m30, frames=frames)
+                    zd["zone_relevance"] = rel["relevance"]
+                    zd["zone_relevance_reason"] = rel["reason"]
+        
+        # Ranking berdasarkan kualitas terpadu (Relevance Tier, HTF Alignment, Validitas, Freshness, Grade, Jarak, Score, Timeframe)
+        def _premarket_sort_key(z_dict):
+            rel = str(z_dict.get("zone_relevance") or "").upper()
+            dist = float(z_dict.get("distance") or 999.0)
+            if rel == "ACTIVE" or dist <= max(15.0, 5.0 * ref_atr):
+                rel_tier = 0
+            elif rel == "RADAR" or dist <= far_threshold:
+                rel_tier = 1
+            else:
+                rel_tier = 2
+            val_r = 0 if z_dict.get("is_valid") else 1
+            is_alg = (h4 == "BULLISH" and z_dict.get("zone_type") == "DEMAND") or (h4 == "BEARISH" and z_dict.get("zone_type") == "SUPPLY")
+            alg_r = 0 if is_alg else 1
+            fresh_r = {"FRESH": 0, "TESTED_1X": 1, "TESTED_2X": 2}.get(z_dict.get("freshness"), 9)
+            grd = str(z_dict.get("grade") or "B")
+            grd_rank = {"A+": 0, "A": 1, "B": 2}.get(grd, 3)
+            sc = float(z_dict.get("score") or 0.0)
+            tf = str(z_dict.get("timeframe") or "H1")
+            tf_r = 0 if "H4" in tf else (1 if "H1" in tf else (2 if "M30" in tf else 3))
+            return (rel_tier, alg_r, val_r, fresh_r, grd_rank, dist, -sc, tf_r)
+            
+        dedup_cands.sort(key=_premarket_sort_key)
+        
+        # Pisahkan ACTIONABLE / RADAR vs FAR REFERENCE
+        actionable_cands = [z for z in dedup_cands if float(z.get("distance", 999.0)) <= far_threshold and str(z.get("zone_relevance", "")).upper() != "FAR_REFERENCE"]
+        far_cands = [z for z in dedup_cands if float(z.get("distance", 999.0)) > far_threshold or str(z.get("zone_relevance", "")).upper() == "FAR_REFERENCE"]
+        out["far_references"] = far_cands
+
+        # Pilih hingga max_plans (default 3) zona terbaik: prioritaskan actionable
+        selected_cands = actionable_cands[:max_plans] if actionable_cands else far_cands[:max_plans]
+        
+        for zd in selected_cands:
+            z_obj = _zone_from_dict(zd)
+            plan = plan_pending_order(z_obj, price, frames, h4, m30, (snap or {}).get("server_time"),
+                                      h1_structure=ctx.get("H1"), premarket=True,
+                                      opposing_zones=cands_to_rank, snr_context=scan.get("snr_context"))
+            d = "BUY" if zd.get("zone_type") == "DEMAND" else "SELL"
+            z_lo = float(zd.get("price_low", 0.0))
+            z_hi = float(zd.get("price_high", 0.0))
+            dist_val = float(zd.get("distance") or max(z_lo - price, price - z_hi, 0.0))
+            dist_ratio = zd.get("distance_atr_ratio")
+            grd = zd.get("grade") or "B"
+            sc = float(zd.get("score") or 0.0)
+            
+            confl_parts = []
+            if (zd.get("origin_bos") or {}).get("tipe"):
+                confl_parts.append(str(zd["origin_bos"]["tipe"]))
+            if (zd.get("fvg_confirmation") or {}).get("status") in ("FVG_CONFIRMED", "ALIGNED"):
+                confl_parts.append("FVG Aligned")
+            if zd.get("liquidity_sweep"):
+                confl_parts.append("Liquidity Swept")
+            confl_str = " + ".join(confl_parts) or zd.get("zone_relevance_reason") or "Struktur MT5 valid"
+            
+            ep = float(plan.get("entry_price") or (z_hi if d == "BUY" else z_lo))
+            sl = float(plan.get("sl") or compute_structural_sl(z_obj, frames))
+            tp_list = _structural_targets(frames, zd.get("zone_type", ""), ep,
+                                         opposing_zones=cands_to_rank,
+                                         snr_context=scan.get("snr_context"),
+                                         atr=ref_atr) if frames else []
+            tp1 = float(plan.get("tp1") or (tp_list[0] if tp_list else 0.0))
+            risk_px = abs(ep - sl) if (ep > 0 and sl > 0) else 0.0
+            reward_px = abs(tp1 - ep) if (ep > 0 and tp1 > 0) else 0.0
+            rr = round(reward_px / risk_px, 2) if risk_px > 0 else float(plan.get("rr", 0.0) or 0.0)
+            
+            rej_r = str(plan.get("rejection_reason") or zd.get("rejection_reason") or "")
+            if zd.get("is_valid") and plan.get("valid") and rr >= RR_MIN:
+                status_c = "VALIDATED PLAN"
+                status_reason_c = "Memenuhi validasi HTF, SL struktural, TP likuiditas, RR >= 1:1.5"
+            elif "HTF_CONFLICT" in rej_r or "Konflik" in rej_r or "tidak selaras" in rej_r:
+                status_c = "REJECTED"
+                status_reason_c = rej_r or "HTF_CONFLICT: Bias H4 berlawanan dengan arah zona"
+            elif "RR_TOO_LOW" in rej_r or (rr > 0 and rr < RR_MIN):
+                status_c = "REJECTED"
+                status_reason_c = f"RR_TOO_LOW: Rasio RR (1:{rr:.2f}) < 1:{RR_MIN:g}"
+            elif "NO_TARGET" in rej_r or not tp_list:
+                status_c = "REJECTED"
+                status_reason_c = "NO_TARGET: Tidak ada target likuiditas struktural searah"
+            elif not zd.get("is_valid") or sc < 50.0:
+                status_c = "REJECTED"
+                status_reason_c = rej_r or f"LOW_GRADE: Skor kualitas {sc:.1f} di bawah minimum"
+            else:
+                status_c = "WATCHLIST"
+                status_reason_c = rej_r or "Zona terpantau (menunggu market OPEN)"
+                
+            cand_item = {
+                "direction": d,
+                "order_type": f"{d} LIMIT",
+                "zone_timeframe": zd.get("timeframe", "H1"),
+                "timeframe": zd.get("timeframe", "H1"),
+                "zone_type": zd.get("zone_type", "DEMAND"),
+                "zone_subtype": (zd.get("origin_bos") or {}).get("tipe", "OB"),
+                "zone_low": z_lo,
+                "zone_high": z_hi,
+                "distance": dist_val,
+                "distance_atr_ratio": dist_ratio,
+                "zone_grade": grd,
+                "grade": grd,
+                "zone_score": sc,
+                "score": sc,
+                "entry_price": ep,
+                "sl": sl,
+                "tp1": tp1,
+                "rr": rr,
+                "rr_tp1": rr,
+                "status": status_c,
+                "status_reason": status_reason_c,
+                "validity_reason": confl_str,
+                "confluence": confl_str,
+                "provisional": True,
+            }
+            out["candidates"].append(cand_item)
+            if status_c in ("VALIDATED PLAN", "PROVISIONAL"):
+                out["plans"].append(cand_item)
+
+        # Evaluasi kandidat terdekat lainnya yang tidak masuk setup utama atau ditolak
+        remaining_near = [z for z in dedup_cands if z not in selected_cands and float(z.get("distance", 999.0)) <= far_threshold]
+        for zd in remaining_near[:5]:
+            z_obj = _zone_from_dict(zd)
+            p_rem = plan_pending_order(z_obj, price, frames, h4, m30, (snap or {}).get("server_time"),
+                                       h1_structure=ctx.get("H1"), premarket=True,
+                                       opposing_zones=cands_to_rank, snr_context=scan.get("snr_context"))
+            r_rsn = str(p_rem.get("rejection_reason") or zd.get("rejection_reason") or "Zona cadangan / skor prioritas lebih rendah")
+            out["rejected_candidates"].append({
+                "timeframe": zd.get("timeframe"),
+                "zone_type": zd.get("zone_type"),
+                "price_low": float(zd.get("price_low", 0.0)),
+                "price_high": float(zd.get("price_high", 0.0)),
+                "distance": float(zd.get("distance", 0.0)),
+                "distance_atr_ratio": zd.get("distance_atr_ratio"),
+                "grade": zd.get("grade"),
+                "score": float(zd.get("score", 0.0)),
+                "reason": r_rsn,
+                "rr": float(p_rem.get("rr", 0.0) or 0.0),
+            })
+                
+        if not out["candidates"]:
+            out["reason"] = "Tidak ada zona potensial yang terdeteksi dari candle MT5"
+        elif not out["plans"]:
+            out["reason"] = "Zona terdeteksi berada dalam status WATCHLIST / REJECTED (menunggu pembukaan market)"
+    except Exception as exc:
+        _catat_error("premarket_analysis", exc)
+        out["reason"] = "Analisis pre-market gagal (data tidak cukup)"
+    return out
+
+
 def _provisional_zone_plans(dec, price, frames, h4_bias, m30_status, server_time, bid=None, ask=None):
     """Run the existing pending-order planner once per displayed zone so every command shows the same levels."""
     plans: Dict[str, Dict[str, Any]] = {}
@@ -7714,8 +8080,18 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             dec["snapshot_status"] = "MARKET_CLOSED"
             dec["data_freshness"] = live_snap.get("data_freshness") or "STALE"
             dec["market_status"] = "CLOSED"
+            if not dec.get("context") and ctx:
+                dec["context"] = ctx
+            if "M30" not in st and ctx:
+                st["M30"] = ctx.get("m30_eval") or {"status": ctx.get("m30_status", "CONFIRMED"), "ok": True, "msg": "Data historis closed candle"}
             closed_msg = live_snap.get("error_reason") or "Market sedang tutup (data sesi penutupan terakhir; bukan koneksi MT5 terputus)"
             st["DATA"] = {"ok": False, "msg": closed_msg}
+            if not scan:
+                scan = scan_result or scan_xauusd_zones(frames=live_snap.get("frames") or frames, snapshot=live_snap, market_status="CLOSED")
+            dec["premarket"] = build_premarket_analysis(live_snap.get("frames") or frames, live_snap, scan_result=scan)
+            dec["live_signal_disabled"] = True
+            dec["signal_status"] = "NO_LIVE_SIGNAL"
+            dec["entry_permission"] = "WAIT (MARKET CLOSED)"
             return finish("WAIT", closed_msg)
         if live_snap.get("snapshot_status") == "DATA_INCOMPLETE":
             dec["snapshot_status"] = "DATA_INCOMPLETE"
@@ -7813,6 +8189,12 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         dec["data_freshness"] = "STALE"
         closed_msg = "Market sedang tutup (bukan error koneksi MT5)"
         st["DATA"] = {"ok": False, "msg": closed_msg}
+        if not scan:
+            scan = scan_result or scan_xauusd_zones(frames=frames, current_price=price, market_status="CLOSED")
+        dec["premarket"] = build_premarket_analysis(frames, live_snap, scan_result=scan)
+        dec["live_signal_disabled"] = True
+        dec["signal_status"] = "NO_LIVE_SIGNAL"
+        dec["entry_permission"] = "WAIT (MARKET CLOSED)"
         return finish("WAIT", closed_msg)
 
     stale = _stale_reason(frames, server_time)
@@ -7906,6 +8288,14 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         dec["snapshot_status"] = "DATA_INCOMPLETE"
         return finish("WAIT", scan.get("empty_reason") or "DATA_INCOMPLETE: Snapshot MT5 tidak lengkap atau tidak valid")
     if scan.get("data_freshness") in ("STALE", "INVALID", "NO DATA") or scan.get("market_status") == "CLOSED":
+        if scan.get("market_status") == "CLOSED":
+            dec["market_status"] = "CLOSED"
+            closed_msg = "Market sedang tutup (bukan error koneksi MT5)"
+            dec["premarket"] = build_premarket_analysis(frames, live_snap, scan_result=scan)
+            dec["live_signal_disabled"] = True
+            dec["signal_status"] = "NO_LIVE_SIGNAL"
+            dec["entry_permission"] = "WAIT (MARKET CLOSED)"
+            return finish("WAIT", closed_msg)
         f_msg = (scan.get("data_freshness_info") or {}).get("reason") or f"Data tidak segar ({scan.get('data_freshness')})"
         st["DATA"] = {"ok": False, "msg": f_msg}
         return finish("WAIT", f_msg)
@@ -8171,7 +8561,9 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         in_range_raw.sort(key=_cand_sort)
         in_range_eligible, _ = _deduplicate_overlapping_zones(in_range_raw)
         far_eligible = [z for z in eligible if z.get("zone_relevance") == "FAR_REFERENCE" or _is_far_zone_cand(z)]
-        dec["primary_zone"] = in_range_eligible[0] if in_range_eligible else None
+        far_eligible.sort(key=_cand_sort)
+        far_eligible, _ = _deduplicate_overlapping_zones(far_eligible)
+        dec["primary_zone"] = in_range_eligible[0] if in_range_eligible else (far_eligible[0] if far_eligible else None)
 
         def _distance(z):
             return max(float(z["price_low"]) - price, price - float(z["price_high"]), 0.0)
@@ -8180,13 +8572,13 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             dec["far_reference_zone"] = min(far_eligible, key=_distance)
 
         directional = [
-            z for z in in_range_eligible
+            z for z in (in_range_eligible or far_eligible)
             if (
                 (ztype == "SUPPLY" and float(z["price_high"]) >= price)
                 or (ztype == "DEMAND" and float(z["price_low"]) <= price)
             )
         ]
-        dec["nearest_valid_zone"] = min(directional, key=_distance) if directional else None
+        dec["nearest_valid_zone"] = min(directional, key=_distance) if directional else (in_range_eligible[0] if in_range_eligible else (far_eligible[0] if far_eligible else None))
         inside = [z for z in in_range_eligible if _distance(z) == 0]
         old_focus = next((rec for rec in tracker.tracked_zones.values() if rec.get("monitor_focus")), None)
         previous = next((z for z in in_range_eligible if (tracker.get_zone(z.get("zone_id")) or {}).get("monitor_focus")), None)
@@ -8226,17 +8618,19 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             best_candidate_dict = nearby[0]
         elif active_high_qual:
             best_candidate_dict = active_high_qual[0]
+        elif not in_range_eligible and far_eligible:
+            best_candidate_dict = far_eligible[0]
         remaining = [
             z for z in directional
             if z is not best_candidate_dict
             and (not best_candidate_dict or not _zones_substantially_overlap(best_candidate_dict, z))
         ]
         dec["next_radar_zone"] = min(remaining, key=_distance) if remaining else None
-        # Hanya evaluasi entry pada kandidat in-range (JANGAN pernah mengevaluasi entry pada zona FAR_REFERENCE)
+        # Evaluasi entry pada kandidat (fokus in-range jika ada, atau far jika in-range kosong)
         if best_candidate_dict:
-            cands = [best_candidate_dict] + [z for z in in_range_eligible if z is not best_candidate_dict]
+            cands = [best_candidate_dict] + [z for z in (in_range_eligible or far_eligible) if z is not best_candidate_dict]
         else:
-            cands = in_range_eligible
+            cands = in_range_eligible or far_eligible
     if best_candidate_dict:
         best_candidate_zone = _zone_from_dict(best_candidate_dict)
         dec["zone"] = best_candidate_dict

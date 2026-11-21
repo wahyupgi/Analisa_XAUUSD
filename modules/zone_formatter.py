@@ -444,9 +444,10 @@ def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan:
             elif plan:
                 kind = "PROVISIONAL"
             elif (computed.get("valid") and computed.get("status") == "READY") or (
-                computed.get("status") == "PROVISIONAL" and computed.get("provisional")
-            ):
-                plan, kind = computed, "PROVISIONAL"
+                computed.get("status") in ("PROVISIONAL", "WATCHLIST") or computed.get("provisional")
+            ) or (computed.get("entry_price", 0.0) > 0 and computed.get("sl", 0.0) > 0):
+                plan = computed
+                kind = "PROVISIONAL" if computed.get("provisional") else ("WATCHLIST" if computed.get("status") == "WATCHLIST" else "PLAN")
             else:
                 text = str(computed.get("rejection_reason") or "")
                 note = next((label for key, label in _PLAN_NOTES if key.lower() in text.lower()), text[:40].upper() or "PLAN UNAVAILABLE")
@@ -503,6 +504,10 @@ def smc_zone_summary(zone: Dict[str, Any], decision: Dict[str, Any], allow_plan:
         status = f"{code} | {role_tag} {c_st}"
     elif kind == "PROVISIONAL":
         status = f"{code} (PROVISIONAL ONLY)"
+    elif kind == "WATCHLIST":
+        status = f"{code} (WATCHLIST — FAR ZONE)"
+    elif kind == "PLAN":
+        status = f"{code} (VALIDATED PLAN)"
     return {
         "label": (
             f"{zone.get('timeframe', '')} {str(zone.get('zone_type', '')).upper()} "
@@ -525,7 +530,7 @@ def format_smc_zone_lines(zone: Dict[str, Any], decision: Dict[str, Any], allow_
     s = smc_zone_summary(zone, decision, allow_plan)
     if s["kind"] == "CONFIRMED":
         entry_text = f"{s['direction']} {s['entry']:.2f}"
-    elif s["kind"] in ("SELECTED_PENDING", "ALT_PENDING", "PENDING", "PROVISIONAL"):
+    elif s["kind"] in ("SELECTED_PENDING", "ALT_PENDING", "PENDING", "PROVISIONAL", "WATCHLIST", "PLAN"):
         entry_text = f"{s['direction']} PLAN {s['entry']:.2f}"
     else:
         entry_text = f"N/A ({s['note']})"
@@ -549,6 +554,77 @@ def format_smc_zone_plan(zone: Dict[str, Any], decision: Dict[str, Any], allow_p
         if s["entry"] > 0 else f"N/A ({s['note']})"
     )
     return f"{s['reason']} | ENTRY/SL/TP1/TP2 {levels} | {s['status']}"
+
+
+def premarket_lines(dec: Optional[Dict[str, Any]]) -> List[str]:
+    mkt = str((dec or {}).get("market_status") or "").upper()
+    snap_st = str((dec or {}).get("snapshot_status") or "").upper()
+    if mkt != "CLOSED" and snap_st != "MARKET_CLOSED":
+        return []
+    pm = (dec or {}).get("premarket")
+    if not isinstance(pm, dict):
+        return []
+    ct = pm.get("candle_times") or {}
+    ts = " | ".join(f"{k}={ct[k]}" for k in ("H4", "H1", "M30", "M5") if ct.get(k))
+    px = pm.get("price")
+    L = ["PRE-MARKET ANALYSIS (MARKET CLOSED — PROVISIONAL, bukan sinyal live / izin entry)",
+         f"- Ref. Harga   : {px:.2f} = LAST CLOSED CANDLE M5 @ {pm.get('price_time') or 'N/A'} (sesi terakhir; BUKAN LIVE)" if px else "- Ref. Harga   : N/A",
+         f"- Last Tick   : {pm.get('last_tick_time') or 'N/A (tidak dipakai untuk jarak/entry)'}",
+         f"- Candle Time : {ts or 'N/A'}",
+         "- LIVE SIGNAL : WAIT (market CLOSED; historical touch bukan trigger, tidak ada pending aktif)",
+         "",
+         "KANDIDAT ZONA TRADING TERBAIK (Maksimal 3 Zona):"]
+    cands = pm.get("candidates") or pm.get("plans") or []
+    if not cands:
+        L.append(f"- Tidak ada zona potensial: {pm.get('reason') or 'Belum ada zona valid'}")
+    for i, c in enumerate(cands[:3], 1):
+        d = c.get("direction") or ("BUY" if "BUY" in str(c.get("order_type", "")) else "SELL")
+        tf = c.get("zone_timeframe") or c.get("timeframe", "H1")
+        zt = c.get("zone_type", "ZONE")
+        sub_t = c.get("zone_subtype") or c.get("ob_type") or ""
+        type_lbl = f"{zt} ({sub_t})" if sub_t and sub_t != zt else zt
+        z_lo = float(c.get("zone_low", 0.0))
+        z_hi = float(c.get("zone_high", 0.0))
+        dist_u = float(c.get("distance", 0.0))
+        dist_atr = c.get("distance_atr_ratio")
+        atr_str = f" / {dist_atr:.1f}x ATR" if isinstance(dist_atr, (int, float)) else ""
+        grd = c.get("zone_grade") or c.get("grade", "-")
+        sc = float(c.get("zone_score") or c.get("score") or 0.0)
+        st = c.get("status", "WATCHLIST")
+        st_rsn = c.get("status_reason") or c.get("rejection_reason") or ""
+        st_lbl = f"{st} — {st_rsn}" if st_rsn else st
+        confl = c.get("validity_reason") or c.get("confluence") or c.get("alasan") or "Struktur valid MT5"
+        ep = float(c.get("entry_price") or 0.0)
+        sl = float(c.get("sl") or 0.0)
+        tp1 = float(c.get("tp1") or 0.0)
+        rr = float(c.get("rr") or c.get("rr_tp1") or 0.0)
+        plan_str = f"Entry {ep:.2f} | SL {sl:.2f} | TP1 {tp1:.2f} | RR 1:{rr:.2f}" if (ep > 0 and sl > 0 and tp1 > 0) else "Setup belum lengkap (menunggu konfirmasi)"
+
+        L.append(f"- KANDIDAT {i} [{st}]: {d} {tf} {type_lbl} | Range: {z_lo:.2f} - {z_hi:.2f} | Jarak: {dist_u:.2f} USD{atr_str} | Grade: {grd} ({sc:.1f})")
+        L.append(f"  * Status        : {st_lbl}")
+        L.append(f"  * Validitas/Conf: {confl}")
+        L.append(f"  * Planned Setup : {plan_str}")
+    rej_cands = pm.get("rejected_candidates") or []
+    if rej_cands:
+        L.append("")
+        L.append("KANDIDAT TERDEKAT LAINNYA / DITOLAK:")
+        for rc in rej_cands[:3]:
+            rc_tf = rc.get("timeframe", "")
+            rc_type = rc.get("zone_type", "")
+            rc_lo = rc.get("price_low", 0.0)
+            rc_hi = rc.get("price_high", 0.0)
+            rc_dist = rc.get("distance", 0.0)
+            rc_atr = rc.get("distance_atr_ratio")
+            rc_atr_s = f" / {rc_atr:.1f}x ATR" if isinstance(rc_atr, (int, float)) else ""
+            rc_rr = rc.get("rr")
+            rc_rr_s = f" | RR 1:{rc_rr:.2f}" if isinstance(rc_rr, (int, float)) and rc_rr > 0 else ""
+            L.append(f"- {rc_tf} {rc_type} {rc_lo:.2f} - {rc_hi:.2f} (jarak {rc_dist:.2f} USD{rc_atr_s}{rc_rr_s}): {rc.get('reason')}")
+    far_refs = pm.get("far_references") or []
+    if far_refs:
+        L.append(f"- FAR REFERENCE: {len(far_refs)} zona jauh (> 15x ATR) dipisahkan dari setup utama (tidak mendominasi).")
+    L.append("")
+    L.append("- Saat market OPEN wajib validasi ulang: harga, gap, zona, SL/TP, RR, dan konfirmasi M5 sebelum sinyal aktif.")
+    return L
 
 
 def format_scan_presentation(
@@ -583,7 +659,10 @@ def format_scan_presentation(
     h4_bias = ctx.get("H4", "NETRAL")
     h1_struct = ctx.get("H1", "NETRAL")
     m30_val = dec.get("stages", {}).get("M30", {})
-    m30_status = m30_val.get("status", "CONFIRMED" if m30_val.get("ok") else "UNCONFIRMED")
+    if not m30_val and ctx:
+        m30_val = ctx.get("m30_eval") or {}
+    m30_dir = ctx.get("M30", "NETRAL")
+    m30_status = m30_val.get("status") or ctx.get("m30_status") or ("CONFIRMED" if m30_val.get("ok") else "UNCONFIRMED")
 
     zone = dec.get("zone")
     zone_dict = zone.to_dict() if hasattr(zone, "to_dict") else (dict(zone) if isinstance(zone, dict) else {})
@@ -792,6 +871,9 @@ def format_scan_presentation(
     _sp_src_txt = format_price_distance(spread_val, spec=_u_spec_pres, include_mt5_points=True) if spread_val is not None else "N/A"
     price_src = scan.get("price_source") or (f"MT5 Live Tick (Bid: {bid_val:.{_d_pres_px}f} | Ask: {ask_val:.{_d_pres_px}f} | Mid: {mid_val:.{_d_pres_px}f} | Spread: {_sp_src_txt})" if bid_val else f"Candle Close Snapshot ({price:.{_d_pres_px}f})")
 
+    if str(dec.get("market_status") or scan.get("market_status") or "").upper() == "CLOSED" or dec.get("snapshot_status") == "MARKET_CLOSED":
+        price_src = f"HISTORIS — MARKET CLOSED (bukan LIVE; {price_src})"
+        bid_ask_str = bid_ask_str.replace("Bid:", "Last Bid:").replace("Ask:", "Last Ask:")
     conflict_tag = " [CONFLICT H4 vs H1]" if ctx.get("has_conflict") else ""
     atr_diag_pres = dec.get("atr_diagnostics") or scan.get("atr_diagnostics")
     raw_radar = scan.get("radar_zones") or scan.get("active_zones", [])
@@ -821,7 +903,8 @@ def format_scan_presentation(
             m30_disp = f"{m30_status} (Condition: {m30_cond_lbl})"
         else:
             m30_disp = f"{m30_status}"
-        out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {m5_bias_disp}")
+        m30_disp_bias = f"{m30_dir} ({m30_status})" if (m30_dir and m30_dir in ("BULLISH", "BEARISH") and m30_status != m30_dir) else (m30_dir or m30_status)
+        out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_disp_bias} | M5: {m5_bias_disp}")
         out.append(f"- H4 Bias          : {h4_str}")
         out.append(f"- H1 Structure     : {h1_struct}{conflict_tag}")
         out.append(f"- M30 Momentum     : {m30_disp}")
@@ -848,20 +931,14 @@ def format_scan_presentation(
             return False
 
         pz_c = dec.get("primary_zone") or ((r_prio.get("primary_directional_zone") or r_prio.get("primary_zone")) if r_prio else None)
-        if pz_c and _is_far_zone_disp(pz_c):
-            pz_c = None
-        nz_c = dec.get("nearest_valid_zone")
-        if nz_c and _is_far_zone_disp(nz_c):
-            nz_c = None
+        nz_c = dec.get("nearest_valid_zone") or (r_prio.get("nearest_radar_zone") if r_prio else None)
         vz_c = r_prio.get("best_validated_entry_zone") if r_prio else None
 
         raw_main_z = dec.get("zone")
-        main_z = raw_main_z if (isinstance(raw_main_z, dict) and not _is_far_zone_disp(raw_main_z)) else None
-        far_ref_z = None
-        if isinstance(raw_main_z, dict) and _is_far_zone_disp(raw_main_z):
-            far_ref_z = raw_main_z
-        elif isinstance(dec.get("far_reference_zone"), dict):
-            far_ref_z = dec.get("far_reference_zone")
+        main_z = raw_main_z if isinstance(raw_main_z, dict) else (pz_c or nz_c)
+        far_ref_z = dec.get("far_reference_zone")
+        if not far_ref_z and main_z and _is_far_zone_disp(main_z):
+            far_ref_z = main_z
         elif not main_z:
             far_pool = [
                 z_f for z_f in all_radar
@@ -877,7 +954,7 @@ def format_scan_presentation(
                     key=lambda z_f: max(float(z_f.get("price_low", 0.0)) - price, price - float(z_f.get("price_high", 0.0)), 0.0) if price > 0 else float(z_f.get("distance", 9999.0)),
                 )
 
-        role_label = "Active Monitoring Zone" if main_z else "NONE"
+        role_label = "Active Monitoring Zone" if (main_z and not _is_far_zone_disp(main_z)) else ("Watchlist Zone (Far)" if main_z else "NONE")
         out.append(f"- Primary Zone     : {_cand_label(pz_c)}")
         out.append(f"- Nearest Zone     : {_cand_label(nz_c)}")
         out.append(f"- Next Radar Zone  : {_cand_label(dec.get('next_radar_zone'))}")
@@ -926,14 +1003,19 @@ def format_scan_presentation(
                     "ABOVE_PRICE" if z_lo > price else ("BELOW_PRICE" if z_hi < price else "INSIDE_ZONE")
                 )
                 app_val = main_z.get("approach")
+            eff_mkt_pres = str(dec.get("market_status") or (scan or {}).get("market_status") or "").upper()
+            if eff_mkt_pres == "CLOSED" and app_val == "APPROACHING":
+                app_val = "UNTOUCHED"
             if status == "VALID" and vz_c:
                 z_st_str = "CONFIRMED ENTRY [VALID] (Zona valid untuk entry)"
             else:
-                app_tag = f" [{app_val}]" if app_val in ("ZONE_TOUCHED", "INSIDE_ZONE", "APPROACHING", "FAR") else ""
+                app_tag = f" [{app_val}]" if (app_val in ("ZONE_TOUCHED", "INSIDE_ZONE", "FAR") or (app_val == "APPROACHING" and eff_mkt_pres != "CLOSED")) else ""
                 ct_tag = " [COUNTERTREND]" if main_z.get("is_counter") else ""
                 rel_val = str(main_z.get("zone_relevance") or "").upper()
                 if rel_val == "ACTIVE":
                     z_st_str = f"ACTIVE{app_tag}{ct_tag} (Zona aktif dalam jangkauan)"
+                elif rel_val == "FAR_REFERENCE" or app_val == "FAR" or main_z.get("risk_tier") == "FAR_ZONE":
+                    z_st_str = f"FAR_ZONE{app_tag}{ct_tag} (Zona valid — jarak jauh)"
                 else:
                     z_st_str = f"RADAR{app_tag}{ct_tag} (Zona sedang dipantau)"
 
@@ -945,16 +1027,16 @@ def format_scan_presentation(
             out.append(f"- Status Zona      : {z_st_str}")
 
         plan_zone = main_z or pz_c
-        if plan_zone and not _is_far_zone_disp(plan_zone):
+        if plan_zone:
             described_ids.add(plan_zone.get("zone_id"))
             data_ok = (stages.get("DATA") or {}).get("ok") is not False
             out.extend(
                 f"  {line}" for line in format_smc_zone_lines(
-                    plan_zone, dec, allow_plan=data_ok, role="SMC ACTIVE" if main_z else "SMC PRIMARY",
+                    plan_zone, dec, allow_plan=data_ok, role="SMC ACTIVE" if (main_z and main_z.get("zone_relevance") == "ACTIVE") else "SMC PRIMARY",
                 )
             )
         for candidate in (nz_c, dec.get("next_radar_zone")):
-            if candidate and not _is_far_zone_disp(candidate) and candidate.get("zone_id") and candidate["zone_id"] not in described_ids:
+            if candidate and candidate.get("zone_id") and candidate["zone_id"] not in described_ids:
                 described_ids.add(candidate["zone_id"])
                 out.append(f"- Rencana {candidate.get('price_low', 0.0):.2f}-{candidate.get('price_high', 0.0):.2f} : {format_smc_zone_plan(candidate, dec)}")
         out.append("")
@@ -1209,6 +1291,10 @@ def format_scan_presentation(
         out.append(f"- SNR Reference    : {snr_ctx_disp} | SMC+SNR: {snr_ref_tag}")
         out.append(f"- Alasan Utama     : {main_reason}")
         out.append(f"- Peringatan Risiko: {risk_warn}")
+        _pm_c = premarket_lines(dec)
+        if _pm_c:
+            out.append("")
+            out.extend(_pm_c)
         out.append("=" * 70)
         return "\n".join(out)
 
@@ -1227,7 +1313,8 @@ def format_scan_presentation(
         m30_disp_d = f"{m30_status} (Condition: {m30_cond_d})"
     else:
         m30_disp_d = f"{m30_status}"
-    out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_status} | M5: {m5_bias_disp}")
+    m30_disp_bias_d = f"{m30_dir} ({m30_status})" if (m30_dir and m30_dir in ("BULLISH", "BEARISH") and m30_status != m30_dir) else (m30_dir or m30_status)
+    out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_disp_bias_d} | M5: {m5_bias_disp}")
     out.append(f"- H4 Bias          : {h4_str}")
     out.append(f"- H1 Structure     : {h1_struct}")
     out.append(f"- M30 Momentum     : {m30_disp_d}")
@@ -1967,6 +2054,10 @@ def format_scan_presentation(
                 out.append(f"  * {mc}")
     out.append("")
 
+    _pm = premarket_lines(dec)
+    if _pm:
+        out.extend(_pm + [""])
+
     # E. RISK WARNING
     out.append("E. RISK WARNING — 6. RISK WARNING")
     if detailed:
@@ -2472,6 +2563,7 @@ def format_scan_summary(
         f"MITIGATED       : {mitigated_cnt}",
         f"FAR EXCLUDED    : {far_excluded_cnt}",
         "",
+        *(premarket_lines(dec) + [""] if dec.get("premarket") else []),
         format_risk_alert(pos_list=pos_list, orders_list=orders_list, risk_data=risk_data),
         "",
         "=" * 56,

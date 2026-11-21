@@ -1462,14 +1462,16 @@ def extract_smc_monitor_summary(scan_result, decision):
     m30_stage = (dec.get("stages") or {}).get("M30") or {}
     h4_bias = ctx.get("htf_bias") or scan.get("htf_bias") or (raw_h4.get("bias") if isinstance(raw_h4, dict) else raw_h4) or "NETRAL"
     h1_struct = ctx.get("h1_structure") or scan.get("h1_structure") or (raw_h1.get("bias") if isinstance(raw_h1, dict) else raw_h1) or "NETRAL"
+    m30_dir = raw_m30.get("bias") if isinstance(raw_m30, dict) else raw_m30
     m30_status = (
         ctx.get("m30_status")
         or scan.get("m30_status")
         or htf_ctx.get("m30_status")
         or m30_stage.get("status")
-        or (raw_m30.get("bias") if isinstance(raw_m30, dict) else raw_m30)
+        or m30_dir
         or "NETRAL"
     )
+    m30_bias_label = f"{m30_dir} ({m30_status})" if (m30_dir and m30_dir in ("BULLISH", "BEARISH") and m30_status != m30_dir) else (m30_dir or m30_status)
     has_conflict = bool(ctx.get("has_conflict") or htf_ctx.get("has_conflict"))
 
     raw_status = str(dec.get("status", "WAIT")).upper()
@@ -1577,7 +1579,7 @@ def extract_smc_monitor_summary(scan_result, decision):
         "status": "OK",
         "h4_bias": h4_bias,
         "h1_bias": h1_struct,
-        "m30_bias": m30_status,
+        "m30_bias": m30_bias_label,
         "m5_bias": m5_bias,
         "structure_status": struct_status,
         "primary_zone_label": pz_label,
@@ -3560,13 +3562,14 @@ class UnifiedMonitor:
             self._event_state_dedup[("FOCUS", "SETUP_FOCUS")] = setup_state
 
         # 2. Zone touch (SMC / SNR)
+        _hist_tag = "[HIST/CLOSED] " if smart_view.get("data_invalid") else ""
         touch_st_ev = str(smart_view.get("touch_status") or "").upper()
         if touch_st_ev == "IN_ZONE" and active_zone_id != "NONE":
             _register_event(
                 active_zone_id,
                 "ZONE_TOUCH",
                 "IN_ZONE",
-                f"TOUCH {active_zone_src} {active_zone_lo:.2f}-{active_zone_hi:.2f} @ {price_disp:.2f}",
+                f"{_hist_tag}TOUCH {active_zone_src} {active_zone_lo:.2f}-{active_zone_hi:.2f} @ {price_disp:.2f}",
             )
         elif active_zone_id != "NONE" and (active_zone_id, "ZONE_TOUCH") in self._event_state_dedup:
             self._event_state_dedup[(active_zone_id, "ZONE_TOUCH")] = touch_st_ev
@@ -3584,7 +3587,7 @@ class UnifiedMonitor:
         # 4. Breakout / Breakdown / Invalidasi (SMC & SNR)
         bo_watch_ev = str(smart_view.get("snr_breakout_watch") or "").strip()
         if bo_watch_ev:
-            _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"BREAKOUT: {bo_watch_ev}")
+            _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"{_hist_tag}BREAKOUT: {bo_watch_ev}")
 
         # 5. Material & inline alerts terdeduplikasi (skip pesan risk panjang yang sudah ditangani grup RISK)
         for al_raw in list(material_alerts) + list(inline_alerts) + list(news_alerts):

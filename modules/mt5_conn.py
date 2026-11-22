@@ -567,18 +567,33 @@ def fetch_mt5_pending_orders_snapshot(
         entry_tol = round(max(10.0 * tick_size, 2.0 * point, PENDING_ENTRY_TOLERANCE_MIN_PT), max(digits, 3))
         level_tol = round(max(10.0 * tick_size, 2.0 * point, PENDING_LEVEL_TOLERANCE_MIN_PT), max(digits, 3))
         norm_orders = []
+        seen_ord_tkts = set()
         for raw_o in orders_override:
             no = _normalize_mt5_pending_order(raw_o, default_symbol=target_sym, retrieved_at=now_wib)
             if no["symbol"].upper() in accepted_syms:
+                t_o = no.get("ticket")
+                if t_o is not None:
+                    if t_o in seen_ord_tkts:
+                        continue
+                    seen_ord_tkts.add(t_o)
                 norm_orders.append(no)
         norm_positions = []
+        seen_pos_tkts = set()
         pos_q_ok = False
         if positions_override is not None and isinstance(positions_override, (list, tuple)):
             pos_q_ok = True
             for raw_p in positions_override:
                 np_item = _normalize_mt5_position(raw_p, default_symbol=target_sym, retrieved_at=now_wib)
                 if np_item["symbol"].upper() in accepted_syms:
+                    t_p = np_item.get("ticket")
+                    if t_p is not None:
+                        if t_p in seen_pos_tkts:
+                            continue
+                        seen_pos_tkts.add(t_p)
                     norm_positions.append(np_item)
+        pos_no_sl_list = [p["ticket"] for p in norm_positions if p["sl"] <= 0 and p.get("ticket") is not None]
+        pos_no_sl_set = set(pos_no_sl_list)
+        ord_no_sl_list = [o["ticket"] for o in norm_orders if o["sl"] <= 0 and o.get("ticket") is not None and o.get("ticket") not in pos_no_sl_set]
         return {
             "query_ok": True,
             "positions_query_ok": pos_q_ok,
@@ -595,10 +610,10 @@ def fetch_mt5_pending_orders_snapshot(
             "total_account_orders": len(orders_override),
             "symbol_orders_count": len(norm_orders),
             "orders": norm_orders,
-            "orders_without_sl": [o["ticket"] for o in norm_orders if o["sl"] <= 0 and o.get("ticket") is not None],
+            "orders_without_sl": ord_no_sl_list,
             "symbol_positions_count": len(norm_positions),
             "positions": norm_positions,
-            "positions_without_sl": [p["ticket"] for p in norm_positions if p["sl"] <= 0 and p.get("ticket") is not None],
+            "positions_without_sl": pos_no_sl_list,
         }
 
     if not allow_live_query:
@@ -691,15 +706,30 @@ def fetch_mt5_pending_orders_snapshot(
         entry_tol = round(max(10.0 * tick_size, 2.0 * point, PENDING_ENTRY_TOLERANCE_MIN_PT), max(digits, 3))
         level_tol = round(max(10.0 * tick_size, 2.0 * point, PENDING_LEVEL_TOLERANCE_MIN_PT), max(digits, 3))
         norm_orders = []
+        seen_ord_tkts = set()
         for raw_o in raw_orders:
             no = _normalize_mt5_pending_order(raw_o, default_symbol=target_sym, retrieved_at=now_wib)
             if no["symbol"].upper() in accepted_syms:
+                t_o = no.get("ticket")
+                if t_o is not None:
+                    if t_o in seen_ord_tkts:
+                        continue
+                    seen_ord_tkts.add(t_o)
                 norm_orders.append(no)
         norm_positions = []
+        seen_pos_tkts = set()
         for raw_p in raw_positions:
             np_item = _normalize_mt5_position(raw_p, default_symbol=target_sym, retrieved_at=now_wib)
             if np_item["symbol"].upper() in accepted_syms:
+                t_p = np_item.get("ticket")
+                if t_p is not None:
+                    if t_p in seen_pos_tkts:
+                        continue
+                    seen_pos_tkts.add(t_p)
                 norm_positions.append(np_item)
+        pos_no_sl_list = [p["ticket"] for p in norm_positions if p["sl"] <= 0 and p.get("ticket") is not None]
+        pos_no_sl_set = set(pos_no_sl_list)
+        ord_no_sl_list = [o["ticket"] for o in norm_orders if o["sl"] <= 0 and o.get("ticket") is not None and o.get("ticket") not in pos_no_sl_set]
         return {
             "query_ok": True,
             "positions_query_ok": pos_q_ok,
@@ -716,10 +746,10 @@ def fetch_mt5_pending_orders_snapshot(
             "total_account_orders": total_acc_orders,
             "symbol_orders_count": len(norm_orders),
             "orders": norm_orders,
-            "orders_without_sl": [o["ticket"] for o in norm_orders if o["sl"] <= 0 and o.get("ticket") is not None],
+            "orders_without_sl": ord_no_sl_list,
             "symbol_positions_count": len(norm_positions),
             "positions": norm_positions,
-            "positions_without_sl": [p["ticket"] for p in norm_positions if p["sl"] <= 0 and p.get("ticket") is not None],
+            "positions_without_sl": pos_no_sl_list,
         }
     except Exception as exc:
         _catat_error("fetch_mt5_pending_orders_snapshot", exc)
@@ -756,9 +786,17 @@ def fetch_mt5_live_state(symbol=SYMBOL, orders_override=None, positions_override
     )
 
 
-def find_pending_orders_on_invalid_zones(invalid_zones, mt5_snapshot=None, symbol=SYMBOL, default_source=None):
+def find_pending_orders_on_invalid_zones(
+    invalid_zones,
+    mt5_snapshot=None,
+    symbol=SYMBOL,
+    default_source=None,
+    active_valid_zones=None,
+):
     """
-    Mendeteksi secara READ-ONLY apakah masih ada pending order aktif di MT5 yang berada pada zona INVALID/BROKEN.
+    Mendeteksi secara READ-ONLY apakah masih ada pending order aktif di MT5 yang benar-benar berada pada zona INVALID/BROKEN.
+    Memisahkan order manual yang tidak cocok dengan zona scanner (unmatched) atau berada di zona valid aktif/radar
+    dari order yang benar-benar berada di zona broken/invalidated.
     Dideduplikasi per ticket (1 ticket muncul tepat sekali meski menyentuh beberapa zona invalid SMC/SNR) —
     TIDAK pernah membatalkan/mengubah order otomatis.
     """
@@ -778,11 +816,69 @@ def find_pending_orders_on_invalid_zones(invalid_zones, mt5_snapshot=None, symbo
     entry_tol = float(snap.get("entry_tolerance") or PENDING_ENTRY_TOLERANCE_MIN_PT)
     digits = int(snap.get("digits") or 2)
 
+    valid_zone_ranges = []
+    for vz in (active_valid_zones or []):
+        vzd = vz.to_dict() if hasattr(vz, "to_dict") else (vz if isinstance(vz, dict) else None)
+        if not isinstance(vzd, dict):
+            continue
+        if vzd.get("is_valid") is False or vzd.get("is_broken") is True or vzd.get("is_invalidated") is True:
+            continue
+        v_st = str(vzd.get("lifecycle_status") or vzd.get("status") or "ACTIVE").upper()
+        v_fr = str(vzd.get("freshness") or "FRESH").upper()
+        if v_st in ("INVALIDATED", "BROKEN", "MITIGATED", "EXPIRED", "REJECTED") or v_fr in ("INVALIDATED", "MITIGATED", "EXPIRED"):
+            continue
+        v_lo = float(vzd.get("price_low", vzd.get("low", 0.0)) or 0.0)
+        v_hi = float(vzd.get("price_high", vzd.get("high", 0.0)) or 0.0)
+        if v_lo <= 0 or v_hi <= 0:
+            continue
+        if v_lo > v_hi:
+            v_lo, v_hi = v_hi, v_lo
+        v_type = str(vzd.get("zone_type") or vzd.get("type") or "").upper()
+        v_dir = "BUY" if v_type in ("DEMAND", "SUPPORT") else ("SELL" if v_type in ("SUPPLY", "RESISTANCE") else "")
+        valid_zone_ranges.append((v_dir, v_lo, v_hi))
+
     by_ticket = {}
     ticket_order = []
     for z in invalid_zones:
         zd = z.to_dict() if hasattr(z, "to_dict") else (z if isinstance(z, dict) else None)
         if not isinstance(zd, dict):
+            continue
+        z_st = str(zd.get("lifecycle_status") or zd.get("status") or "").upper()
+        z_fr = str(zd.get("freshness") or "").upper()
+        is_genuinely_broken = bool(
+            zd.get("is_broken") is True
+            or zd.get("is_invalidated") is True
+            or z_st in ("INVALIDATED", "BROKEN")
+            or z_fr == "INVALIDATED"
+        )
+        if not is_genuinely_broken:
+            continue
+        if z_st in ("RECLAIMED", "MITIGATED", "EXPIRED", "REJECTED", "RADAR", "ACTIVE", "TOUCHED", "ZONE_TOUCHED", "APPROACHING", "UNCONFIRMED"):
+            continue
+        rej_low = str(zd.get("rejection_reason") or "").lower()
+        if any(
+            kw in rej_low
+            for kw in (
+                "tidak ada fvg",
+                "displacement tidak memadai",
+                "bos tipis",
+                "bos terlalu jauh",
+                "tidak ada candle impuls",
+                "zona terlalu lebar",
+                "zona terlalu sempit",
+                "zona sudah dimitigasi",
+                "gagal hard validation",
+                "skor ",
+            )
+        ):
+            continue
+        bo_info = zd.get("breakout_info") if isinstance(zd.get("breakout_info"), dict) else {}
+        if (
+            zd.get("is_distant_historical") is True
+            or zd.get("lifecycle_is_historical") is True
+            or bo_info.get("is_historical_break") is True
+            or int(zd.get("lifecycle_bars_ago") or bo_info.get("bars_ago") or 0) > 6
+        ):
             continue
         z_lo = float(zd.get("price_low", zd.get("low", 0.0)) or 0.0)
         z_hi = float(zd.get("price_high", zd.get("high", 0.0)) or 0.0)
@@ -811,6 +907,12 @@ def find_pending_orders_on_invalid_zones(invalid_zones, mt5_snapshot=None, symbo
                 continue
             o_ent = float(ord_item.get("entry_price") or 0.0)
             if o_ent <= 0:
+                continue
+            # Jika order berada pada/dekat zona aktif/radar valid searah, jangan klasifikasikan sebagai zona invalid
+            if any(
+                (not v_d or not o_dir or v_d == o_dir) and (v_l - entry_tol - 1e-9) <= o_ent <= (v_h + entry_tol + 1e-9)
+                for v_d, v_l, v_h in valid_zone_ranges
+            ):
                 continue
             if (z_lo - entry_tol - 1e-9) <= o_ent <= (z_hi + entry_tol + 1e-9):
                 tkt = ord_item.get("ticket")
@@ -914,7 +1016,7 @@ def summarize_mt5_risk_warnings(
     ord_no_sl = []
     seen_o = set()
     for t in (snap.get("orders_without_sl") or []):
-        if t is not None and t not in seen_o:
+        if t is not None and t not in seen_o and t not in seen_p:
             seen_o.add(t)
             ord_no_sl.append(t)
 
@@ -1326,12 +1428,17 @@ def format_mt5_orders_summary_lines(
         matched_recons=matched_recons,
         invalid_zone_scope=invalid_zone_scope,
     )
-    total_no_sl = risk_sum["positions_without_sl_count"] + risk_sum["pending_without_sl_count"]
+    pos_no_sl_cnt = risk_sum["positions_without_sl_count"]
+    ord_no_sl_cnt = risk_sum["pending_without_sl_count"]
+    total_no_sl = pos_no_sl_cnt + ord_no_sl_cnt
+    nosl_breakdown = f" ({pos_no_sl_cnt} Pos + {ord_no_sl_cnt} Pending)" if total_no_sl > 0 else ""
     matched_cnt = len(matched_ord_seq)
+    inv_ord_cnt = risk_sum["invalid_zone_tickets_count"]
+    unmatched_manual_cnt = max(0, len(orders) - matched_cnt - inv_ord_cnt)
     other_cnt = max(0, len(orders) - matched_cnt)
 
     lines = [
-        f"- MT5 Summary      : Positions: {len(positions)} | Pending: {len(orders)} | Matched: {matched_cnt} | Without SL: {total_no_sl}",
+        f"- MT5 Summary      : Positions: {len(positions)} | Pending: {len(orders)} (Matched: {matched_cnt} | Unmatched Manual: {unmatched_manual_cnt} | On Invalid Zone: {inv_ord_cnt}) | Without SL: {total_no_sl}{nosl_breakdown}",
     ]
     if matched_ord_seq:
         m_parts = []
@@ -1345,10 +1452,13 @@ def format_mt5_orders_summary_lines(
                 f"#{mo.get('ticket')} {mo.get('order_type')} {float(mo.get('volume') or 0.0):g}lot @ {float(mo.get('entry_price') or 0.0):.{digits}f} ({sl_tag} | {tp_tag})"
             )
         extra_m = f" (+{matched_cnt - 3} matched)" if matched_cnt > 3 else ""
-        other_note = f" | OTHER ORDERS: {other_cnt}" if other_cnt > 0 else ""
+        other_note = f" | UNMATCHED MANUAL: {unmatched_manual_cnt}" if unmatched_manual_cnt > 0 else ""
         lines.append(f"- MT5 Matched      : {'; '.join(m_parts)}{extra_m}{other_note}")
     elif len(orders) > 0:
-        lines.append(f"- MT5 Pending      : MT5: NO MATCH | OTHER ORDERS: {len(orders)}")
+        lines.append(
+            f"- MT5 Pending      : MT5: NO MATCH | UNMATCHED MANUAL ORDERS: {unmatched_manual_cnt} (order manual di luar plan aktif scanner — bukan otomatis invalid)"
+            + (f" | ON INVALID ZONE: {inv_ord_cnt}" if inv_ord_cnt > 0 else "")
+        )
     else:
         lines.append(f"- MT5 Pending      : NOT PLACED (0 pending order aktif pada {sym})")
 

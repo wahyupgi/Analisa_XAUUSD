@@ -1228,7 +1228,7 @@ def run_snr_scan(
             else:
                 prov_r = entry_validation.get("provisional_plan")
                 tz_r = entry_validation.get("target_zone") or {}
-                if isinstance(prov_r, dict) and prov_r.get("status") == "PROVISIONAL" and safe_float(prov_r.get("entry"), 0.0) > 0:
+                if isinstance(prov_r, dict) and prov_r.get("status") == "PROVISIONAL" and safe_float(prov_r.get("entry"), 0.0) > 0 and mkt_status != "CLOSED":
                     p_dir_r = str(prov_r.get("direction") or "").upper()
                     snr_plan_for_recon = {
                         "symbol": market_data["symbol"],
@@ -1253,11 +1253,13 @@ def run_snr_scan(
                 z_i for z_i in (list(ranked_zones.get("broken_zones") or []) + list(ranked_zones.get("invalidated_zones") or []))
                 if not (isinstance(z_i, dict) and str(z_i.get("lifecycle_status") or z_i.get("status") or "").upper() == "RECLAIMED")
             ]
+            valid_pool_snr = list(ranked_zones.get("active_supports") or []) + list(ranked_zones.get("active_resistances") or [])
             invalid_pending_warnings = find_pending_orders_on_invalid_zones(
                 inv_pool_snr,
                 mt5_snapshot=mt5_orders_snapshot,
                 symbol=market_data["symbol"],
                 default_source="SNR",
+                active_valid_zones=valid_pool_snr,
             )
     except Exception as exc_mt5_snr:
         log_snr_error("snr_mt5_reconcile", exc_mt5_snr)

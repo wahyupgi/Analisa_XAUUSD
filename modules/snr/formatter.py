@@ -242,8 +242,9 @@ def format_snr_focus_plan(decision, entry_validation=None, zone_override=None, m
             status = "RR_FAILED"
     else:
         status = "RADAR"
+    zid_snr = str(zone.get("zone_id") or "N/A")
     lines = [
-        f"SNR ZONE : {label} | Grade {zone.get('grade', 'N/A')} ({score})",
+        f"SNR ZONE : {label} | Grade {zone.get('grade', 'N/A')} ({score}) [ID: {zid_snr}]",
         f"REASON   : {reason}",
         *(["INTERAKSI: ZONA DISENTUH M5 CLOSED (4 CANDLE TERAKHIR)"] if is_focus and ev.get("recent_closed_touch") else []),
         f"ENTRY    : {entry_text}",
@@ -324,11 +325,11 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
         "          XAUUSD SNR ADVANCED SCANNER",
         "====================================================",
         f"MARKET STATUS : {mkt_status}",
-        f"PRICE       : {price_str} | TIME: {time_label} | STATUS: {mkt_status}",
-        f"MARKET BIAS : H4: {h4_b} | H1: {h1_b} | M30: {m30_b} | M5: {m5_b}",
+        f"PRICE         : {price_str} | TIME: {time_label}",
+        f"MARKET BIAS   : H4: {h4_b} | H1: {h1_b} | M30: {m30_b} | M5: {m5_b}",
         "",
         "----------------------------------------------------",
-        "SUPPORT ZONES (ACTIVE)",
+        "SUPPORT ZONES (ACTIVE — STRUCTURAL VALIDITY ONLY, ENTRY WAIT [MARKET CLOSED])" if mkt_status == "CLOSED" else "SUPPORT ZONES (ACTIVE)",
         "----------------------------------------------------",
     ]
 
@@ -343,8 +344,11 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
             score_str = f"{safe_float(sz.get('score')):.2f}"
             strength = sz.get("strength_short", "MODERATE")
             rel_tag = str(sz.get("zone_relevance") or "ACTIVE").upper()
+            if mkt_status == "CLOSED" and rel_tag == "ACTIVE":
+                rel_tag = "ACTIVE — STRUCTURAL VALID | ENTRY WAIT"
             reason_str = build_snr_zone_reason(sz, mb.get("h4"))
-            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} [{rel_tag}] (Grade {grade} | Score {score_str} | Strength {strength})")
+            sz_id = str(sz.get("zone_id") or "N/A")
+            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} [{rel_tag}] (Grade {grade} | Score {score_str} | {strength}) [ID: {sz_id}]")
             lines.append(f"     Reason: {reason_str}")
             if idx_s == 0 and len(active_sups[:2]) > 1:
                 lines.append("")
@@ -354,7 +358,7 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
     lines.extend([
         "",
         "----------------------------------------------------",
-        "RESISTANCE ZONES (ACTIVE)",
+        "RESISTANCE ZONES (ACTIVE — STRUCTURAL VALIDITY ONLY, ENTRY WAIT [MARKET CLOSED])" if mkt_status == "CLOSED" else "RESISTANCE ZONES (ACTIVE)",
         "----------------------------------------------------",
     ])
 
@@ -369,8 +373,11 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
             score_str = f"{safe_float(rz.get('score')):.2f}"
             strength = rz.get("strength_short", "MODERATE")
             rel_tag = str(rz.get("zone_relevance") or "ACTIVE").upper()
+            if mkt_status == "CLOSED" and rel_tag == "ACTIVE":
+                rel_tag = "ACTIVE — STRUCTURAL VALID | ENTRY WAIT"
             reason_str = build_snr_zone_reason(rz, mb.get("h4"))
-            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} [{rel_tag}] (Grade {grade} | Score {score_str} | Strength {strength})")
+            rz_id = str(rz.get("zone_id") or "N/A")
+            lines.append(f"{rank_lbl} : {lo_str} - {hi_str} [{rel_tag}] (Grade {grade} | Score {score_str} | {strength}) [ID: {rz_id}]")
             lines.append(f"     Reason: {reason_str}")
             if idx_r == 0 and len(active_ress[:2]) > 1:
                 lines.append("")
@@ -485,7 +492,10 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
             if pe > 0 and psl > 0 and ptp > 0:
                 p_dir = prov.get("direction", "PLAN")
                 p_rr = f"1:{abs(ptp - pe) / abs(pe - psl):.2f}"
-                plan_line = f"{p_dir} PLAN : {pe:.2f} | SL: {psl:.2f} | TP: {ptp:.2f} (RR {p_rr}, PROVISIONAL)"
+                if mkt_status == "CLOSED":
+                    plan_line = f"{p_dir} PLAN : {pe:.2f} | SL: {psl:.2f} | TP: {ptp:.2f} (RR {p_rr}, WAIT — MARKET CLOSED; Revalidasi zona/gap/RR/SL/TP/M5 saat market OPEN)"
+                else:
+                    plan_line = f"{p_dir} PLAN : {pe:.2f} | SL: {psl:.2f} | TP: {ptp:.2f} (RR {p_rr}, PROVISIONAL)"
 
     lines.extend([
         "",
@@ -498,7 +508,9 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
         lines.append(f"DIRECTION  : {dir_final}")
     target_is_far = bool(target_z and _is_snr_far_zone(target_z) and sig_final not in ("BUY", "SELL"))
     if target_z and not target_is_far and focus_lbl and focus_lbl != "N/A":
-        lines.append(f"ACTIVE FOCUS: {focus_lbl}")
+        tz_id_s = str(target_z.get("zone_id") or "")
+        tz_id_tag = f" [ID: {tz_id_s}]" if tz_id_s else ""
+        lines.append(f"ACTIVE FOCUS: {focus_lbl}{tz_id_tag}")
     else:
         lines.append("ACTIVE FOCUS: NONE | WAIT")
         far_ref_z = target_z if target_is_far else (ev.get("far_reference_zone") or (far_ref_zs[0] if far_ref_zs else None))

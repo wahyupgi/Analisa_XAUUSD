@@ -1633,8 +1633,8 @@ def _is_snr_zone_broken_or_inactive(
     snr_context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """True bila zona SNR lawan sudah breakout/invalid/mitigated/non-aktif sehingga bukan penghalang aktif."""
-    lifecycle = str(zone.get("lifecycle") or "").upper()
-    if lifecycle in ("BROKEN", "INVALIDATED", "EXPIRED", "MITIGATED", "RETEST", "RECLAIM_PENDING", "RECLAIMED"):
+    lifecycle = str(zone.get("lifecycle_status") or zone.get("lifecycle") or zone.get("status") or "").upper()
+    if lifecycle in ("BROKEN", "INVALIDATED", "EXPIRED", "MITIGATED", "RETEST", "RECLAIM_PENDING", "RECLAIMED", "HISTORICAL"):
         return True
     if zone.get("is_broken") or zone.get("is_invalidated") or (zone.get("is_active") is False):
         return True

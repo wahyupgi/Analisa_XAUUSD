@@ -515,6 +515,151 @@ class PantauFocusTracker:
         self._last_tick = current
         return history[start + 1:end + 1] or [current]
 
+    @staticmethod
+    def _resolve_zone_formation_ts(record):
+        """Parse timestamp pembentukan/konfirmasi zona ke UTC epoch seconds (None jika tidak tersedia)."""
+        if not isinstance(record, dict):
+            return None
+        zone = record.get("zone") if isinstance(record.get("zone"), dict) else {}
+        for key in ("formation_time", "confirmed_time", "confirmation_time", "bos_candle_time", "ob_candle_time", "created_at"):
+            raw = zone.get(key)
+            if raw is None or raw == "":
+                continue
+            if isinstance(raw, (int, float)) and math.isfinite(float(raw)) and float(raw) > 1e8:
+                return float(raw)
+            if isinstance(raw, datetime):
+                dt_v = raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+                return dt_v.timestamp()
+            if isinstance(raw, str):
+                s = raw.strip()
+                if not s or s.lower() in ("none", "nan", "nat", "-"):
+                    continue
+                is_wib = "WIB" in s.upper()
+                s_clean = s.replace(" WIB", "").replace(" wib", "").strip()
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+                    try:
+                        dt_p = datetime.strptime(s_clean[:19], fmt)
+                        if is_wib:
+                            return dt_p.replace(tzinfo=timezone.utc).timestamp() - 7 * 3600
+                        return dt_p.replace(tzinfo=timezone.utc).timestamp()
+                    except ValueError:
+                        continue
+        zid = str(record.get("zone_id") or "")
+        m_ep = re.search(r"_(\d{9,11})$", zid)
+        if m_ep:
+            try:
+                return float(int(m_ep.group(1)))
+            except ValueError:
+                pass
+        return None
+
+    @staticmethod
+    def _normalize_mt5_epoch(raw_ts, raw_msc=0.0):
+        """Konversi timestamp posisi/order MT5 (broker server time) ke UTC epoch seconds."""
+        ts_val = safe_float(raw_msc, 0.0) / 1000.0 if safe_float(raw_msc, 0.0) > 0 else safe_float(raw_ts, 0.0)
+        if ts_val <= 0:
+            return 0.0
+        # Jika ts broker melebihi jam UTC sistem > 30 menit, kurangi SERVER_UTC_OFFSET_JAM
+        now_utc = time.time()
+        if ts_val > now_utc + 1800 and SERVER_UTC_OFFSET_JAM:
+            ts_val -= float(SERVER_UTC_OFFSET_JAM) * 3600.0
+        return ts_val
+
+    def _resolve_match_tolerance(self, snap):
+        """Toleransi pencocokan harga berbasis tick size / spread MT5 yang wajar (bukan arbitrer)."""
+        from modules.utils import extract_unit_spec_from_container
+        u_spec = extract_unit_spec_from_container(snap, symbol=self.symbol)
+        tick_sz = max(safe_float(u_spec.get("trade_tick_size"), 0.01), safe_float(u_spec.get("point"), 0.01), 0.01)
+        spread_v = max(0.0, safe_float((snap or {}).get("spread"), 0.0))
+        digits_v = int(u_spec.get("digits", 2))
+        return round(max(3.0 * tick_sz, spread_v, 0.05), max(digits_v, 3))
+
+    def _classify_mt5_item_match(self, method, item, record, accepted_syms, tol, is_order=False, signal_state=None):
+        """
+        Evaluasi kriteria wajib MT5 matching:
+        - Wajib cocok: symbol, arah BUY/SELL, jenis posisi/order, harga dalam zona + toleransi tick/spread,
+          dan waktu buka sesuai periode validitas zona (tidak boleh sebelum zona terbentuk).
+        - VERIFIED   : identitas setup terbukti (ticket/zone_id/magic/comment/riwayat sinyal) + seluruh kriteria wajib cocok.
+        - INFERRED   : symbol, arah, jenis, harga, dan waktu cocok, tetapi identitas setup belum terbukti.
+        - UNVERIFIED : data kurang, tidak cocok, atau dibuka sebelum zona terbentuk.
+        """
+        sym = str(_position_value(item, "symbol", "") or "").strip()
+        if sym.upper() not in accepted_syms:
+            return "UNVERIFIED", "Symbol tidak cocok"
+        ticket = _position_value(item, "ticket")
+        if not ticket:
+            return "UNVERIFIED", "Ticket tidak tersedia"
+
+        if is_order:
+            raw_t = _position_value(item, "order_type")
+            if raw_t is None:
+                raw_t = _position_value(item, "type")
+            if raw_t is None:
+                return "UNVERIFIED", "Jenis order tidak tersedia"
+            ord_label, direction = _info_tipe_pending(raw_t)
+            if not any(tok in ord_label for tok in ("LIMIT", "STOP")):
+                return "UNVERIFIED", "Bukan pending order"
+        else:
+            raw_t = _position_value(item, "type")
+            if raw_t is None:
+                raw_t = _position_value(item, "direction")
+            direction = (
+                "BUY" if raw_t == 0 or str(raw_t).upper() == "BUY"
+                else ("SELL" if raw_t == 1 or str(raw_t).upper() == "SELL" else "")
+            )
+            if direction not in ("BUY", "SELL"):
+                return "UNVERIFIED", "Bukan open position valid"
+
+        if direction != record.get("direction"):
+            return "UNVERIFIED", "Arah tidak cocok"
+
+        entry_px = safe_float(_position_value(item, "price_open", _position_value(item, "entry_price")), 0.0)
+        if entry_px <= 0:
+            return "UNVERIFIED", "Harga entry tidak valid"
+        plan_entry = safe_float((record.get("plan") or {}).get("entry"), 0.0)
+        in_zone_bounds = (record["low"] - tol - 1e-9 <= entry_px <= record["high"] + tol + 1e-9)
+        near_plan = (plan_entry > 0 and abs(entry_px - plan_entry) <= tol + 1e-9)
+        if not (in_zone_bounds or near_plan):
+            return "UNVERIFIED", "Harga di luar rentang zona & toleransi tick/spread"
+
+        zone_start_ts = self._resolve_zone_formation_ts(record)
+        raw_t_sec = _position_value(item, "time_setup" if is_order else "time", 0)
+        raw_t_msc = _position_value(item, "time_setup_msc" if is_order else "time_msc", 0)
+        item_ts = self._normalize_mt5_epoch(raw_t_sec, raw_t_msc)
+        if zone_start_ts is None or item_ts <= 0:
+            return "UNVERIFIED", "Waktu pembukaan / pembentukan zona tidak lengkap"
+        if item_ts < zone_start_ts - 60.0:
+            return "UNVERIFIED", "Dibuka sebelum zona terbentuk (tidak boleh VERIFIED)"
+
+        # Bukti identitas setup (ticket, zone_id, magic/comment, riwayat sinyal)
+        comment_str = str(_position_value(item, "comment", "") or "").strip()
+        magic_val = int(safe_float(_position_value(item, "magic", 0), 0))
+        zid = str(record.get("zone_id") or "").strip()
+        zid_short = zid[-8:] if len(zid) >= 8 else zid
+        comment_linked = bool(
+            comment_str and (
+                (zid and zid.lower() in comment_str.lower())
+                or (zid_short and len(zid_short) >= 8 and zid_short.lower() in comment_str.lower())
+                or (f"{method.lower()}:" in comment_str.lower())
+            )
+        )
+        tkt_linked = bool(record.get("verified_ticket") and ticket == record.get("verified_ticket"))
+        sig_linked = False
+        if isinstance(signal_state, dict):
+            s_obj = signal_state.get("sinyal") if isinstance(signal_state.get("sinyal"), dict) else signal_state
+            if isinstance(s_obj, dict):
+                s_tkt = s_obj.get("ticket")
+                s_zid = str(s_obj.get("zone_id") or "")
+                s_magic = int(safe_float(s_obj.get("magic", 0), 0))
+                if s_tkt and ticket == s_tkt and (not s_zid or s_zid == zid):
+                    sig_linked = True
+                elif magic_val > 0 and s_magic > 0 and magic_val == s_magic and str(s_obj.get("arah") or "").upper() == direction:
+                    sig_linked = True
+
+        if tkt_linked or comment_linked or sig_linked:
+            return "VERIFIED", "Identitas setup & kriteria symbol/arah/harga/waktu terverifikasi"
+        return "INFERRED", "Symbol/arah/harga/waktu cocok; identitas setup manual belum terbukti"
+
     def update(self, results, snapshot, positions, full_refresh, orders=None):
         alerts = []
         self.refresh_required = False
@@ -723,32 +868,29 @@ class PantauFocusTracker:
                     record["plan"] = plan_updates.pop(method)
 
         _, accepted_syms = _acceptable_trade_symbols(self.symbol)
+        is_closed_mkt = (
+            str(snap.get("market_status") or "").upper() == "CLOSED"
+            or str(snap.get("snapshot_status") or "").upper() == "MARKET_CLOSED"
+        )
+        match_tol = self._resolve_match_tolerance(snap)
+        sig_state_ref = None
+        try:
+            import modules.state_manager as _sm_match
+            sig_state_ref = _sm_match.muat_state_sinyal()
+        except Exception:
+            sig_state_ref = None
+
         pending_matches = {}
         for method, record in self.focus.items():
             pending_matches[method] = []
             if not record or orders is None:
                 continue
-            plan_entry = safe_float((record.get("plan") or {}).get("entry"), 0.0)
             for order in orders:
-                ord_sym = str(_position_value(order, "symbol", "") or "").strip()
-                if ord_sym.upper() not in accepted_syms:
-                    continue
-                raw_ord_type = _position_value(order, "order_type")
-                if raw_ord_type is None:
-                    raw_ord_type = _position_value(order, "type")
-                if raw_ord_type is None:
-                    continue
-                ord_label, ord_dir = _info_tipe_pending(raw_ord_type)
-                if ord_dir != record["direction"] or not any(tok in ord_label for tok in ("LIMIT", "STOP")):
-                    continue
-                ord_price = safe_float(_position_value(order, "price_open", _position_value(order, "entry_price")), 0.0)
-                ord_ticket = _position_value(order, "ticket")
-                if ord_price <= 0 or not ord_ticket:
-                    continue
-                in_bounds = (record["low"] - 0.05 - 1e-9 <= ord_price <= record["high"] + 0.05 + 1e-9)
-                near_plan = (plan_entry > 0 and abs(ord_price - plan_entry) <= 0.05 + 1e-9)
-                if in_bounds or near_plan:
-                    pending_matches[method].append(order)
+                m_st, m_rsn = self._classify_mt5_item_match(
+                    method, order, record, accepted_syms, match_tol, is_order=True, signal_state=sig_state_ref,
+                )
+                if m_st in ("VERIFIED", "INFERRED"):
+                    pending_matches[method].append((order, m_st, m_rsn))
 
         matches = {}
         for method, record in self.focus.items():
@@ -756,48 +898,63 @@ class PantauFocusTracker:
             if not record or positions is None:
                 continue
             for position in positions:
-                symbol = str(_position_value(position, "symbol", ""))
-                kind = _position_value(position, "type")
-                direction = "BUY" if kind == 0 or str(kind).upper() == "BUY" else "SELL" if kind == 1 or str(kind).upper() == "SELL" else ""
-                opened = safe_float(_position_value(position, "price_open"))
-                opened_at = safe_float(_position_value(position, "time"))
-                opened_msc = safe_float(_position_value(position, "time_msc"))
-                if opened_msc > 0:
-                    opened_at = opened_msc / 1000.0
                 ticket = _position_value(position, "ticket")
-                if (
-                    symbol == self.symbol and direction == record["direction"] and ticket
-                    and record["low"] <= opened <= record["high"]
-                    and opened_at >= record["issued_at"]
-                    and (not record["ticket"] or ticket == record["ticket"])
-                ):
-                    matches[method].append(position)
+                if record.get("ticket") and ticket != record["ticket"]:
+                    continue
+                m_st, m_rsn = self._classify_mt5_item_match(
+                    method, position, record, accepted_syms, match_tol, is_order=False, signal_state=sig_state_ref,
+                )
+                if m_st in ("VERIFIED", "INFERRED"):
+                    matches[method].append((position, m_st, m_rsn))
 
         for method, record in list(self.focus.items()):
             if not record or method not in self.active_methods:
                 continue
-            record["pending_ticket"] = _position_value(pending_matches[method][0], "ticket") if pending_matches.get(method) else None
+            if pending_matches.get(method):
+                p_ord, p_mst, p_mrsn = pending_matches[method][0]
+                record["pending_ticket"] = _position_value(p_ord, "ticket")
+                record["pending_match_status"] = p_mst
+                record["pending_match_reason"] = p_mrsn
+            else:
+                record["pending_ticket"] = None
+                record["pending_match_status"] = "UNVERIFIED"
+                record["pending_match_reason"] = ""
             if not fresh or positions is None or not history_complete:
-                if not record["uncertain"]:
+                if not record["uncertain"] and not is_closed_mkt:
                     alerts.append(f"[{method}] DATA ATAU RIWAYAT TIDAK LENGKAP; FOKUS DIPERTAHANKAN")
                 record["uncertain"] = True
             other = "SNR" if method == "SMC" else "SMC"
             match = matches[method]
             shared = bool(match and any(
-                _position_value(p, "ticket") == _position_value(match[0], "ticket")
-                for p in matches[other]
+                _position_value(p_item[0], "ticket") == _position_value(match[0][0], "ticket")
+                for p_item in matches[other]
             ))
             account_status = "POSITIONS UNAVAILABLE" if positions is None else "AMBIGUOUS" if len(match) > 1 or shared else "RUNNING" if len(match) == 1 else (
                 "POSITION NOT OBSERVED" if record["ever_taken"] else "NO MATCHING POSITION"
             )
+            if account_status == "RUNNING":
+                m_pos, m_st, m_rsn = match[0]
+                record["ticket"] = _position_value(m_pos, "ticket")
+                record["position_open_price"] = safe_float(_position_value(m_pos, "price_open", _position_value(m_pos, "entry_price")), 0.0)
+                record["match_status"] = m_st
+                record["match_reason"] = m_rsn
+                record["historical_tracking"] = bool(is_closed_mkt)
+                if m_st == "VERIFIED":
+                    record["verified_ticket"] = record["ticket"]
+            elif account_status != "RUNNING":
+                record.setdefault("match_status", "UNVERIFIED")
+                record.setdefault("match_reason", "")
+                record["historical_tracking"] = False
+
             if account_status != record["account_status"]:
                 if account_status == "RUNNING":
-                    record["ticket"] = _position_value(match[0], "ticket")
                     record["ever_taken"] = True
-                    if not record["touched"]:
+                    m_st_lbl = record.get("match_status", "INFERRED")
+                    hist_sfx = " [HISTORICAL TRACKING]" if is_closed_mkt else ""
+                    if not record["touched"] and not is_closed_mkt:
                         alerts.append(f"[{method}] POSISI DIBUKA DI ZONA {record['low']:.2f}-{record['high']:.2f}")
                     record["touched"] = True
-                    alerts.append(f"[{method}] RUNNING: POSISI MT5 COCOK #{record['ticket']} (ASOSIASI OTOMATIS)")
+                    alerts.append(f"[{method}] RUNNING{hist_sfx}: POSISI MT5 #{record['ticket']} ({m_st_lbl})")
                 elif account_status == "AMBIGUOUS":
                     alerts.append(f"[{method}] POSISI MT5 AMBIGU; ENTRY BELUM DAPAT DIPASTIKAN")
                 elif account_status == "POSITION NOT OBSERVED":
@@ -814,7 +971,8 @@ class PantauFocusTracker:
             ):
                 if not record.get("historical_touch"):
                     record["historical_touch"] = True
-                    alerts.append("[SNR] ZONA PERNAH DISENTUH (HISTORIS); BUKAN BUKTI ENTRY")
+                    if not is_closed_mkt:
+                        alerts.append("[SNR] ZONA PERNAH DISENTUH (HISTORIS); BUKAN BUKTI ENTRY")
             lifecycle = str((current or {}).get("lifecycle_status") or (current or {}).get("status") or "").upper()
             if method == "SNR" and current is not None and lifecycle in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING"):
                 if record.get("break_watch") != lifecycle:
@@ -890,9 +1048,9 @@ class PantauFocusTracker:
                 if new_touch and (sl_hit or tp_hit) and account_status != "RUNNING":
                     record["uncertain"] = True
                     alerts.append(f"[{method}] ZONA DAN BATAS RENCANA DALAM TICK SAMA; URUTAN TIDAK PASTI")
-                opened_msc = safe_float(_position_value(match[0], "time_msc")) if account_status == "RUNNING" else 0
+                opened_msc = safe_float(_position_value(match[0][0], "time_msc")) if account_status == "RUNNING" else 0
                 if not opened_msc and account_status == "RUNNING":
-                    opened_msc = safe_float(_position_value(match[0], "time")) * 1000
+                    opened_msc = safe_float(_position_value(match[0][0], "time")) * 1000
                 if not record["uncertain"] and account_status != "AMBIGUOUS" and record["touched"] and tick_stamp >= opened_msc:
                     if sl_hit:
                         outcome = f"HARGA TERPANTAU DI SL RENCANA {sl:.2f}"
@@ -1304,11 +1462,11 @@ class PantauFocusTracker:
                 "MENUNGGU ZONA"
             )
             position = (
-                "RUNNING; POSISI COCOK OTOMATIS" if record["account_status"] == "RUNNING" else
+                f"RUNNING{' (HISTORICAL TRACKING)' if record.get('historical_tracking') else ''}; POSISI #{record.get('ticket')} [{record.get('match_status', 'INFERRED')}]" if record["account_status"] == "RUNNING" else
                 "POSISI AMBIGU" if record["account_status"] == "AMBIGUOUS" else
                 "POSISI MT5 TIDAK DAPAT DIBACA" if record["account_status"] == "POSITIONS UNAVAILABLE" else
                 "POSISI TIDAK TERLIHAT" if record["ever_taken"] else
-                f"PENDING ORDER #{record['pending_ticket']} MENUNGGU FILL (BELUM ADA POSISI TERBUKA)" if record.get("pending_ticket") else
+                f"PENDING ORDER #{record['pending_ticket']} [{record.get('pending_match_status', 'INFERRED')}] MENUNGGU FILL (BELUM ADA POSISI TERBUKA)" if record.get("pending_ticket") else
                 "BELUM ADA POSISI TERBUKA MT5 (TRACKING POSISI AKTIF MEMBUTUHKAN POSISI TERBUKA)" if record["touched"] else
                 "POSISI BELUM TERDETEKSI" if record.get("historical_touch") else ""
             )
@@ -1665,14 +1823,19 @@ def format_smc_monitor_section(smc_cycle_result, detailed=False):
         lines.append(f"NEXT RADAR ZONE : {safe_float(next_zone.get('price_low')):.2f}-{safe_float(next_zone.get('price_high')):.2f}")
 
     decision = smc_cycle_result.get("decision") or {}
+    scan_res_m = smc_cycle_result.get("scan_result") or {}
     focus = decision.get("zone") or decision.get("primary_zone") or {}
     if focus:
         allow_plan = (decision.get("stages", {}).get("DATA") or {}).get("ok") is not False
+        lines.append("NEW ENTRY / RADAR PLAN (Terpisah dari posisi historis MT5):")
         lines.extend(format_smc_zone_lines(
             focus, decision, allow_plan=allow_plan, role="SMC ACTIVE" if decision.get("zone") else "SMC PRIMARY",
         ))
+        confl_m = decision.get("smc_snr_confluence") or scan_res_m.get("smc_snr_confluence")
+        if isinstance(confl_m, dict) and confl_m.get("available") and (confl_m.get("is_aligned") or confl_m.get("opposing_conflict")):
+            lines.append(f"SMC+SNR CONFL.    : {confl_m.get('compact_summary') or confl_m.get('status')}")
     else:
-        lines.append("ENTRY / SL / TP : N/A (Tidak ada zona SMC)")
+        lines.append("NEW ENTRY / RADAR PLAN : N/A (Tidak ada zona SMC aktif)")
 
     lines.append(f"MAIN REASON     : {s.get('main_reason', 'N/A')}")
 
@@ -3303,10 +3466,20 @@ class UnifiedMonitor:
             } if self.focus_tracker is not None else {},
             "focus_detail": {
                 method: {
+                    "zone_id": record.get("zone_id"),
+                    "direction": record.get("direction"),
+                    "low": record.get("low"),
+                    "high": record.get("high"),
                     "touched": record["touched"],
                     "historical_touch": bool(record.get("historical_touch")),
                     "ever_taken": bool(record.get("ever_taken")),
+                    "ticket": record.get("ticket"),
+                    "position_open_price": safe_float(record.get("position_open_price"), 0.0),
+                    "match_status": record.get("match_status", "UNVERIFIED"),
+                    "match_reason": record.get("match_reason", ""),
+                    "historical_tracking": bool(record.get("historical_tracking")),
                     "pending_ticket": record.get("pending_ticket"),
+                    "pending_match_status": record.get("pending_match_status", "UNVERIFIED"),
                     "account_status": record["account_status"],
                     "uncertain": record["uncertain"],
                     "plan_valid": self.focus_tracker._valid_plan(record.get("plan")),
@@ -3538,56 +3711,69 @@ class UnifiedMonitor:
                 "scope": dedup_scope,
                 "message": stamped,
             })
-            # Deduplikasi recent events per (ticket_key, event_type) agar status terbaru menggantikan yang lama
+            # Deduplikasi recent events per (ticket_key, event_type) dan teks ternormalisasi agar tidak ada duplikat
+            norm_clean_ev = clean_msg.upper()
             self._recent_events = [
                 ev for ev in self._recent_events
-                if not (isinstance(ev, dict) and ev.get("scope") == dedup_scope)
+                if not (
+                    isinstance(ev, dict)
+                    and (
+                        ev.get("scope") == dedup_scope
+                        or re.sub(r"^\[[^\]]+\]\s*", "", str(ev.get("text") or "")).strip().upper() == norm_clean_ev
+                    )
+                )
             ]
             self._recent_events.append({"scope": dedup_scope, "state": state_id, "text": stamped})
             if len(self._recent_events) > 10:
                 self._recent_events = self._recent_events[-10:]
 
-        # 1. Pergantian setup / fokus zona
+        is_closed_ev = (
+            str((shared_snap or {}).get("market_status") or "").upper() == "CLOSED"
+            or snap_status == "MARKET_CLOSED"
+        )
+
+        # 1. Pergantian setup / fokus zona (jangan buat event entry baru dari data historis saat market CLOSED)
         setup_state = (active_zone_src, active_zone_id, smart_view.get("direction"), active_zone_lo, active_zone_hi)
-        if self.cycle_count > 1 and active_zone_id != "NONE":
-            prev_setup = self._event_state_dedup.get(("FOCUS", "SETUP_FOCUS"))
-            if prev_setup is not None and prev_setup != setup_state:
+        if not is_closed_ev:
+            if self.cycle_count > 1 and active_zone_id != "NONE":
+                prev_setup = self._event_state_dedup.get(("FOCUS", "SETUP_FOCUS"))
+                if prev_setup is not None and prev_setup != setup_state:
+                    _register_event(
+                        "FOCUS",
+                        "SETUP_FOCUS",
+                        setup_state,
+                        f"FOCUS -> {active_zone_src} {smart_view.get('direction', '')} {active_zone_lo:.2f}-{active_zone_hi:.2f}",
+                    )
+            elif active_zone_id != "NONE":
+                self._event_state_dedup[("FOCUS", "SETUP_FOCUS")] = setup_state
+
+            # 2. Zone touch (SMC / SNR)
+            _hist_tag = "[HIST/CLOSED] " if smart_view.get("data_invalid") else ""
+            touch_st_ev = str(smart_view.get("touch_status") or "").upper()
+            if touch_st_ev == "IN_ZONE" and active_zone_id != "NONE":
                 _register_event(
-                    "FOCUS",
-                    "SETUP_FOCUS",
-                    setup_state,
-                    f"FOCUS -> {active_zone_src} {smart_view.get('direction', '')} {active_zone_lo:.2f}-{active_zone_hi:.2f}",
+                    active_zone_id,
+                    "ZONE_TOUCH",
+                    "IN_ZONE",
+                    f"{_hist_tag}TOUCH {active_zone_src} {active_zone_lo:.2f}-{active_zone_hi:.2f} @ {price_disp:.2f}",
                 )
-        elif active_zone_id != "NONE":
-            self._event_state_dedup[("FOCUS", "SETUP_FOCUS")] = setup_state
+            elif active_zone_id != "NONE" and (active_zone_id, "ZONE_TOUCH") in self._event_state_dedup:
+                self._event_state_dedup[(active_zone_id, "ZONE_TOUCH")] = touch_st_ev
 
-        # 2. Zone touch (SMC / SNR)
-        _hist_tag = "[HIST/CLOSED] " if smart_view.get("data_invalid") else ""
-        touch_st_ev = str(smart_view.get("touch_status") or "").upper()
-        if touch_st_ev == "IN_ZONE" and active_zone_id != "NONE":
-            _register_event(
-                active_zone_id,
-                "ZONE_TOUCH",
-                "IN_ZONE",
-                f"{_hist_tag}TOUCH {active_zone_src} {active_zone_lo:.2f}-{active_zone_hi:.2f} @ {price_disp:.2f}",
-            )
-        elif active_zone_id != "NONE" and (active_zone_id, "ZONE_TOUCH") in self._event_state_dedup:
-            self._event_state_dedup[(active_zone_id, "ZONE_TOUCH")] = touch_st_ev
+            # 3. Trigger M5 & Confirmed Signal
+            trig_ev = str(smart_view.get("trigger") or "WAIT").upper()
+            if trig_ev == "CONFIRMED" and active_zone_id != "NONE":
+                _register_event(
+                    active_zone_id,
+                    "M5_TRIGGER",
+                    (trig_ev, smart_view.get("confirmed")),
+                    f"M5 TRIGGER {active_zone_lo:.2f}-{active_zone_hi:.2f} | Conf={smart_view.get('confirmed')}",
+                )
 
-        # 3. Trigger M5 & Confirmed Signal
-        trig_ev = str(smart_view.get("trigger") or "WAIT").upper()
-        if trig_ev == "CONFIRMED" and active_zone_id != "NONE":
-            _register_event(
-                active_zone_id,
-                "M5_TRIGGER",
-                (trig_ev, smart_view.get("confirmed")),
-                f"M5 TRIGGER {active_zone_lo:.2f}-{active_zone_hi:.2f} | Conf={smart_view.get('confirmed')}",
-            )
-
-        # 4. Breakout / Breakdown / Invalidasi (SMC & SNR)
-        bo_watch_ev = str(smart_view.get("snr_breakout_watch") or "").strip()
-        if bo_watch_ev:
-            _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"{_hist_tag}BREAKOUT: {bo_watch_ev}")
+            # 4. Breakout / Breakdown / Invalidasi (SMC & SNR)
+            bo_watch_ev = str(smart_view.get("snr_breakout_watch") or "").strip()
+            if bo_watch_ev:
+                _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"{_hist_tag}BREAKOUT: {bo_watch_ev}")
 
         # 5. Material & inline alerts terdeduplikasi (skip pesan risk panjang yang sudah ditangani grup RISK)
         for al_raw in list(material_alerts) + list(inline_alerts) + list(news_alerts):

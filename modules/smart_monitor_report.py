@@ -1387,31 +1387,44 @@ def _smart_monitor_context(cycle_result):
         *aligned_ctx,
     ]
     radar_candidate = None
-    if not data_invalid:
-        for cand in radar_pool:
-            cz = _as_monitor_zone(cand)
-            if not cz or not _zone_is_usable(cz):
-                continue
-            r_lo = safe_float(cz.get("price_low", cz.get("low")), 0.0)
-            r_hi = safe_float(cz.get("price_high", cz.get("high")), 0.0)
-            if r_lo <= 0 or r_hi < r_lo:
-                continue
-            if str(cz.get("radar_eligibility") or "QUALIFIED").upper() != "QUALIFIED":
-                continue
-            if str(cz.get("risk_tier") or "").upper() == "FAR_ZONE" or is_far_reference_zone(cz, current_price=price if price > 0 else None):
-                continue
-            cz_type = str(cz.get("zone_type") or "").upper()
-            if h4_bias_ctx in ("BULLISH", "BEARISH") and cz_type != ("DEMAND" if h4_bias_ctx == "BULLISH" else "SUPPLY"):
-                continue
-            cz_id = str(cz.get("zone_id") or "")
-            if smc_zone_usable and cz_id and cz_id == z_id and not ((cycle.get("focus_detail") or {}).get("SMC") or {}).get("historical_touch"):
-                continue
-            if p_status.startswith("READY") and p_zid and cz_id and cz_id == p_zid:
-                continue
-            radar_candidate = dict(cz)
-            if price > 0 and radar_candidate.get("distance") is None:
-                radar_candidate["distance"] = 0.0 if r_lo <= price <= r_hi else (r_lo - price if r_lo > price else price - r_hi)
-            break
+    _z_plans_ctx = decision.get("zone_plans") if isinstance(decision.get("zone_plans"), dict) else {}
+    for cand in radar_pool:
+        cz = _as_monitor_zone(cand)
+        if not cz or not _zone_is_usable(cz):
+            continue
+        r_lo = safe_float(cz.get("price_low", cz.get("low")), 0.0)
+        r_hi = safe_float(cz.get("price_high", cz.get("high")), 0.0)
+        if r_lo <= 0 or r_hi < r_lo:
+            continue
+        if str(cz.get("radar_eligibility") or "QUALIFIED").upper() != "QUALIFIED":
+            continue
+        if str(cz.get("risk_tier") or "").upper() == "FAR_ZONE" or is_far_reference_zone(cz, current_price=price if price > 0 else None):
+            continue
+        cz_type = str(cz.get("zone_type") or "").upper()
+        if h4_bias_ctx in ("BULLISH", "BEARISH") and cz_type != ("DEMAND" if h4_bias_ctx == "BULLISH" else "SUPPLY"):
+            continue
+        cz_id = str(cz.get("zone_id") or "")
+        if not data_invalid and smc_zone_usable and cz_id and cz_id == z_id and not ((cycle.get("focus_detail") or {}).get("SMC") or {}).get("historical_touch"):
+            continue
+        if not data_invalid and p_status.startswith("READY") and p_zid and cz_id and cz_id == p_zid:
+            continue
+        radar_candidate = dict(cz)
+        if price > 0 and radar_candidate.get("distance") is None:
+            radar_candidate["distance"] = 0.0 if r_lo <= price <= r_hi else (r_lo - price if r_lo > price else price - r_hi)
+        _zp_rc = _z_plans_ctx.get(cz_id) if cz_id else None
+        _rc_rej = str(
+            radar_candidate.get("pending_rejection_reason")
+            or ((_zp_rc or {}).get("rejection_reason") if isinstance(_zp_rc, dict) else "")
+            or radar_candidate.get("setup_eligibility")
+            or ""
+        ).strip()
+        if _rc_rej.upper().startswith("NOT_ELIGIBLE"):
+            radar_candidate["not_eligible_reason"] = _rc_rej
+        elif radar_candidate.get("risk_rejected") or _rc_rej:
+            radar_candidate["not_eligible_reason"] = f"NOT_ELIGIBLE ({_rc_rej})" if _rc_rej else "NOT_ELIGIBLE"
+        elif data_invalid:
+            radar_candidate["not_eligible_reason"] = "NOT_ELIGIBLE (MARKET CLOSED)" if snapshot_status == "MARKET_CLOSED" else "NOT_ELIGIBLE (DATA STALE)"
+        break
 
     # 2. Confirmed Entry validation (Section 5)
     dec_status = str(decision.get("status") or "").upper()
@@ -1588,7 +1601,7 @@ def _smart_monitor_context(cycle_result):
             reason = f"RADAR: Menunggu pullback ke {z_desc}"
             next_action = "WAIT PULLBACK"
             final_signal = "WAIT"
-        elif radar_candidate and not data_invalid:
+        elif radar_candidate and not data_invalid and _is_actionable_monitor_candidate(radar_candidate):
             # Historical touch tidak boleh menggantikan kandidat radar terbaru yang masih valid
             r_lo = safe_float(radar_candidate.get("price_low", radar_candidate.get("low")), 0.0)
             r_hi = safe_float(radar_candidate.get("price_high", radar_candidate.get("high")), 0.0)
@@ -2356,11 +2369,19 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
     u_spec_dash = tk.get("unit_spec") or extract_unit_spec_from_container(snapshot)
     tracked_pos = data.get("tracked_position") if isinstance(data.get("tracked_position"), dict) else None
     radar_cand_d = data.get("radar_candidate") if isinstance(data.get("radar_candidate"), dict) else None
+    has_live_focus = bool(
+        feed_st != "CLOSED"
+        and lo > 0
+        and hi > 0
+        and not (tracked_pos and tracked_pos.get("zone_id") and tracked_pos.get("zone_id") == zone.get("zone_id"))
+    )
     focus_lines = []
     if feed_st == "CLOSED":
-        focus_lines.append(" ENTRY FOCUS : NONE | WAIT (MARKET CLOSED — revalidasi saat OPEN)")
-    elif lo > 0 and hi > 0 and not (tracked_pos and tracked_pos.get("zone_id") and tracked_pos.get("zone_id") == zone.get("zone_id")):
-        main_zone_txt = f"{data['direction']} | {z_tf} {z_type} {lo:.2f}-{hi:.2f} (G:{z_grd}/{z_sc_txt}) [{z_src}]"
+        focus_lines.append(" ENTRY FOCUS : NONE | ENTRY WAIT (HISTORICAL TRACKING — MARKET CLOSED)")
+    elif has_live_focus:
+        z_id_d = str(zone.get("zone_id") or "").strip()
+        z_id_tag = f" [ID:{z_id_d}]" if z_id_d and z_id_d != "N/A" else ""
+        main_zone_txt = f"{data['direction']} | {z_tf} {z_type} {lo:.2f}-{hi:.2f} (G:{z_grd}/{z_sc_txt}) [{z_src}]{z_id_tag}"
         dist_v = data.get("distance")
         if dist_v is None or feed_st in ("DISCONNECTED", "STALE"):
             dist_txt = "N/A"
@@ -2372,23 +2393,24 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         focus_lines.extend(wrap_dashboard_field(" ENTRY FOCUS : ", main_zone_txt, term_w, max_lines=2))
         focus_lines.extend(wrap_dashboard_field(" DISTANCE    : ", dist_txt, term_w, max_lines=1))
     else:
-        focus_lines.append(" ENTRY FOCUS : NONE | WAIT")
+        focus_lines.append(" ENTRY FOCUS : NONE | ENTRY WAIT")
 
-    if tracked_pos:
-        tp_px = f"@ {tracked_pos['open_price']:.2f}" if tracked_pos.get("open_price", 0.0) > 0 else ""
-        tp_z = f"{tracked_pos['zone_low']:.2f}-{tracked_pos['zone_high']:.2f}" if tracked_pos.get("zone_low", 0.0) > 0 else "N/A"
-        tp_hist_lbl = "RUNNING — HISTORICAL TRACKING" if tracked_pos.get("historical_tracking") else "RUNNING"
-        tp_txt = f"#{tracked_pos['ticket']} {tracked_pos['direction']} {tp_px} | Match:{tracked_pos['match_status']} | Zone {tp_z} [{tp_hist_lbl}]".replace("  ", " ")
-        focus_lines.extend(wrap_dashboard_field(" TRACKED POS : ", tp_txt, term_w, max_lines=2))
-
+    # SMC RADAR (terpisah tegas dari ENTRY FOCUS; selalu tampil saat ENTRY FOCUS NONE atau ada kandidat radar)
     if isinstance(radar_cand_d, dict) and safe_float(radar_cand_d.get("price_low", radar_cand_d.get("low")), 0.0) > 0:
         rc_lo = safe_float(radar_cand_d.get("price_low", radar_cand_d.get("low")), 0.0)
         rc_hi = safe_float(radar_cand_d.get("price_high", radar_cand_d.get("high")), 0.0)
         rc_tf = str(radar_cand_d.get("timeframe") or "").strip()
         rc_zt = str(radar_cand_d.get("zone_type") or "ZONE").upper()
+        rc_grd = str(radar_cand_d.get("grade") or "-")
+        rc_sc = radar_cand_d.get("score")
+        rc_sc_s = f"/{safe_float(rc_sc):.1f}" if rc_sc is not None else ""
         rc_dist = safe_float(radar_cand_d.get("distance"), max(rc_lo - price_val, price_val - rc_hi, 0.0) if price_val > 0 else 0.0)
-        rc_txt = f"{rc_tf} {rc_zt} {rc_lo:.2f}-{rc_hi:.2f} (G:{radar_cand_d.get('grade', '-')} | {format_price_distance(rc_dist, spec=u_spec_dash, include_mt5_points=True)})".strip()
-        focus_lines.extend(wrap_dashboard_field(" RADAR       : ", rc_txt, term_w, max_lines=1))
+        rc_id = str(radar_cand_d.get("zone_id") or "").strip()
+        rc_id_tag = f" [ID:{rc_id}]" if rc_id else ""
+        rc_rsn = str(radar_cand_d.get("not_eligible_reason") or "").strip()
+        rc_tag = rc_rsn if rc_rsn else "RADAR — NOT ENTRY SIGNAL"
+        rc_txt = f"{rc_tf} {rc_zt} {rc_lo:.2f}-{rc_hi:.2f} (G:{rc_grd}{rc_sc_s} | {format_price_distance(rc_dist, spec=u_spec_dash, include_mt5_points=True)} | {rc_tag}){rc_id_tag}".strip()
+        focus_lines.extend(wrap_dashboard_field(" SMC RADAR   : ", rc_txt, term_w, max_lines=2))
     elif isinstance(far_ref, dict):
         f_lo = safe_float(far_ref.get("price_low", far_ref.get("low")), 0.0)
         f_hi = safe_float(far_ref.get("price_high", far_ref.get("high")), 0.0)
@@ -2402,10 +2424,11 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         f_atr = far_ref.get("distance_atr_ratio") if far_ref.get("distance_atr_ratio") is not None else far_ref.get("distance_atr")
         f_atr_s = f"/{safe_float(f_atr):.1f}xATR" if f_atr is not None else ""
         far_cat_d = far_ref.get("far_category") or ("EXTREME_FAR" if (f_atr is not None and safe_float(f_atr) > 15.0) else "FAR_INTRADAY")
-        far_txt = f"{far_cat_d} | {f_tf} {f_zt} {f_lo:.2f}-{f_hi:.2f} ({format_price_distance(f_dist, spec=u_spec_dash, include_mt5_points=True)}{f_atr_s})".replace("  ", " ")
-        focus_lines.extend(wrap_dashboard_field(" RADAR (FAR) : ", far_txt, term_w, max_lines=1))
+        f_grd = str(far_ref.get("grade") or "-")
+        far_txt = f"{far_cat_d} | {f_tf} {f_zt} {f_lo:.2f}-{f_hi:.2f} (G:{f_grd} | {format_price_distance(f_dist, spec=u_spec_dash, include_mt5_points=True)}{f_atr_s} | NOT_ELIGIBLE: FAR)".replace("  ", " ")
+        focus_lines.extend(wrap_dashboard_field(" SMC RADAR   : ", far_txt, term_w, max_lines=2))
 
-    # Pisahkan tegas Active Focus vs SNR Reference bila tidak overlap
+    # Pisahkan tegas Active Focus vs SNR Radar/Reference
     snr_z = data.get("snr_focus_zone") or data.get("snr_zone") or {}
     snr_lo = safe_float(snr_z.get("low", snr_z.get("price_low")), 0.0)
     snr_hi = safe_float(snr_z.get("high", snr_z.get("price_high")), 0.0)
@@ -2423,20 +2446,31 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
     if data.get("confluence") == "ALIGNED" and isinstance(confl_src, dict):
         c_lbl = str(confl_src.get("rank_label") or "SNR").strip()
         c_ov = safe_float(data.get("snr_confluence_overlap_points"), 0.0)
-        snr_ref_txt = f"OVERLAP {c_lbl} {safe_float(confl_src.get('low')):.2f}-{safe_float(confl_src.get('high')):.2f} ({format_price_distance(c_ov, spec=u_spec_dash)})"
+        c_id = str(confl_src.get("zone_id") or "").strip()
+        c_id_tag = f" [ID:{c_id}]" if c_id else ""
+        snr_ref_txt = f"OVERLAP {c_lbl} {safe_float(confl_src.get('low')):.2f}-{safe_float(confl_src.get('high')):.2f} ({format_price_distance(c_ov, spec=u_spec_dash)} | SUPPORTING){c_id_tag}"
     elif snr_lo > 0 and snr_hi > 0:
         s_lbl = str(snr_z.get("rank_label") or "SNR").strip()
         s_tf = str(snr_z.get("timeframe") or "").strip()
+        s_grd = str(snr_z.get("grade") or "-")
         s_zt_ref = str(snr_z.get("zone_type") or ("RESISTANCE" if s_lbl.upper().startswith("R") else "SUPPORT")).upper()
         snr_not_live = not _is_live_active_snr_zone(snr_z, s_zt_ref, price_val)
-        s_tag = "FAR ZONE / REFERENCE ONLY" if snr_is_far else ("NOT ACTIVE / REFERENCE ONLY" if snr_not_live else "SEPARATED")
-        s_ts = str(snr_z.get("confirmed_time") or snr_z.get("confirmation_time") or snr_z.get("formation_time") or "").strip()
-        s_ts_part = f" | confirmed {s_ts[:16]}" if s_ts else ""
-        if data.get("snr_snapshot_id"):
-            s_ts_part += f" | snap {str(data['snr_snapshot_id'])[-12:]}"
-        snr_ref_txt = f"{s_lbl} {s_tf} {snr_lo:.2f}-{snr_hi:.2f} ({s_tag}{s_ts_part})".replace("  ", " ")
+        s_tag = "FAR/REF" if snr_is_far else ("HISTORICAL/REF" if (feed_st == "CLOSED" or snr_not_live) else "RADAR")
+        s_dist = max(snr_lo - price_val, price_val - snr_hi, 0.0) if price_val > 0 else safe_float(snr_z.get("distance_points"), 0.0)
+        s_id = str(snr_z.get("zone_id") or "").strip()
+        s_id_tag = f" [ID:{s_id}]" if s_id else ""
+        snr_ref_txt = f"{s_lbl} {s_tf} {snr_lo:.2f}-{snr_hi:.2f} (G:{s_grd} | {format_price_distance(s_dist, spec=u_spec_dash, include_mt5_points=True)} | {s_tag}){s_id_tag}".replace("  ", " ")
     else:
         snr_ref_txt = "NONE"
+
+    # TRACKED POSITION (terpisah tegas dari ENTRY FOCUS & RADAR)
+    tracked_lines = []
+    if tracked_pos:
+        tp_px = f"@ {tracked_pos['open_price']:.2f}" if tracked_pos.get("open_price", 0.0) > 0 else ""
+        tp_z = f"{tracked_pos['zone_low']:.2f}-{tracked_pos['zone_high']:.2f}" if tracked_pos.get("zone_low", 0.0) > 0 else "N/A"
+        tp_hist_lbl = "POSITION RUNNING — HISTORICAL TRACKING" if (tracked_pos.get("historical_tracking") or feed_st == "CLOSED") else "POSITION RUNNING"
+        tp_txt = f"#{tracked_pos['ticket']} {tracked_pos['direction']} {tp_px} | Match:{tracked_pos['match_status']} | Zone {tp_z} [{tp_hist_lbl}]".replace("  ", " ")
+        tracked_lines.extend(wrap_dashboard_field(" TRACKED POS : ", tp_txt, term_w, max_lines=2))
 
     # Ringkasan MT5 Order Display (jumlah posisi, pending, matched, tanpa SL — TANPA daftar penuh / ticket acak)
     pending_setup_d = data.get("pending_setup") if isinstance(data.get("pending_setup"), dict) else {}
@@ -2486,7 +2520,7 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
     news_sum = str(cycle.get("news_summary") or "").strip()
 
     # Rencana scanner (sumber sama dengan scan): read-only, bukan order aktual MT5
-    _plan_txt = "WAIT (tidak ada rencana valid)"
+    _plan_txt = ""
     try:
         _cp = data.get("plan") if isinstance(data.get("plan"), dict) else {}
         _ps = data.get("pending_setup") if isinstance(data.get("pending_setup"), dict) else {}
@@ -2501,20 +2535,25 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
             _e = safe_float(_ps.get("entry"), 0.0)
             _s, _t, _r = safe_float(_ps.get("sl"), 0.0), safe_float(_ps.get("tp1"), 0.0), safe_float(_ps.get("rr"), 0.0)
         if _dir and _e > 0 and _s > 0 and _t > 0:
-            _plan_txt = f"{_dir} {_kind} | E {_e:.2f} | SL {_s:.2f} | TP {_t:.2f} | RR 1:{_r:.2f} (rencana scanner)"
+            _plan_txt = f"{_dir} {_kind} | E {_e:.2f} | SL {_s:.2f} | TP {_t:.2f} | RR 1:{_r:.2f}"
     except Exception:
         pass
 
+    entry_state_lbl = (
+        "HISTORICAL TRACKING (MARKET CLOSED)"
+        if feed_st == "CLOSED"
+        else ("CONFIRMED" if str(signal_disp).upper() in ("BUY", "SELL") or "CONFIRMED" in str(confirmed_disp).upper() else "ENTRY WAIT")
+    )
     body_lines = [
         dash_div,
-        *wrap_dashboard_field(" MTF BIAS    : ", f"H4={h4} | H1={h1} | M30={m30} | M5={m5}", term_w, max_lines=1),
+        *wrap_dashboard_field(" MTF / M5    : ", f"H4={h4} | H1={h1} | M30={m30} | M5={m5}", term_w, max_lines=1),
         *focus_lines,
-        *wrap_dashboard_field(" SNR REF     : ", snr_ref_txt, term_w, max_lines=1),
+        *wrap_dashboard_field(" SNR RADAR   : ", snr_ref_txt, term_w, max_lines=1),
+        *tracked_lines,
         dash_div,
-        *wrap_dashboard_field(" PLAN        : ", _plan_txt, term_w, max_lines=2),
-        *wrap_dashboard_field(" MT5 PENDING : ", pending_disp, term_w, max_lines=2),
-        *wrap_dashboard_field(" MT5 ACCOUNT : ", pos_txt, term_w, max_lines=1),
-        *wrap_dashboard_field(" ENTRY       : ", f"CONF={confirmed_disp} | SIG={signal_disp} | STATE={data.get('monitor_state', 'IDLE')}" + (" | LIVE SIGNAL: WAIT (MARKET CLOSED/DATA HISTORIS — validasi ulang saat OPEN)" if feed_st in ("CLOSED", "STALE") else ""), term_w, max_lines=2),
+        *(wrap_dashboard_field(" PLAN        : ", _plan_txt, term_w, max_lines=1) if _plan_txt else []),
+        *wrap_dashboard_field(" PENDING SYNC: ", f"{pending_disp} | {pos_txt}", term_w, max_lines=2),
+        *wrap_dashboard_field(" ENTRY STATUS: ", f"{entry_state_lbl} | CONF={confirmed_disp} | SIG={signal_disp}", term_w, max_lines=2),
         *wrap_dashboard_field(" REASON      : ", f"{reason_disp} -> {next_act}", term_w, max_lines=2),
         *wrap_dashboard_field(" RISK WARNING: ", risk_txt, term_w, max_lines=2),
     ]
@@ -2636,16 +2675,26 @@ def format_smart_monitor_report(cycle_result):
     z_grade = str(zone.get("grade") or "N/A").strip()
     zt_raw = str(zone.get("zone_type") or data.get("zone_type") or ("SUPPLY" if data.get("direction") == "SELL" else ("DEMAND" if data.get("direction") == "BUY" else "ZONE"))).strip().upper()
     zone_header_label = f"SMC ACTIVE {zt_raw}" if (z_src == "SMC" and zt_raw in ("SUPPLY", "DEMAND")) else "ACTIVE SETUP ZONE"
-    if lo > 0 and hi > 0:
+    is_mkt_closed_top = (
+        str(snapshot.get("market_status") or (data.get("decision") or {}).get("market_status") or "").upper() == "CLOSED"
+        or str(snapshot.get("snapshot_status") or "").upper() == "MARKET_CLOSED"
+    )
+    if is_mkt_closed_top:
+        zone_lines = [
+            "ACTIVE FOCUS        : NONE | ENTRY WAIT (HISTORICAL TRACKING — MARKET CLOSED)",
+        ]
+    elif lo > 0 and hi > 0:
+        z_id_rep = str(zone.get("zone_id") or "").strip()
+        z_id_rep_tag = f" [ID: {z_id_rep}]" if z_id_rep and z_id_rep != "N/A" else ""
         zone_lines = [
             f"SETUP DIRECTION     : {data['direction']}",
-            f"{zone_header_label:<20}: {lo:.2f} - {hi:.2f}{z_tag}",
+            f"{zone_header_label:<20}: {lo:.2f} - {hi:.2f}{z_tag}{z_id_rep_tag}",
             f"ZONE DISTANCE       : {dist_rep_str}",
             f"GRADE               : {z_grade} ({score_disp}) [{z_src}]",
         ]
     else:
         zone_lines = [
-            "ACTIVE FOCUS        : NONE | WAIT",
+            "ACTIVE FOCUS        : NONE | ENTRY WAIT",
         ]
         far_ref_rep = data.get("far_reference_zone")
         if isinstance(far_ref_rep, dict):
@@ -2775,9 +2824,12 @@ def format_smart_monitor_report(cycle_result):
             radar_cand.get("distance"),
             max(r_lo - data["price"], data["price"] - r_hi, 0.0) if data["price"] > 0 else 0.0,
         )
+        r_id = str(radar_cand.get("zone_id") or "").strip()
+        r_id_tag = f" [ID: {r_id}]" if r_id else ""
+        r_rsn = str(radar_cand.get("not_eligible_reason") or "RADAR — NOT ENTRY SIGNAL").strip()
         radar_lines = [
-            "RADAR CANDIDATE",
-            f"RADAR       : {r_lo:.2f} - {r_hi:.2f} ({r_tf} {r_zt} | Grade {r_grd} {r_sc_txt} | Dist {format_price_distance(r_dist, spec=_u_rep, include_mt5_points=True)} | RADAR ALT)",
+            "SMC RADAR (NOT ENTRY SIGNAL)",
+            f"RADAR       : {r_lo:.2f} - {r_hi:.2f} ({r_tf} {r_zt} | Grade {r_grd} {r_sc_txt} | Dist {format_price_distance(r_dist, spec=_u_rep, include_mt5_points=True)} | {r_rsn}){r_id_tag}",
         ]
 
     tracked_pos_rep = data.get("tracked_position") if isinstance(data.get("tracked_position"), dict) else None
@@ -2785,7 +2837,7 @@ def format_smart_monitor_report(cycle_result):
     if tracked_pos_rep:
         tp_px_r = f"@ {tracked_pos_rep['open_price']:.2f}" if tracked_pos_rep.get("open_price", 0.0) > 0 else ""
         tp_z_r = f"{tracked_pos_rep['zone_low']:.2f}-{tracked_pos_rep['zone_high']:.2f}" if tracked_pos_rep.get("zone_low", 0.0) > 0 else "N/A"
-        tp_mode_r = "RUNNING (HISTORICAL TRACKING)" if tracked_pos_rep.get("historical_tracking") else "RUNNING"
+        tp_mode_r = "POSITION RUNNING — HISTORICAL TRACKING" if (tracked_pos_rep.get("historical_tracking") or is_mkt_closed_rep) else "POSITION RUNNING"
         tracked_pos_lines = [
             "TRACKED POSITION (MT5 OPEN)",
             f"POSITION    : #{tracked_pos_rep['ticket']} {tracked_pos_rep['direction']} {tp_px_r} | Match: {tracked_pos_rep['match_status']} | Zone: {tp_z_r} [{tp_mode_r}]".replace("  ", " "),

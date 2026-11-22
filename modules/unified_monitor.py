@@ -3775,10 +3775,13 @@ class UnifiedMonitor:
             if bo_watch_ev:
                 _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"{_hist_tag}BREAKOUT: {bo_watch_ev}")
 
-        # 5. Material & inline alerts terdeduplikasi (skip pesan risk panjang yang sudah ditangani grup RISK)
+        # 5. Material & inline alerts terdeduplikasi (skip pesan risk panjang yang sudah ditangani grup RISK;
+        # saat MARKET CLOSED jangan memicu event konfirmasi/touch/breakout baru dari data historis)
         for al_raw in list(material_alerts) + list(inline_alerts) + list(news_alerts):
             al_up = str(al_raw or "").upper()
             if any(skip_tok in al_up for skip_tok in ("[RISK WARNING]", "TANPA STOP LOSS", "SL MISSING", "MASIH AKTIF PADA ZONA INVALID", "AKTIF DI ZONA INVALID")):
+                continue
+            if is_closed_ev and not any(k in al_up for k in ("MARKET CLOSED", "NEWS", "HIGH RISK", "MT5 DISCONNECTED")):
                 continue
             is_inv_al = any(k in al_up for k in ("INVALID", "BROKEN", "JEBOL"))
             is_key_al = is_inv_al or any(

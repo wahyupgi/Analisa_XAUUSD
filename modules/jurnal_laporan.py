@@ -10,10 +10,11 @@ agar tidak terjadi circular import.
 import csv
 import os
 import re
-from modules.config import FILE_JURNAL_SINYAL
+from modules.config import FILE_JURNAL_SINYAL, FILE_JURNAL_ENTRY
 from modules.sinyal_jurnal import (
     _migrasi_header_jurnal,
     evaluasi_dan_perbarui_jurnal_sinyal,
+    sinkron_jurnal_entry_mt5,
 )
 from modules.terminal_ui import print_terminal
 
@@ -98,12 +99,84 @@ def ringkasan_jurnal_untuk_ai(jumlah=5):
 
 
 def tampilkan_rekap():
-    """Menampilkan tabel detail semua zona sinyal di jurnal CSV:
-    keterangan mana zona yang diambil oleh user, mana zona yang kena SL dan mana yang kena TP,
-    lengkap dengan win-rate, total R, serta ringkasan per kelas risiko & model AI."""
+    """Menampilkan log entry MT5 (tersimpan di jurnal_entry_xauusd.csv) dengan status zona scanner
+    (ZONA DIAMBIL / PENDING DI ZONA / ENTRY MANUAL) serta tabel evaluasi sinyal jika tersedia."""
+    entry_rows, mt5_entry_ok = sinkron_jurnal_entry_mt5()
     rows, mt5_aktif = evaluasi_dan_perbarui_jurnal_sinyal()
+    mt5_online = mt5_entry_ok or mt5_aktif
+
+    lebar_e = 142
+    print_terminal("\n" + "=" * lebar_e)
+    print_terminal("📒 JURNAL ENTRY MT5 XAUUSD (AUTO-SYNC READ-ONLY -> CSV)")
+    print_terminal(f"   File CSV : {FILE_JURNAL_ENTRY}")
+    print_terminal("=" * lebar_e)
+    if entry_rows:
+        print_terminal(
+            f"{'#':<3} | {'Ticket':<10} | {'Waktu Entry':<16} | {'Arah':<4} | {'Lot':<5} | {'Entry':<8} | {'SL':<8} | {'TP':<8} | "
+            f"{'Status':<15} | {'P/L USD':>9} | {'Status Zona':<15} | {'Zona Scanner'}"
+        )
+        print_terminal("-" * lebar_e)
+        e_zona = 0
+        e_manual = 0
+        e_closed = 0
+        e_win = 0
+        e_loss = 0
+        e_pnl = 0.0
+        for idx_e, er in enumerate(entry_rows[-30:], 1):
+            tkt = str(er.get("ticket") or "-")[:10]
+            wkt = str(er.get("waktu_entry") or "-")[:16]
+            arah = str(er.get("arah") or "-").upper()[:4]
+            lot = str(er.get("lot") or "-")[:5]
+            ent = str(er.get("harga_entry") or "-")[:8]
+            sl_e = str(er.get("sl") or "-")[:8]
+            tp_e = str(er.get("tp") or "-")[:8]
+            st_p = str(er.get("status_posisi") or "-")[:15]
+            pnl_s = str(er.get("profit_usd") or "0.00")
+            try:
+                pnl_v = float(pnl_s)
+            except ValueError:
+                pnl_v = 0.0
+            st_z = str(er.get("status_zona") or "-")
+            st_z_up = st_z.upper()
+            if "ZONA DIAMBIL" in st_z_up:
+                e_zona += 1
+                st_z_disp = "ZONA DIAMBIL"
+            elif "PENDING DI ZONA" in st_z_up:
+                e_zona += 1
+                st_z_disp = "PENDING DI ZONA"
+            else:
+                e_manual += 1
+                st_z_disp = "MANUAL"
+            if st_p.upper().startswith("CLOSED"):
+                e_closed += 1
+                e_pnl += pnl_v
+                if pnl_v > 0.05:
+                    e_win += 1
+                elif pnl_v < -0.05:
+                    e_loss += 1
+            src_z = str(er.get("sumber_zona") or "-")
+            rng_z = str(er.get("zona_range") or "-")
+            grd_z = str(er.get("grade_zona") or "-")
+            z_info = f"{src_z} {rng_z} [{grd_z}]" if rng_z != "-" else "-"
+            print_terminal(
+                f"{idx_e:>3} | {tkt:<10} | {wkt:<16} | {arah:<4} | {lot:>5} | {ent:>8} | {sl_e:>8} | {tp_e:>8} | "
+                f"{st_p:<15} | {pnl_v:>+9.2f} | {st_z_disp:<15} | {z_info[:30]}"
+            )
+        print_terminal("-" * lebar_e)
+        wr_e = f"{(e_win / e_closed * 100):.1f}%" if e_closed > 0 else "-"
+        print_terminal(
+            f"• Total Entry MT5 : {len(entry_rows)} | Zona Diambil/Pending: {e_zona} | Manual: {e_manual} | "
+            f"Closed: {e_closed} (Win {e_win} / Loss {e_loss}, WR {wr_e}) | Realized P/L: {e_pnl:+.2f} USD"
+        )
+        if len(entry_rows) > 30:
+            print_terminal(f"  *(Menampilkan 30 entry terbaru; seluruh {len(entry_rows)} entry lengkap tersimpan di {FILE_JURNAL_ENTRY})*")
+    else:
+        print_terminal("   Belum ada entry MT5 (open/pending/history 30 hari terakhir) yang tercatat.")
+    if not mt5_online:
+        print_terminal("   *(MT5 saat ini offline; data ditampilkan dari file CSV terakhir yang tersimpan)*")
+    print_terminal("=" * lebar_e)
+
     if not rows:
-        print_terminal("\n   Belum ada sinyal tercatat di jurnal CSV.")
         return
 
     lebar_garis = 138

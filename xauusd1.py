@@ -75,7 +75,7 @@ def format_command_menu_help():
         "",
         "OTHER:",
         "- zona             : Cek status zona supply & demand SMC aktif",
-        "- jurnal           : Rekap riwayat sinyal, winrate, dan evaluasi performa",
+        "- jurnal           : Catat & rekap log entry MT5 (.csv) + status zona diambil",
         "- audit            : Audit fakta akun MT5, pending order & status ADR",
         "- refresh          : Perbarui analisis dengan data market MT5 terkini",
         "- news             : Kalender Ekonomi AS + Gold Market News (news detail / news refresh)",

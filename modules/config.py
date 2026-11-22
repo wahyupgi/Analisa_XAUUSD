@@ -101,6 +101,7 @@ JARAK_CONFLUENCE_MAKS = 100.0      # confluence yang lebih jauh dari ini tidak d
 
 # Path file penyimpanan data
 FILE_JURNAL_SINYAL = os.path.join(_DIR_SCRIPT, "jurnal_sinyal_xauusd.csv")
+FILE_JURNAL_ENTRY = os.path.join(_DIR_SCRIPT, "jurnal_entry_xauusd.csv")
 FILE_ERROR_LOG = os.path.join(_DIR_SCRIPT, "error_xauusd.log")
 FILE_STATE_SINYAL = os.path.join(_DIR_SCRIPT, "state_sinyal_xauusd.json")
 FILE_STATE_ZONE_TRACKER = os.path.join(_DIR_SCRIPT, "state_zone_tracker.json")
@@ -188,6 +189,12 @@ TF_OPPOSING_IMPULSE_BLOCK_ATR = 1.50
 KOLOM_JURNAL_SINYAL = [
     "id", "waktu_lokal", "arah", "lo", "hi", "lo_asli", "hi_asli", "sl", "tp1", "tp2",
     "harga_buat", "risiko", "ket", "catatan", "model", "spread_buat", "status_hasil", "r_hasil", "diambil"
+]
+
+KOLOM_JURNAL_ENTRY = [
+    "ticket", "waktu_entry", "waktu_close", "symbol", "arah", "lot",
+    "harga_entry", "sl", "tp", "harga_close", "status_posisi", "profit_usd",
+    "status_zona", "sumber_zona", "zone_id", "zona_range", "grade_zona", "keterangan",
 ]
 
 # Daftar model Gemini yang dicoba berurutan saat server padat / kuota habis

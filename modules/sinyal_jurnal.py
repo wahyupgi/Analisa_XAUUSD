@@ -12,7 +12,7 @@ import os
 import re
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
@@ -22,7 +22,8 @@ from modules.config import (
     SPREAD_MAKS_POIN, SPREAD_MAKS_RASIO_ATR, SINYAL_TTL_BELUM_TERISI_JAM,
     FILTER_TREND_AKTIF, IZINKAN_COUNTER_TREND_MEDIUM, FILTER_SESI_AKTIF, SESI_DIIZINKAN_UTC,
     MAKS_RISIKO_TERBUKA_PCT, MAKS_RUGI_HARIAN_PCT, SERVER_UTC_OFFSET_JAM,
-    FILE_JURNAL_SINYAL, FILE_ERROR_LOG, KOLOM_JURNAL_SINYAL,
+    FILE_JURNAL_SINYAL, FILE_JURNAL_ENTRY, FILE_STATE_ZONE_TRACKER, FILE_ERROR_LOG,
+    KOLOM_JURNAL_SINYAL, KOLOM_JURNAL_ENTRY,
     ST_BATAL_TERLEWAT, ST_BATAL_SL, ST_BATAL_KEDALUWARSA, ST_SELESAI_TP2, ST_TP1_TERCAPAI,
     ST_AKTIF_ENTRY, ST_VALID_BERJALAN, ST_VALID_PULLBACK, ST_VALID_DEKAT_SL, STATUS_TERMINAL_SINYAL,
     SIGNAL_STATUS_NO_SETUP, SIGNAL_STATUS_SETUP_DETECTED, SIGNAL_STATUS_WAITING_PULLBACK,
@@ -33,6 +34,7 @@ from modules.config import (
 )
 from modules.utils import _catat_error, deteksi_offset, format_wib_timestamp
 from modules.mt5_conn import (
+    MT5_IPC_LOCK, _acceptable_trade_symbols,
     pastikan_mt5_aktif, ambil_data, tambah_indikator, _ambil_m1_sejak,
     cek_posisi_terbuka_mt5, status_risiko_akun, _info_tipe_pending
 )
@@ -1329,6 +1331,313 @@ def tentukan_klasifikasi_risiko_sinyal(sig):
         return "MEDIUM RISK", "Reaksi Intraday Terkonfirmasi di Zona Supply/Demand"
 
     return "HIGH RISK", "Sinyal Dadakan Intraday M5"
+
+
+def _kumpulkan_zona_scanner_jurnal(zones_override=None):
+    """Kumpulkan daftar zona SMC & SNR dari state tracker dan cache scanner (read-only) untuk pencocokan entry MT5."""
+    zones = []
+    seen = set()
+
+    def _add(z, default_src="SMC"):
+        if not isinstance(z, dict):
+            return
+        lo = z.get("price_low", z.get("low"))
+        hi = z.get("price_high", z.get("high"))
+        try:
+            lo_f = float(lo)
+            hi_f = float(hi)
+        except (TypeError, ValueError):
+            return
+        if lo_f <= 0 or hi_f <= 0:
+            return
+        if lo_f > hi_f:
+            lo_f, hi_f = hi_f, lo_f
+        zt = str(z.get("zone_type") or z.get("type") or "").upper()
+        if zt not in ("DEMAND", "SUPPLY", "SUPPORT", "RESISTANCE"):
+            return
+        zid = str(z.get("zone_id") or "").strip()
+        src = str(z.get("source") or ("SNR" if zt in ("SUPPORT", "RESISTANCE") else default_src)).upper()
+        key = (zid or f"{src}_{zt}_{lo_f:.2f}_{hi_f:.2f}", round(lo_f, 2), round(hi_f, 2))
+        if key in seen:
+            return
+        seen.add(key)
+        grd = str(z.get("grade") or "-").strip()
+        sc = z.get("score")
+        grd_txt = f"{grd} ({float(sc):.1f})" if isinstance(sc, (int, float)) and math.isfinite(float(sc)) else grd
+        zones.append({
+            "zone_id": zid or "-",
+            "source": src,
+            "timeframe": str(z.get("timeframe") or "").strip() or "-",
+            "zone_type": zt,
+            "direction": "BUY" if zt in ("DEMAND", "SUPPORT") else "SELL",
+            "low": round(lo_f, 2),
+            "high": round(hi_f, 2),
+            "grade": grd_txt,
+            "rank_label": str(z.get("rank_label") or "").strip(),
+        })
+
+    if isinstance(zones_override, (list, tuple)):
+        for z in zones_override:
+            _add(z)
+
+    if os.path.exists(FILE_STATE_ZONE_TRACKER):
+        try:
+            with open(FILE_STATE_ZONE_TRACKER, "r", encoding="utf-8") as f:
+                st = json.load(f)
+            if isinstance(st, dict):
+                for z in (st.get("tracked_zones") or {}).values():
+                    _add(z, "SMC")
+                for z in (st.get("invalidated_zones") or {}).values():
+                    _add(z, "SMC")
+                pfs = (st.get("pantau_focus_state") or {}).get(SYMBOL) or {}
+                for method, rec in (pfs.get("focus") or {}).items():
+                    if isinstance(rec, dict) and isinstance(rec.get("zone"), dict):
+                        _add(rec["zone"], method)
+        except Exception:
+            pass
+
+    try:
+        from modules import zone_scanner as _zs
+        cached = (_zs._SCAN_CACHE or {}).get("data")
+        if isinstance(cached, dict):
+            for grp in ("active_zones", "radar_zones", "valid_zones"):
+                for z in (cached.get(grp) or []):
+                    zd = z.to_dict() if hasattr(z, "to_dict") else z
+                    _add(zd, "SMC")
+            snr_c = cached.get("snr_context") if isinstance(cached.get("snr_context"), dict) else {}
+            for z in list(snr_c.get("supports") or []) + list(snr_c.get("resistances") or []):
+                _add(z, "SNR")
+    except Exception:
+        pass
+
+    return zones
+
+
+def _cocokkan_zona_entry(arah, harga_entry, zones, tol=2.0):
+    """Cocokkan harga entry MT5 terhadap zona scanner searah (toleransi 2.0 USD untuk spread/slippage)."""
+    arah_u = str(arah or "").upper()
+    if arah_u not in ("BUY", "SELL") or harga_entry <= 0 or not zones:
+        return None
+    kandidat = []
+    for z in zones:
+        if z["direction"] != arah_u:
+            continue
+        if (z["low"] - tol) <= harga_entry <= (z["high"] + tol):
+            inside = z["low"] <= harga_entry <= z["high"]
+            dist = 0.0 if inside else min(abs(harga_entry - z["low"]), abs(harga_entry - z["high"]))
+            kandidat.append((not inside, dist, z))
+    if not kandidat:
+        return None
+    kandidat.sort(key=lambda item: (item[0], item[1]))
+    best = kandidat[0][2]
+    # Cek apakah ada konfluensi SMC+SNR pada entry yang sama
+    srcs = sorted({item[2]["source"] for item in kandidat})
+    out = dict(best)
+    if len(srcs) > 1:
+        out["source"] = "+".join(srcs)
+    return out
+
+
+def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
+    """
+    Sinkronisasi read-only seluruh entry MT5 (open positions, pending orders, dan deal history)
+    ke file CSV `jurnal_entry_xauusd.csv` dengan pencocokan otomatis terhadap zona scanner
+    (status_zona = ZONA DIAMBIL / PENDING DI ZONA / ENTRY MANUAL (DI LUAR ZONA)).
+    """
+    existing = {}
+    if os.path.exists(FILE_JURNAL_ENTRY):
+        try:
+            with open(FILE_JURNAL_ENTRY, "r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.DictReader(f):
+                    tkt = str(row.get("ticket") or "").strip()
+                    if tkt:
+                        existing[tkt] = dict(row)
+        except Exception as e:
+            _catat_error("baca_jurnal_entry", e)
+
+    mt5_aktif = pastikan_mt5_aktif()
+    zones = _kumpulkan_zona_scanner_jurnal(zones_override=zones_override)
+    accepted_syms = _acceptable_trade_symbols(SYMBOL)
+
+    def _fmt_px(val):
+        try:
+            v = float(val or 0.0)
+            return f"{v:.2f}" if v > 0 else "-"
+        except (TypeError, ValueError):
+            return "-"
+
+    def _fmt_ts(ts_raw):
+        try:
+            ts_i = int(ts_raw or 0)
+            return format_wib_timestamp(ts_i, default_now=False) if ts_i > 0 else "-"
+        except (TypeError, ValueError):
+            return "-"
+
+    def _apply_zone_info(row_dict, arah, harga_entry, is_pending=False, prev_row=None):
+        matched = _cocokkan_zona_entry(arah, harga_entry, zones)
+        if matched:
+            lbl_z = f"{matched['timeframe']} {matched['zone_type']}" + (f" ({matched['rank_label']})" if matched.get("rank_label") else "")
+            row_dict["status_zona"] = "PENDING DI ZONA" if is_pending else "ZONA DIAMBIL"
+            row_dict["sumber_zona"] = matched["source"]
+            row_dict["zone_id"] = matched["zone_id"]
+            row_dict["zona_range"] = f"{matched['low']:.2f} - {matched['high']:.2f}"
+            row_dict["grade_zona"] = matched["grade"]
+            sl_note = "SL OK" if row_dict["sl"] != "-" else "SL MISSING"
+            row_dict["keterangan"] = f"Zona {lbl_z} diambil ({matched['source']}) | {sl_note}" if not is_pending else f"Pending di zona {lbl_z} ({matched['source']}) | {sl_note}"
+        elif isinstance(prev_row, dict) and str(prev_row.get("status_zona") or "").upper() in ("ZONA DIAMBIL", "PENDING DI ZONA") and prev_row.get("zone_id") not in (None, "", "-"):
+            row_dict["status_zona"] = "PENDING DI ZONA" if is_pending else "ZONA DIAMBIL"
+            row_dict["sumber_zona"] = prev_row.get("sumber_zona") or "-"
+            row_dict["zone_id"] = prev_row.get("zone_id") or "-"
+            row_dict["zona_range"] = prev_row.get("zona_range") or "-"
+            row_dict["grade_zona"] = prev_row.get("grade_zona") or "-"
+            row_dict["keterangan"] = prev_row.get("keterangan") or "Zona scanner diambil"
+        else:
+            sl_note = "SL OK" if row_dict["sl"] != "-" else "SL MISSING"
+            row_dict["status_zona"] = "PENDING MANUAL (DI LUAR ZONA)" if is_pending else "ENTRY MANUAL (DI LUAR ZONA)"
+            row_dict["sumber_zona"] = "-"
+            row_dict["zone_id"] = "-"
+            row_dict["zona_range"] = "-"
+            row_dict["grade_zona"] = "-"
+            row_dict["keterangan"] = f"Entry di luar zona scanner | {sl_note}"
+
+    if mt5_aktif:
+        now_utc = datetime.now(timezone.utc)
+        start_utc = now_utc - timedelta(days=max(1, int(days)))
+        with MT5_IPC_LOCK:
+            positions = mt5.positions_get() or ()
+            orders = mt5.orders_get() or ()
+            deals = mt5.history_deals_get(start_utc, now_utc + timedelta(days=1)) or ()
+
+        open_pos_ids = set()
+        # 1. Open Positions (RUNNING)
+        for p in positions:
+            sym_p = str(getattr(p, "symbol", "") or "").strip()
+            if sym_p.upper() not in accepted_syms:
+                continue
+            tkt = str(getattr(p, "ticket", "") or "")
+            if not tkt:
+                continue
+            open_pos_ids.add(tkt)
+            arah = "BUY" if getattr(p, "type", 0) == 0 else "SELL"
+            h_ent = float(getattr(p, "price_open", 0.0) or 0.0)
+            pnl = float(getattr(p, "profit", 0.0) or 0.0) + float(getattr(p, "swap", 0.0) or 0.0)
+            row = {
+                "ticket": tkt,
+                "waktu_entry": _fmt_ts(getattr(p, "time", 0)),
+                "waktu_close": "-",
+                "symbol": sym_p,
+                "arah": arah,
+                "lot": f"{float(getattr(p, 'volume', 0.0) or 0.0):.2f}",
+                "harga_entry": _fmt_px(h_ent),
+                "sl": _fmt_px(getattr(p, "sl", 0.0)),
+                "tp": _fmt_px(getattr(p, "tp", 0.0)),
+                "harga_close": "-",
+                "status_posisi": "RUNNING",
+                "profit_usd": f"{pnl:+.2f}",
+            }
+            _apply_zone_info(row, arah, h_ent, is_pending=False, prev_row=existing.get(tkt))
+            existing[tkt] = row
+
+        # 2. Pending Orders (PENDING)
+        for o in orders:
+            sym_o = str(getattr(o, "symbol", "") or "").strip()
+            if sym_o.upper() not in accepted_syms:
+                continue
+            tkt = str(getattr(o, "ticket", "") or "")
+            if not tkt:
+                continue
+            ord_lbl, arah = _info_tipe_pending(getattr(o, "type", -1))
+            if arah not in ("BUY", "SELL"):
+                continue
+            h_ent = float(getattr(o, "price_open", 0.0) or 0.0)
+            row = {
+                "ticket": tkt,
+                "waktu_entry": _fmt_ts(getattr(o, "time_setup", 0)),
+                "waktu_close": "-",
+                "symbol": sym_o,
+                "arah": arah,
+                "lot": f"{float(getattr(o, 'volume_initial', getattr(o, 'volume_current', 0.0)) or 0.0):.2f}",
+                "harga_entry": _fmt_px(h_ent),
+                "sl": _fmt_px(getattr(o, "sl", 0.0)),
+                "tp": _fmt_px(getattr(o, "tp", 0.0)),
+                "harga_close": "-",
+                "status_posisi": f"PENDING ({ord_lbl})",
+                "profit_usd": "0.00",
+            }
+            _apply_zone_info(row, arah, h_ent, is_pending=True, prev_row=existing.get(tkt))
+            existing[tkt] = row
+
+        # 3. Closed Trades dari History Deals (agregasi per position_id)
+        deal_groups = {}
+        for d in deals:
+            sym_d = str(getattr(d, "symbol", "") or "").strip()
+            if sym_d.upper() not in accepted_syms:
+                continue
+            d_type = getattr(d, "type", -1)
+            if d_type not in (getattr(mt5, "DEAL_TYPE_BUY", 0), getattr(mt5, "DEAL_TYPE_SELL", 1)):
+                continue
+            pid = str(getattr(d, "position_id", 0) or getattr(d, "ticket", 0))
+            if not pid or pid in open_pos_ids:
+                continue
+            deal_groups.setdefault(pid, []).append(d)
+
+        for pid, dlist in deal_groups.items():
+            dlist.sort(key=lambda x: int(getattr(x, "time", 0)))
+            in_deals = [d for d in dlist if getattr(d, "entry", -1) in (getattr(mt5, "DEAL_ENTRY_IN", 0), getattr(mt5, "DEAL_ENTRY_INOUT", 2))]
+            out_deals = [d for d in dlist if getattr(d, "entry", -1) in (getattr(mt5, "DEAL_ENTRY_OUT", 1), getattr(mt5, "DEAL_ENTRY_INOUT", 2), getattr(mt5, "DEAL_ENTRY_OUT_BY", 3))]
+            if not in_deals:
+                continue
+            d_in = in_deals[0]
+            d_out = out_deals[-1] if out_deals else None
+            arah = "BUY" if getattr(d_in, "type", 0) == getattr(mt5, "DEAL_TYPE_BUY", 0) else "SELL"
+            h_ent = float(getattr(d_in, "price", 0.0) or 0.0)
+            vol_tot = sum(float(getattr(d, "volume", 0.0) or 0.0) for d in in_deals)
+            pnl_net = sum(
+                float(getattr(d, "profit", 0.0) or 0.0)
+                + float(getattr(d, "swap", 0.0) or 0.0)
+                + float(getattr(d, "commission", 0.0) or 0.0)
+                for d in dlist
+            )
+            if d_out is not None:
+                st_pos = "CLOSED (PROFIT)" if pnl_net > 0.05 else ("CLOSED (LOSS)" if pnl_net < -0.05 else "CLOSED (BEP)")
+                w_close = _fmt_ts(getattr(d_out, "time", 0))
+                h_close = _fmt_px(getattr(d_out, "price", 0.0))
+            else:
+                st_pos = "CLOSED"
+                w_close = "-"
+                h_close = "-"
+            prev_r = existing.get(pid)
+            row = {
+                "ticket": pid,
+                "waktu_entry": _fmt_ts(getattr(d_in, "time", 0)),
+                "waktu_close": w_close,
+                "symbol": str(getattr(d_in, "symbol", SYMBOL) or SYMBOL),
+                "arah": arah,
+                "lot": f"{vol_tot:.2f}",
+                "harga_entry": _fmt_px(h_ent),
+                "sl": (prev_r.get("sl") if isinstance(prev_r, dict) and prev_r.get("sl") else _fmt_px(getattr(d_in, "sl", 0.0))),
+                "tp": (prev_r.get("tp") if isinstance(prev_r, dict) and prev_r.get("tp") else _fmt_px(getattr(d_in, "tp", 0.0))),
+                "harga_close": h_close,
+                "status_posisi": st_pos,
+                "profit_usd": f"{pnl_net:+.2f}",
+            }
+            _apply_zone_info(row, arah, h_ent, is_pending=False, prev_row=prev_r)
+            existing[pid] = row
+
+    rows_sorted = sorted(existing.values(), key=lambda r: (str(r.get("waktu_entry") or ""), str(r.get("ticket") or "")))
+
+    try:
+        with open(FILE_JURNAL_ENTRY, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=KOLOM_JURNAL_ENTRY, extrasaction="ignore")
+            writer.writeheader()
+            for r in rows_sorted:
+                writer.writerow(r)
+    except PermissionError:
+        print("   [⚠️ File jurnal_entry_xauusd.csv sedang dibuka (mis. Excel). Tutup file agar log entry tersimpan.]")
+    except Exception as e:
+        _catat_error("simpan_jurnal_entry", e)
+
+    return rows_sorted, mt5_aktif
 
 
 # Compatibility re-export: dipindahkan ke modules/jurnal_laporan.py (harus di akhir file)

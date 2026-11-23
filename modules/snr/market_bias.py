@@ -12,6 +12,7 @@ Klasifikasi Wajib:
 """
 from collections import Counter
 from modules.snr.data_provider import safe_float
+from modules.utils import format_wib_timestamp
 
 
 def evaluate_single_tf_snr_bias(
@@ -115,11 +116,19 @@ def evaluate_single_tf_snr_bias(
     reaction_state = "NONE"
 
     for z in zones_tf or []:
+        z_life = str(z.get("lifecycle_status") or z.get("status") or "ACTIVE").upper()
+        is_distant_hist = bool(z.get("is_distant_historical"))
         bo = z.get("breakout_info") or {}
         rt = z.get("retest_info") or {}
         rej = z.get("rejection_info") or {}
 
-        if bo.get("status") == "VALID_BREAKOUT":
+        if (
+            bo.get("status") == "VALID_BREAKOUT"
+            and not bo.get("is_historical_break")
+            and not bo.get("reclaim_detected")
+            and not is_distant_hist
+            and z_life not in ("RECLAIMED", "RECLAIM_PENDING", "INVALIDATED")
+        ):
             if bo.get("direction") == "BULLISH":
                 bias_score += 1.5
                 breakout_state = "BULLISH_BREAKOUT"
@@ -129,7 +138,13 @@ def evaluate_single_tf_snr_bias(
                 breakout_state = "BEARISH_BREAKDOWN"
                 reasons.append("valid support breakdown")
 
-        if rt.get("status") == "RETEST_CONFIRMED":
+        if (
+            rt.get("status") == "RETEST_CONFIRMED"
+            and not rt.get("is_historical")
+            and not is_distant_hist
+            and str(rt.get("flip_status") or "CONFIRMED_FLIP").upper() != "INVALID"
+            and z_life not in ("BREAKOUT_PENDING", "BREAKDOWN_PENDING", "RECLAIMED", "RECLAIM_PENDING", "INVALIDATED")
+        ):
             if rt.get("direction") == "BULLISH":
                 bias_score += 1.2
                 retest_state = "BULLISH_RETEST_CONFIRMED"
@@ -139,14 +154,21 @@ def evaluate_single_tf_snr_bias(
                 retest_state = "BEARISH_RETEST_CONFIRMED"
                 reasons.append("bearish retest confirmed")
 
-        if rej.get("status") == "BULLISH_REJECTION" and rej.get("confirmed"):
-            bias_score += 1.1
-            reaction_state = "BULLISH_SUPPORT_REJECTION"
-            reasons.append("support rejection")
-        elif rej.get("status") == "BEARISH_REJECTION" and rej.get("confirmed"):
-            bias_score -= 1.1
-            reaction_state = "BEARISH_RESISTANCE_REJECTION"
-            reasons.append("resistance rejection")
+        if (
+            rej.get("confirmed")
+            and not rej.get("is_historical")
+            and not z.get("is_broken")
+            and not z.get("is_invalidated")
+            and z_life in ("ACTIVE", "TOUCHED", "SWEEP")
+        ):
+            if rej.get("status") == "BULLISH_REJECTION":
+                bias_score += 1.1
+                reaction_state = "BULLISH_SUPPORT_REJECTION"
+                reasons.append("support rejection")
+            elif rej.get("status") == "BEARISH_REJECTION":
+                bias_score -= 1.1
+                reaction_state = "BEARISH_RESISTANCE_REJECTION"
+                reasons.append("resistance rejection")
 
     # 3. Dominasi Support vs Resistance & Posisi Harga terhadap S1 / R1
     best_sup_score = max((safe_float(z.get("score"), 0.0) for z in active_sups), default=0.0)
@@ -220,6 +242,14 @@ def evaluate_single_tf_snr_bias(
         reason_text = ", ".join(deduped)
     else:
         reason_text = "keseimbangan antara support dan resistance"
+    last_closed_ts = ""
+    try:
+        src_tz_mb = str((getattr(df, "attrs", {}) or {}).get("time_tz", "WIB"))
+        raw_t_mb = df["Time"].iloc[-1] if "Time" in df.columns else df.index[-1]
+        last_closed_ts = format_wib_timestamp(raw_t_mb, default_now=False, source_tz=src_tz_mb)
+    except Exception:
+        last_closed_ts = ""
+
     return {
         "timeframe": tf,
         "bias": final_tf_bias,
@@ -230,6 +260,7 @@ def evaluate_single_tf_snr_bias(
         "reaction_state": reaction_state,
         "dominance": dominance,
         "price_position": price_position,
+        "last_closed_time": last_closed_ts,
         "reason": f"{tf} {final_tf_bias} (skor={bias_score:+.2f}: {reason_text}).",
     }
 
@@ -335,6 +366,10 @@ def evaluate_snr_market_bias(
         "has_conflict": bool(h4_h1_conflict),
         "m30_conflict": bool(m30_conflict),
         "per_timeframe": per_tf,
+        "tf_closed_times": {
+            tf_k: str((per_tf.get(tf_k) or {}).get("last_closed_time") or "")
+            for tf_k in ("H4", "H1", "M30")
+        },
         "reason": summary_reason,
     }
 

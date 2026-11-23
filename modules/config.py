@@ -102,6 +102,7 @@ JARAK_CONFLUENCE_MAKS = 100.0      # confluence yang lebih jauh dari ini tidak d
 # Path file penyimpanan data
 FILE_JURNAL_SINYAL = os.path.join(_DIR_SCRIPT, "jurnal_sinyal_xauusd.csv")
 FILE_JURNAL_ENTRY = os.path.join(_DIR_SCRIPT, "jurnal_entry_xauusd.csv")
+FILE_JURNAL_ENTRY_XLSX = os.path.join(_DIR_SCRIPT, "jurnal_entry_xauusd.xlsx")
 FILE_ERROR_LOG = os.path.join(_DIR_SCRIPT, "error_xauusd.log")
 FILE_STATE_SINYAL = os.path.join(_DIR_SCRIPT, "state_sinyal_xauusd.json")
 FILE_STATE_ZONE_TRACKER = os.path.join(_DIR_SCRIPT, "state_zone_tracker.json")
@@ -155,6 +156,10 @@ SIGNAL_STATUS_SL_HIT = "SL HIT"
 SIGNAL_STATUS_CANCELLED = "CANCELLED"
 SIGNAL_STATUS_EXPIRED = "EXPIRED"
 
+# Pembedaan eksplisit invalidasi setup aktif (live Bid/Ask tembus SL) vs struktur zona (closed candle TF asal)
+INVALIDATION_SETUP_SL_BREACHED = "SETUP_INVALID_SL_BREACHED"
+INVALIDATION_ZONE_STRUCTURAL = "ZONE_STRUCTURALLY_INVALID"
+
 CANONICAL_SIGNAL_STATUSES = frozenset({
     SIGNAL_STATUS_NO_SETUP,
     SIGNAL_STATUS_SETUP_DETECTED,
@@ -195,6 +200,8 @@ KOLOM_JURNAL_ENTRY = [
     "ticket", "waktu_entry", "waktu_close", "symbol", "arah", "lot",
     "harga_entry", "sl", "tp", "harga_close", "status_posisi", "profit_usd",
     "status_zona", "sumber_zona", "zone_id", "zona_range", "grade_zona", "keterangan",
+    "position_id", "order_id", "deal_id", "mt5_status", "setup_match",
+    "waktu_order_created", "waktu_executed",
 ]
 
 # Daftar model Gemini yang dicoba berurutan saat server padat / kuota habis

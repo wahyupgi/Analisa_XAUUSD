@@ -301,10 +301,10 @@ def truncate_clean(text: str, max_len: int) -> str:
     return head.rstrip(" |;,:-") + "..."
 
 
-def wrap_dashboard_field(prefix: str, value: str, width: int, max_lines: int = 2):
+def wrap_dashboard_field(prefix: str, value: str, width: int, max_lines=None):
     """
-    Format pasangan `prefix + value` agar setiap baris <= width dengan wrapping terkontrol
-    pada batas segmen ` | ` atau kata, serta truncation rapi pada baris terakhir bila melebihi max_lines.
+    Format pasangan `prefix + value` agar setiap baris <= width dengan wrapping rapi
+    pada batas segmen ` | ` atau spasi TANPA truncation `...` (kecuali max_lines dibatasi eksplisit).
     """
     w = max(32, int(width))
     clean_val = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
@@ -333,29 +333,29 @@ def wrap_dashboard_field(prefix: str, value: str, width: int, max_lines: int = 2
                 break_on_hyphens=False,
             ) or [seg]
             for ch in chunks[:-1]:
-                wrapped.append(truncate_clean(ch, avail))
-            cur = truncate_clean(chunks[-1], avail)
+                wrapped.append(ch)
+            cur = chunks[-1]
     if cur:
         wrapped.append(cur)
 
     if not wrapped:
-        wrapped = [truncate_clean(clean_val, avail)]
+        wrapped = [clean_val]
 
-    if len(wrapped) > max_lines:
+    if max_lines is not None and max_lines > 0 and len(wrapped) > max_lines:
         kept = wrapped[: max_lines - 1]
         remainder = " | ".join(wrapped[max_lines - 1 :])
         kept.append(truncate_clean(remainder, avail))
         wrapped = kept
 
     indent = " " * len(prefix)
-    out = [prefix + truncate_clean(wrapped[0], avail)]
+    out = [prefix + wrapped[0]]
     for cont in wrapped[1:]:
-        out.append(indent + truncate_clean(cont, avail))
+        out.append(indent + cont)
     return out
 
 
 def fit_dashboard_text(text: str, width: int = None) -> str:
-    """Pastikan seluruh baris dashboard (termasuk divider) tidak melebihi lebar terminal aktif."""
+    """Pastikan seluruh baris dashboard (termasuk divider) tidak melebihi lebar terminal dengan wrap rapi (tanpa `...`)."""
     w = get_terminal_width() if width is None else max(32, int(width))
     fitted = []
     for raw_ln in str(text or "").splitlines():
@@ -363,10 +363,16 @@ def fit_dashboard_text(text: str, width: int = None) -> str:
         if len(s_ln) >= 10 and len(set(s_ln)) == 1 and s_ln[0] in ("=", "-", "─"):
             fitted.append(s_ln[0] * w)
         elif len(raw_ln) > w:
-            lead_len = len(raw_ln) - len(raw_ln.lstrip(" "))
-            lead = raw_ln[:lead_len]
-            body = raw_ln[lead_len:]
-            fitted.append(lead + truncate_clean(body, max(12, w - lead_len)))
+            colon_idx = raw_ln.find(": ")
+            if 0 < colon_idx <= min(24, w // 2):
+                pref = raw_ln[: colon_idx + 2]
+                val = raw_ln[colon_idx + 2 :]
+                fitted.extend(wrap_dashboard_field(pref, val, w, max_lines=None))
+            else:
+                lead_len = len(raw_ln) - len(raw_ln.lstrip(" "))
+                lead = raw_ln[:lead_len]
+                body = raw_ln[lead_len:]
+                fitted.extend(wrap_dashboard_field(lead, body, w, max_lines=None))
         else:
             fitted.append(raw_ln)
     return "\n".join(fitted)
@@ -714,9 +720,12 @@ class LiveTerminalDashboard:
             self._last_render_sig = render_sig
 
     def emit_event(self, event_line: str) -> None:
-        msg = truncate_clean(str(event_line or ""), get_terminal_width())
-        if not msg:
+        raw_ev = " ".join(str(event_line or "").replace("\r", " ").replace("\n", " ").split())
+        if not raw_ev:
             return
+        w = get_terminal_width()
+        wrapped_ev = wrap_dashboard_field("", raw_ev, w, max_lines=None)
+        msg = "\n".join(wrapped_ev)
         if self._use_rich_live and self._live is not None:
             try:
                 renderable = format_colored_text(msg) if should_use_color(self.stream) else msg

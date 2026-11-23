@@ -337,6 +337,14 @@ def evaluate_zone_status(zone, bid, ask, mid, close_m5=None, atr_m5=1.0, prev_st
     if zone.get("mitigated") or zone.get("status") == "MITIGATED":
         return {"status": "MITIGATED", "distance_pt": round(dist_pt, 2), "reason": "Zona sudah termitigasi"}
 
+    # Harga menembus batas distal zona tanpa konfirmasi closed-candle invalidasi -> BREAKOUT_PENDING (jangan hapus zona)
+    if (kind == "SUPPLY" and mid > hi) or (kind == "DEMAND" and mid < lo):
+        return {
+            "status": "BREAKOUT_PENDING",
+            "distance_pt": round(dist_pt, 2),
+            "reason": f"Harga menembus batas {'resistance/supply' if kind == 'SUPPLY' else 'support/demand'} ({lo:.2f}-{hi:.2f}); menunggu konfirmasi closed-candle",
+        }
+
     # Cek ZONE_TOUCHED berbasis harga snapshot mid yang konsisten dengan jarak zona
     touched_now = (lo <= mid <= hi)
     if touched_now:
@@ -683,7 +691,7 @@ def _build_monitor_snapshot(
         except Exception:
             return None
 
-    def _zone_from_active_signal(sig, mid_price):
+    def _zone_from_active_signal(sig, mid_price, bid_price=0.0, ask_price=0.0):
         if not isinstance(sig, dict):
             return None
         try:
@@ -698,11 +706,13 @@ def _build_monitor_snapshot(
             if arah not in ("BUY", "SELL"):
                 return None
 
-            # Jangan kunci ke sinyal yang sudah invalid terhadap level SL.
-            if mid_price > 0 and z_sl > 0:
-                if arah == "SELL" and mid_price > z_sl:
+            # Jangan kunci ke sinyal yang sudah invalid terhadap SETUP_SL (SELL: Ask>=SL; BUY: Bid<=SL).
+            if z_sl > 0:
+                sell_px = ask_price if ask_price > 0 else mid_price
+                buy_px = bid_price if bid_price > 0 else mid_price
+                if arah == "SELL" and sell_px > 0 and sell_px >= z_sl:
                     return None
-                if arah == "BUY" and mid_price < z_sl:
+                if arah == "BUY" and buy_px > 0 and buy_px <= z_sl:
                     return None
 
             if z_lo <= mid_price <= z_hi:
@@ -728,7 +738,7 @@ def _build_monitor_snapshot(
         or {}
     )
     monitored_pz = _zone_from_monitored_identity(dec.get("monitored_zone_identity") if isinstance(dec, dict) else None)
-    signal_pz = _zone_from_active_signal(sinyal_aktif, mid_val)
+    signal_pz = _zone_from_active_signal(sinyal_aktif, mid_val, bid_price=bid_val, ask_price=ask_val)
     h4_mon_bias = str(((scan_result or {}).get("htf_context") or {}).get("H4") or "").upper()
     pz = None
     for pz_cand in (

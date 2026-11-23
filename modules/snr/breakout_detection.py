@@ -320,23 +320,26 @@ def detect_zone_breakout(
     reclaimed_inside = False
     bars_since_first = (n_bars - 1) - int(first_bo["bar_index"])
     closes_after_first = [float(closes[m]) for m in range(int(first_bo["bar_index"]) + 1, n_bars)]
+    spread_pts = max(0.0, safe_float(zone.get("spread"), safe_float((cfg.get("risk") or {}).get("default_spread_points", 0.25), 0.25)))
+    fail_close_atr = safe_float((cfg.get("retest") or {}).get("retest_fail_close_inside_atr", 0.18), 0.18)
+    fail_edge_tol = fail_close_atr * last_atr + spread_pts
     if z_type == "RESISTANCE":
-        mid_fail_count = sum(1 for c in closes_after_first if c < z_mid)
-        if last_close < z_low:
+        below_edge_count = sum(1 for c in closes_after_first if c < (z_low - spread_pts))
+        if last_close < (z_low - fail_edge_tol):
             reclaimed_inside = True
-        elif last_close < z_mid and mid_fail_count >= 2:
+        elif last_close < (z_low - spread_pts) and below_edge_count >= 2:
             reclaimed_inside = True
-        elif bars_since_first <= 4 and any(c < z_low for c in closes_after_first) and last_close <= z_high:
+        elif bars_since_first <= 4 and any(c < (z_low - spread_pts) for c in closes_after_first) and last_close <= z_high:
             reclaimed_inside = True
             bo_idx = int(first_bo["bar_index"])
             ref_bo = first_bo
     else:  # SUPPORT
-        mid_fail_count = sum(1 for c in closes_after_first if c > z_mid)
-        if last_close > z_high:
+        above_edge_count = sum(1 for c in closes_after_first if c > (z_high + spread_pts))
+        if last_close > (z_high + fail_edge_tol):
             reclaimed_inside = True
-        elif last_close > z_mid and mid_fail_count >= 2:
+        elif last_close > (z_high + spread_pts) and above_edge_count >= 2:
             reclaimed_inside = True
-        elif bars_since_first <= 4 and any(c > z_high for c in closes_after_first) and last_close >= z_low:
+        elif bars_since_first <= 4 and any(c > (z_high + spread_pts) for c in closes_after_first) and last_close >= z_low:
             reclaimed_inside = True
             bo_idx = int(first_bo["bar_index"])
             ref_bo = first_bo
@@ -451,6 +454,29 @@ def detect_zone_breakout(
 
     # Harga masih ditutup di luar zona pada bar closed terakhir -> evaluasi kualitas & momentum breakout
     best_bo = max(breakout_events, key=lambda e: (e["body_atr"], e["penetration_atr"]))
+    first_confirmed_bo = next(
+        (
+            event for event in breakout_events
+            if float(event["penetration_atr"]) >= valid_pen_atr
+            and bool(event["is_directional_candle"])
+            and float(event["body_atr"]) >= min_body_atr
+            and float(event["body_ratio"]) >= min_body_ratio
+        ),
+        None,
+    )
+    if first_confirmed_bo is None:
+        for idx_ev in range(1, len(breakout_events)):
+            prev_ev = breakout_events[idx_ev - 1]
+            curr_ev = breakout_events[idx_ev]
+            if (
+                int(curr_ev["bar_index"]) == int(prev_ev["bar_index"]) + 1
+                and float(curr_ev["penetration_atr"]) >= valid_pen_atr
+                and max(float(prev_ev["penetration_atr"]), float(curr_ev["penetration_atr"])) >= strong_pen_atr
+                and max(float(prev_ev["body_atr"]), float(curr_ev["body_atr"])) >= (min_body_atr * 0.85)
+            ):
+                first_confirmed_bo = curr_ev
+                break
+    anchor_bo = first_confirmed_bo or first_bo
     curr_pen_pts = (last_close - z_high) if z_type == "RESISTANCE" else (z_low - last_close)
     curr_pen_atr = curr_pen_pts / last_atr
     max_pen_atr = max(curr_pen_atr, float(best_bo["penetration_atr"]))
@@ -494,8 +520,8 @@ def detect_zone_breakout(
             q_score += 0.8
         q_score = min(15.0, round(q_score, 2))
         is_support = (z_type == "SUPPORT")
-        rep_bo_idx = initial_bo_idx if is_historical_break else int(best_bo["bar_index"])
-        rep_bo_time = initial_bo_time if is_historical_break else best_bo["bar_time"]
+        rep_bo_idx = initial_bo_idx if is_historical_break else int(anchor_bo["bar_index"])
+        rep_bo_time = initial_bo_time if is_historical_break else anchor_bo["bar_time"]
         return {
             "zone_id": zone.get("zone_id", "UNKNOWN"),
             "timeframe": tf,
@@ -552,8 +578,8 @@ def detect_zone_breakout(
         if vol_supported is True:
             q_score += 0.8
         q_score = min(15.0, round(q_score, 2))
-        rep_bo_idx = initial_bo_idx if is_historical_break else int(best_bo["bar_index"])
-        rep_bo_time = initial_bo_time if is_historical_break else best_bo["bar_time"]
+        rep_bo_idx = initial_bo_idx if is_historical_break else int(anchor_bo["bar_index"])
+        rep_bo_time = initial_bo_time if is_historical_break else anchor_bo["bar_time"]
         return {
             "zone_id": zone.get("zone_id", "UNKNOWN"),
             "timeframe": tf,
@@ -574,10 +600,10 @@ def detect_zone_breakout(
             "initial_break_bar_index": initial_bo_idx,
             "initial_break_bar_time": initial_bo_time,
             "is_historical_break": is_historical_break,
-            "close_outside_zone": True,
+            "close_outside_zone": bool(curr_pen_pts > 0),
             "wick_penetration_only": False,
-            "penetration_points": round(curr_pen_pts, 2),
-            "penetration_atr": round(curr_pen_atr, 3),
+            "penetration_points": round(curr_pen_pts if curr_pen_pts > 0 else float(best_bo["penetration_points"]), 2),
+            "penetration_atr": round(curr_pen_atr if curr_pen_pts > 0 else float(best_bo["penetration_atr"]), 3),
             "body_atr": best_bo["body_atr"],
             "body_ratio": best_bo["body_ratio"],
             "consecutive_closes_outside": int(consec_outside),
@@ -587,7 +613,11 @@ def detect_zone_breakout(
             "quality_score_15": q_score,
             "reason": (
                 f"Valid {expected_dir} {'breakdown' if is_support else 'breakout'} terkonfirmasi melewati {z_type} ({z_low:.2f}-{z_high:.2f}); "
-                f"harga bertahan di luar zona (close={last_close:.2f})."
+                + (
+                    f"harga bertahan di luar zona (close={last_close:.2f})."
+                    if curr_pen_pts > 0
+                    else f"harga kembali menguji zona pasca-{'breakdown' if is_support else 'breakout'} (close={last_close:.2f}, belum reclaim)."
+                )
             ),
         }
 
@@ -636,8 +666,9 @@ def classify_snr_breakout_state(zone):
     """
     Klasifikasi kanonis status breakout zona SNR (single source of truth antara `scan snr` & `pantau`):
     - BREAKDOWN_PENDING / BREAKOUT_PENDING : belum terkonfirmasi closed candle TF asal (TIDAK pernah untuk zona broken)
-    - CONFIRMED                            : baru saja terkonfirmasi break oleh candle closed TF asal
-    - RETEST_WATCH                         : zona confirmed broken yang sedang menunggu / menjalani retest role-reversal
+    - CONFIRMED                            : baru saja terkonfirmasi break oleh candle closed TF asal (POTENTIAL_FLIP, belum CONFIRMED_FLIP)
+    - RETEST_IN_PROGRESS                   : harga kembali ke zona breakout terkonfirmasi, menunggu konfirmasi retest/rejection closed candle
+    - RETEST_WATCH                         : zona confirmed broken yang sedang menunggu / sudah mengonfirmasi retest role-reversal
     - BROKEN                               : zona sudah confirmed broken / invalidated / reclaimed
     - NONE                                 : belum ada breakout
     """
@@ -646,6 +677,7 @@ def classify_snr_breakout_state(zone):
             "state": "NONE",
             "label": "NONE",
             "direction_word": "BREAKOUT",
+            "flip_status": "NONE",
             "is_pending": False,
             "is_confirmed": False,
             "is_retest_watch": False,
@@ -659,6 +691,7 @@ def classify_snr_breakout_state(zone):
     rt = zone.get("retest_info") if isinstance(zone.get("retest_info"), dict) else {}
     bo_status = str(bo.get("status") or "NO_BREAKOUT").upper()
     rt_status = str(rt.get("status") or "NO_RETEST").upper()
+    raw_flip = str(zone.get("flip_status") or rt.get("flip_status") or "").upper()
     bars_ago = int(safe_float(zone.get("lifecycle_bars_ago"), 0))
     d_atr = safe_float(zone.get("distance_atr"), 0.0)
     is_hist = bool(
@@ -677,32 +710,96 @@ def classify_snr_breakout_state(zone):
     )
 
     if is_confirmed_broken:
-        if life in ("RECLAIMED", "RECLAIM_PENDING") or (bo.get("reclaim_detected") and life in ("BROKEN", "RETEST", "INVALIDATED")):
-            # RECLAIMED hanya jika lifecycle (urutan candle closed pasca-break) mengonfirmasi; reclaim_detected saja = PENDING
-            tag_sub = life.replace("_", " ") if life in ("RECLAIMED", "RECLAIM_PENDING") else "RECLAIM PENDING"
+        life_ev = str(zone.get("lifecycle_event") or "").upper()
+        is_bo_invalidated = bool(
+            life == "RECLAIMED"
+            or life_ev in ("BREAKOUT_INVALIDATED", "BREAKDOWN_INVALIDATED")
+            or bool(rt.get("breakout_invalidated"))
+            or (bo.get("reclaim_detected") and life in ("RECLAIMED", "INVALIDATED"))
+        )
+        if is_bo_invalidated:
+            inv_state = "BREAKDOWN_INVALIDATED" if z_type == "SUPPORT" else "BREAKOUT_INVALIDATED"
+            inv_lbl = f"{dir_word} INVALIDATED"
             return {
-                "state": "BROKEN",
-                "label": f"BROKEN ({tag_sub})",
+                "state": inv_state,
+                "label": inv_lbl,
                 "direction_word": dir_word,
+                "flip_status": "INVALID",
                 "is_pending": False,
                 "is_confirmed": False,
                 "is_retest_watch": False,
                 "is_broken": True,
-                "is_historical": bool(is_hist or (life == "RECLAIMED" and bars_ago > 1)),
+                "is_historical": bool(is_hist or (life == "RECLAIMED" and bars_ago > 2)),
+            }
+        is_rt_failed = bool(
+            rt_status == "RETEST_FAILED"
+            or life == "RECLAIM_PENDING"
+            or life_ev == "RETEST_FAILED"
+            or (bo.get("reclaim_detected") and life in ("BROKEN", "RETEST"))
+        )
+        if is_rt_failed:
+            return {
+                "state": "RETEST_FAILED",
+                "label": "RETEST FAILED",
+                "direction_word": dir_word,
+                "flip_status": "INVALID",
+                "is_pending": False,
+                "is_confirmed": False,
+                "is_retest_watch": False,
+                "is_broken": True,
+                "is_historical": bool(is_hist or bars_ago > 2),
             }
         if (
-            (life == "RETEST" or rt_status in ("RETEST_WAITING", "RETEST_IN_PROGRESS", "RETEST_CONFIRMED"))
+            rt_status == "RETEST_CONFIRMED"
             and not zone.get("is_invalidated")
             and not zone.get("is_distant_historical")
             and d_atr <= 6.0
         ):
-            rt_tag = "RETEST WATCH (CONFIRMED)" if rt_status == "RETEST_CONFIRMED" else "RETEST WATCH"
+            is_flip_conf = bool(
+                raw_flip == "CONFIRMED_FLIP"
+                or (bool(rt.get("retest_held")) and bool(rt.get("reaction_confirmed")))
+            )
+            return {
+                "state": "RETEST_CONFIRMED" if is_flip_conf else "RETEST_WATCH",
+                "label": "RETEST CONFIRMED" if is_flip_conf else "RETEST WATCH",
+                "direction_word": dir_word,
+                "flip_status": "CONFIRMED_FLIP" if is_flip_conf else "POTENTIAL_FLIP",
+                "is_pending": False,
+                "is_confirmed": is_flip_conf,
+                "is_retest_watch": True,
+                "is_broken": True,
+                "is_historical": False,
+            }
+        if (
+            (rt_status == "RETEST_IN_PROGRESS" or (life == "RETEST" and not rt))
+            and not zone.get("is_invalidated")
+            and not zone.get("is_distant_historical")
+            and d_atr <= 6.0
+        ):
+            return {
+                "state": "RETEST_IN_PROGRESS",
+                "label": "RETEST IN PROGRESS",
+                "direction_word": dir_word,
+                "flip_status": "POTENTIAL_FLIP",
+                "is_pending": False,
+                "is_confirmed": False,
+                "is_retest_watch": True,
+                "is_broken": True,
+                "is_historical": False,
+            }
+        if (
+            rt_status == "RETEST_WAITING"
+            and not zone.get("is_invalidated")
+            and not zone.get("is_distant_historical")
+            and d_atr <= 6.0
+        ):
             return {
                 "state": "RETEST_WATCH",
-                "label": rt_tag,
+                "label": "RETEST WATCH",
                 "direction_word": dir_word,
+                "flip_status": "POTENTIAL_FLIP",
                 "is_pending": False,
-                "is_confirmed": True,
+                "is_confirmed": False,
                 "is_retest_watch": True,
                 "is_broken": True,
                 "is_historical": False,
@@ -712,6 +809,7 @@ def classify_snr_breakout_state(zone):
                 "state": "CONFIRMED",
                 "label": f"{dir_word} CONFIRMED",
                 "direction_word": dir_word,
+                "flip_status": "POTENTIAL_FLIP",
                 "is_pending": False,
                 "is_confirmed": True,
                 "is_retest_watch": False,
@@ -722,6 +820,7 @@ def classify_snr_breakout_state(zone):
             "state": "BROKEN",
             "label": f"BROKEN ({z_type})",
             "direction_word": dir_word,
+            "flip_status": raw_flip if raw_flip in ("CONFIRMED_FLIP", "POTENTIAL_FLIP", "INVALID") else "POTENTIAL_FLIP",
             "is_pending": False,
             "is_confirmed": False,
             "is_retest_watch": False,
@@ -736,6 +835,7 @@ def classify_snr_breakout_state(zone):
             "state": pend_st,
             "label": pend_lbl,
             "direction_word": dir_word,
+            "flip_status": "POTENTIAL_FLIP",
             "is_pending": True,
             "is_confirmed": False,
             "is_retest_watch": False,
@@ -747,6 +847,7 @@ def classify_snr_breakout_state(zone):
         "state": "NONE",
         "label": "NONE",
         "direction_word": dir_word,
+        "flip_status": "NONE",
         "is_pending": False,
         "is_confirmed": False,
         "is_retest_watch": False,
@@ -766,6 +867,8 @@ def build_snr_breakout_watch(ranked_zones, price_action=None):
 
     confirmed = []
     retest_watch = []
+    retest_failed = []
+    breakout_invalidated = []
     pending = []
     broken = []
     historical = []
@@ -806,6 +909,7 @@ def build_snr_breakout_watch(ranked_zones, price_action=None):
             "distance_atr": d_atr,
             "state": st,
             "label": info["label"],
+            "flip_status": info.get("flip_status", "NONE"),
             "lifecycle_status": str(z.get("lifecycle_status") or z.get("status") or "").upper(),
             "event_time": str(
                 z.get("lifecycle_event_time")
@@ -823,8 +927,22 @@ def build_snr_breakout_watch(ranked_zones, price_action=None):
 
         if st == "CONFIRMED":
             confirmed.append(entry)
-        elif st == "RETEST_WATCH":
+        elif st in ("RETEST_IN_PROGRESS", "RETEST_CONFIRMED", "RETEST_WATCH"):
             retest_watch.append(entry)
+        elif st == "RETEST_FAILED":
+            if not info["is_historical"] and d_atr <= 6.0:
+                retest_failed.append(entry)
+            else:
+                broken.append(entry)
+                if info["is_historical"]:
+                    historical.append(entry)
+        elif st in ("BREAKOUT_INVALIDATED", "BREAKDOWN_INVALIDATED"):
+            if not info["is_historical"] and d_atr <= 6.0:
+                breakout_invalidated.append(entry)
+            else:
+                broken.append(entry)
+                if info["is_historical"]:
+                    historical.append(entry)
         elif st in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING"):
             if not info["is_historical"]:
                 pending.append(entry)
@@ -835,15 +953,47 @@ def build_snr_breakout_watch(ranked_zones, price_action=None):
             if info["is_historical"]:
                 historical.append(entry)
 
-    for bucket in (confirmed, retest_watch, pending, broken):
-        bucket.sort(key=lambda item: (item["distance_points"], item["timeframe"], str(item["zone_id"] or "")))
+    retest_watch.sort(
+        key=lambda item: (
+            0 if item["state"] == "RETEST_IN_PROGRESS" else (1 if item["state"] == "RETEST_CONFIRMED" else 2),
+            item["distance_points"],
+            item["timeframe"],
+            str(item["zone_id"] or ""),
+        )
+    )
+    from modules.utils import _parse_event_timestamp_epoch
+    for bucket in (confirmed, retest_failed, breakout_invalidated, pending, broken):
+        bucket.sort(
+            key=lambda item: (
+                0 if not item.get("is_historical") else 1,
+                0 if _parse_event_timestamp_epoch(item.get("event_time")) > 0.0 else 1,
+                -_parse_event_timestamp_epoch(item.get("event_time")),
+                item["distance_points"],
+                item["timeframe"],
+                str(item["zone_id"] or ""),
+            )
+        )
 
     def _fmt_watch_line(item):
         rng = f"{item['low']:.2f}-{item['high']:.2f}"
-        return f"{item['label']} ({item['timeframe']} {item['zone_type']} {rng})".replace("  ", " ").strip()
+        zid_str = str(item.get("zone_id") or "").strip()
+        zid_tag = f" [ID:{zid_str}]" if zid_str and zid_str != "UNKNOWN" else ""
+        flp = str(item.get("flip_status") or "").upper()
+        flp_tag = f" [{flp}]" if flp in ("POTENTIAL_FLIP", "CONFIRMED_FLIP", "INVALID") else ""
+        return f"{item['label']}{flp_tag} ({item['timeframe']} {item['zone_type']} {rng}){zid_tag}".replace("  ", " ").strip()
 
+    retest_in_prog = [r for r in retest_watch if r["state"] == "RETEST_IN_PROGRESS"]
+    retest_conf = [r for r in retest_watch if r["state"] == "RETEST_CONFIRMED"]
     primary = None
-    if confirmed:
+    if retest_in_prog:
+        primary = retest_in_prog[0]
+    elif retest_conf:
+        primary = retest_conf[0]
+    elif retest_failed:
+        primary = retest_failed[0]
+    elif breakout_invalidated:
+        primary = breakout_invalidated[0]
+    elif confirmed:
         primary = confirmed[0]
     elif retest_watch:
         primary = retest_watch[0]
@@ -862,11 +1012,14 @@ def build_snr_breakout_watch(ranked_zones, price_action=None):
         return {
             "state": primary["state"],
             "label": primary["label"],
+            "flip_status": primary.get("flip_status", "NONE"),
             "summary_line": _fmt_watch_line(primary),
             "zone_id": primary["zone_id"],
             "pending": pending,
             "confirmed": confirmed,
             "retest_watch": retest_watch,
+            "retest_failed": retest_failed,
+            "breakout_invalidated": breakout_invalidated,
             "broken": broken,
             "historical": historical,
         }
@@ -886,11 +1039,14 @@ def build_snr_breakout_watch(ranked_zones, price_action=None):
         return {
             "state": st_f,
             "label": lbl_f,
+            "flip_status": "POTENTIAL_FLIP",
             "summary_line": sum_ln,
             "zone_id": None,
             "pending": pending,
             "confirmed": confirmed,
             "retest_watch": retest_watch,
+            "retest_failed": retest_failed,
+            "breakout_invalidated": breakout_invalidated,
             "broken": broken,
             "historical": historical,
         }
@@ -898,11 +1054,14 @@ def build_snr_breakout_watch(ranked_zones, price_action=None):
     return {
         "state": "NONE",
         "label": "",
+        "flip_status": "NONE",
         "summary_line": "",
         "zone_id": None,
         "pending": pending,
         "confirmed": confirmed,
         "retest_watch": retest_watch,
+        "retest_failed": retest_failed,
+        "breakout_invalidated": breakout_invalidated,
         "broken": broken,
         "historical": historical,
     }

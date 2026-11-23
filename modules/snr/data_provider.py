@@ -940,9 +940,12 @@ def fetch_snr_market_data(
         tf_max_bars = int(tf_bars.get(tf, 220))
         if (df_src is None or (isinstance(df_src, pd.DataFrame) and df_src.empty)) and live and mt5_ready and not has_snapshot:
             df_src = _fetch_mt5_historical_candles(sym, tf, tf_max_bars)
-        elif isinstance(df_src, pd.DataFrame) and not df_src.empty and len(df_src) > tf_max_bars + 5:
-            # Normalisasi lookback agar konsisten antara scan snr dan pantau/unified_monitor
-            df_src = df_src.iloc[-(tf_max_bars + 5):]
+        elif isinstance(df_src, pd.DataFrame) and not df_src.empty:
+            if len(df_src) > tf_max_bars:
+                # Normalisasi lookback agar identik antara scan snr dan pantau/unified_monitor
+                df_src = df_src.iloc[-tf_max_bars:].copy()
+                if "ATR14" in df_src.columns:
+                    df_src = df_src.drop(columns=["ATR14"])
 
         df_clean, forming_bar = prepare_snr_frame(df_src, has_unclosed_last_bar=has_unclosed_last_bar)
         prepared_frames[tf] = df_clean

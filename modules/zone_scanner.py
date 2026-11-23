@@ -37,6 +37,7 @@ from modules.config import (
     ZONE_RELEVANCE_TF_LIMITS,
     SIGNAL_STATUS_NO_SETUP, SIGNAL_STATUS_SETUP_DETECTED, SIGNAL_STATUS_WAITING_PULLBACK,
     SIGNAL_STATUS_WAITING_CONFIRMATION, SIGNAL_STATUS_SIGNAL_CONFIRMED, SIGNAL_STATUS_ENTRY_MISSED,
+    INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL,
 )
 from modules.utils import (
     _catat_error,
@@ -155,6 +156,9 @@ class Zone:
     zone_width: float = 0.0
     is_broken: bool = False
     invalid_label: str = ""
+    invalidation_type: str = ""
+    setup_invalidation_price: float = 0.0
+    original_grade: str = ""
     zone_relevance: str = "RADAR"             # ACTIVE / RADAR / FAR_REFERENCE / INVALID
     zone_relevance_reason: str = ""
     liquidity_sweep_evidence: Optional[Dict[str, Any]] = None
@@ -2456,18 +2460,35 @@ def _is_breach_invalidation_valid(
 ) -> bool:
     """
     Verifikasi integritas catatan invalidasi: tolak jika artefak pra-pembentukan ATAU jika
-    `break_close` tercatat belum benar-benar menembus batas invalidasi distal zona.
+    harga/close tercatat belum benar-benar menembus batas invalidasi (distal untuk struktur, SL untuk setup).
     """
     if _is_impossible_pre_creation_invalidation(zone_or_rec, inv_rec):
         return False
     target = inv_rec if isinstance(inv_rec, dict) else zone_or_rec
     if not isinstance(target, dict):
         return True
+    src = zone_or_rec if isinstance(zone_or_rec, dict) and (zone_or_rec.get("price_low") or zone_or_rec.get("low")) else target
+    z_type = str(src.get("zone_type") or target.get("zone_type") or "").upper()
+    inv_type = str(target.get("invalidation_type") or target.get("invalid_label") or "").upper()
+    if inv_type == INVALIDATION_SETUP_SL_BREACHED:
+        b_px = target.get("break_price")
+        sl_ref = float(
+            target.get("setup_sl")
+            or target.get("setup_invalidation_price")
+            or src.get("setup_sl")
+            or src.get("setup_invalidation_price")
+            or src.get("sl")
+            or 0.0
+        )
+        if isinstance(b_px, (int, float)) and math.isfinite(float(b_px)) and float(b_px) > 0 and sl_ref > 0:
+            if z_type == "DEMAND" and float(b_px) > sl_ref:
+                return False
+            if z_type == "SUPPLY" and float(b_px) < sl_ref:
+                return False
+        return True
     b_close = target.get("break_close")
     if not isinstance(b_close, (int, float)) or not math.isfinite(float(b_close)) or float(b_close) <= 0:
         return True
-    src = zone_or_rec if isinstance(zone_or_rec, dict) and (zone_or_rec.get("price_low") or zone_or_rec.get("low")) else target
-    z_type = str(src.get("zone_type") or target.get("zone_type") or "").upper()
     lo = float(src.get("price_low", src.get("low", target.get("price_low", 0.0))) or 0.0)
     hi = float(src.get("price_high", src.get("high", target.get("price_high", 0.0))) or 0.0)
     raw_inv = float(src.get("invalidation_price") or target.get("invalidation_price") or 0.0)
@@ -2480,6 +2501,274 @@ def _is_breach_invalidation_valid(
         if eff_inv > 0 and float(b_close) <= eff_inv:
             return False
     return True
+
+
+def resolve_smc_structure_invalidation_price(zone_or_setup: Union[Zone, Dict[str, Any]]) -> float:
+    """
+    Sumber tunggal `STRUCTURE_INV` (batas invalidasi struktur zona SMC — terpisah dari SETUP_SL):
+    - DEMAND/BUY  : batas distal bawah zona (min(low, invalidation_price))
+    - SUPPLY/SELL : batas distal atas zona (max(high, invalidation_price))
+    """
+    zd = zone_or_setup.to_dict() if hasattr(zone_or_setup, "to_dict") else (zone_or_setup if isinstance(zone_or_setup, dict) else {})
+    if not zd:
+        return 0.0
+    z_type = str(zd.get("zone_type") or zd.get("type") or "").upper()
+    direction = str(zd.get("direction") or zd.get("arah") or "").upper()
+    if z_type not in ("DEMAND", "SUPPLY"):
+        if direction == "BUY":
+            z_type = "DEMAND"
+        elif direction == "SELL":
+            z_type = "SUPPLY"
+        else:
+            return 0.0
+    demand = (z_type == "DEMAND")
+    lo = float(zd.get("price_low", zd.get("low", zd.get("zone_low", 0.0))) or 0.0)
+    hi = float(zd.get("price_high", zd.get("high", zd.get("zone_high", 0.0))) or 0.0)
+    raw = float(
+        zd.get("structure_invalidation")
+        or zd.get("structural_invalidation")
+        or zd.get("invalidation_price")
+        or (lo if demand else hi)
+        or 0.0
+    )
+    if demand and lo > 0 and raw > 0:
+        return round(min(lo, raw), 2)
+    if (not demand) and hi > 0 and raw > 0:
+        return round(max(hi, raw), 2)
+    return round(raw, 2) if raw > 0 else 0.0
+
+
+def resolve_smc_setup_invalidation_price(
+    zone_or_setup: Union[Zone, Dict[str, Any]],
+    frames: Optional[Dict[str, pd.DataFrame]] = None,
+    spread: float = 0.0,
+) -> float:
+    """
+    Sumber tunggal `SETUP_SL` untuk setup aktif SMC (berbasis SL/buffer existing — terpisah dari STRUCTURE_INV):
+    - DEMAND/BUY  : batas bawah SL entry (<= distal edge)
+    - SUPPLY/SELL : batas atas SL entry (>= distal edge)
+    Tidak pernah menyamakan batas struktur zona mentah sebagai SL tanpa dasar perhitungan buffer/SL existing.
+    """
+    zd = zone_or_setup.to_dict() if hasattr(zone_or_setup, "to_dict") else (zone_or_setup if isinstance(zone_or_setup, dict) else {})
+    if not zd:
+        return 0.0
+    z_type = str(zd.get("zone_type") or zd.get("type") or "").upper()
+    direction = str(zd.get("direction") or zd.get("arah") or "").upper()
+    if z_type not in ("DEMAND", "SUPPLY"):
+        if direction == "BUY":
+            z_type = "DEMAND"
+        elif direction == "SELL":
+            z_type = "SUPPLY"
+        else:
+            return 0.0
+    demand = (z_type == "DEMAND")
+    lo = float(zd.get("price_low", zd.get("low", zd.get("zone_low", 0.0))) or 0.0)
+    hi = float(zd.get("price_high", zd.get("high", zd.get("zone_high", 0.0))) or 0.0)
+    struct_inv = resolve_smc_structure_invalidation_price(zd)
+
+    def _side_ok(val: float) -> bool:
+        if not (isinstance(val, (int, float)) and math.isfinite(val) and val > 0):
+            return False
+        if demand and lo > 0:
+            return val <= lo + 1e-6
+        if (not demand) and hi > 0:
+            return val >= hi - 1e-6
+        return True
+
+    # 0. Sumber tunggal SetupSL tersimpan (frozen/active setup version) agar tidak pernah dihitung ulang dari live tick
+    zid = str(zd.get("zone_id") or "").strip()
+    if zid:
+        try:
+            from modules.utils import resolve_stored_setup_sl
+            z_tf = str(zd.get("timeframe") or "").strip().upper() or None
+            z_ver = zd.get("setup_version")
+            stored_sl = resolve_stored_setup_sl(
+                "SMC",
+                zid,
+                timeframe=z_tf,
+                setup_version=int(z_ver) if isinstance(z_ver, int) and z_ver > 0 else None,
+            )
+            if _side_ok(stored_sl):
+                return round(stored_sl, 2)
+        except Exception:
+            pass
+
+    # 1. Explicit setup SL / setup_invalidation_price (plan / pending_plan)
+    pending_p = zd.get("pending_plan") if isinstance(zd.get("pending_plan"), dict) else {}
+    for raw_c in (
+        zd.get("setup_sl"),
+        zd.get("setup_invalidation_price"),
+        zd.get("sl"),
+        pending_p.get("sl"),
+    ):
+        try:
+            v = float(raw_c or 0.0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if _side_ok(v):
+            return round(v, 2)
+
+    # 2. Compute structural SL using existing buffer logic (ATR/spread)
+    try:
+        z_obj = zone_or_setup if isinstance(zone_or_setup, Zone) else _zone_from_dict(zd)
+        sl_comp = compute_structural_sl(z_obj, frames, float(spread or 0.0))
+        if _side_ok(sl_comp):
+            return round(sl_comp, 2)
+    except Exception:
+        pass
+
+    # 3. Fallback sl_recommended or structural invalidation + explicit positive buffer only
+    try:
+        sl_rec = float(zd.get("sl_recommended") or 0.0)
+        if _side_ok(sl_rec):
+            return round(sl_rec, 2)
+    except (TypeError, ValueError):
+        pass
+    try:
+        buf = float(zd.get("invalidation_buffer") or 0.0)
+    except (TypeError, ValueError):
+        buf = 0.0
+    if struct_inv > 0 and buf > 0:
+        return round(struct_inv - buf if demand else struct_inv + buf, 2)
+    return 0.0
+
+
+def evaluate_smc_setup_live_invalidation(
+    zone_or_setup: Union[Zone, Dict[str, Any]],
+    current_price: Optional[float] = None,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+    frames: Optional[Dict[str, pd.DataFrame]] = None,
+    spread: float = 0.0,
+    market_status: Optional[str] = None,
+) -> Tuple[bool, str, Optional[float], Optional[float], str]:
+    """
+    Evaluasi invalidasi setup aktif SMC berbasis harga MT5 live Bid/Ask sesuai arah & buffer SL existing:
+    - BUY/DEMAND : invalid (`SETUP_INVALID_SL_BREACHED`) jika live Bid <= setup_invalidation_price (batas bawah)
+    - SELL/SUPPLY: invalid (`SETUP_INVALID_SL_BREACHED`) jika live Ask >= setup_invalidation_price (batas atas)
+    Tidak pernah membatalkan struktur zona (struktur tetap pakai closed candle TF asal).
+    Return: (is_invalid, reason, live_price_used, invalidation_level, price_side).
+    """
+    if str(market_status or "").strip().upper() in ("CLOSED", "MARKET_CLOSED"):
+        return False, "", None, None, ""
+    zd = zone_or_setup.to_dict() if hasattr(zone_or_setup, "to_dict") else (zone_or_setup if isinstance(zone_or_setup, dict) else {})
+    if not zd:
+        return False, "", None, None, ""
+    z_type = str(zd.get("zone_type") or zd.get("type") or "").upper()
+    direction = str(zd.get("direction") or zd.get("arah") or "").upper()
+    if direction not in ("BUY", "SELL"):
+        if z_type == "DEMAND":
+            direction = "BUY"
+        elif z_type == "SUPPLY":
+            direction = "SELL"
+        else:
+            return False, "", None, None, ""
+
+    eff_spread = float(spread or 0.0)
+    if eff_spread <= 0 and isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and ask >= bid > 0:
+        eff_spread = round(float(ask) - float(bid), 2)
+
+    setup_inv = resolve_smc_setup_invalidation_price(zone_or_setup, frames=frames, spread=eff_spread)
+    if not (isinstance(setup_inv, (int, float)) and math.isfinite(setup_inv) and setup_inv > 0):
+        return False, "", None, None, ""
+
+    if direction == "BUY":
+        if isinstance(bid, (int, float)) and math.isfinite(bid) and bid > 0:
+            live_px, side = float(bid), "BID"
+        elif isinstance(current_price, (int, float)) and math.isfinite(current_price) and current_price > 0:
+            live_px, side = float(current_price), "PRICE"
+        else:
+            return False, "", None, setup_inv, ""
+        if live_px <= setup_inv:
+            rsn = f"{INVALIDATION_SETUP_SL_BREACHED} (BUY live {side} {live_px:.2f} <= SETUP_SL {setup_inv:.2f})"
+            return True, rsn, round(live_px, 2), setup_inv, side
+        return False, "", round(live_px, 2), setup_inv, side
+
+    if isinstance(ask, (int, float)) and math.isfinite(ask) and ask > 0:
+        live_px, side = float(ask), "ASK"
+    elif isinstance(current_price, (int, float)) and math.isfinite(current_price) and current_price > 0:
+        live_px, side = float(current_price), "PRICE"
+    else:
+        return False, "", None, setup_inv, ""
+    if live_px >= setup_inv:
+        rsn = f"{INVALIDATION_SETUP_SL_BREACHED} (SELL live {side} {live_px:.2f} >= SETUP_SL {setup_inv:.2f})"
+        return True, rsn, round(live_px, 2), setup_inv, side
+    return False, "", round(live_px, 2), setup_inv, side
+
+
+def resolve_analysis_direction(
+    ctx: Optional[Dict[str, Any]] = None,
+    decision: Optional[Dict[str, Any]] = None,
+    scan: Optional[Dict[str, Any]] = None,
+    snr_bias: Optional[Dict[str, Any]] = None,
+    frames: Optional[Dict[str, pd.DataFrame]] = None,
+    market_status: Optional[str] = "OPEN",
+    data_ok: bool = True,
+) -> str:
+    """
+    Arah analisis deterministik: saat MARKET OPEN dengan data valid WAJIB mengembalikan BUY atau SELL
+    tanpa memalsukan sinyal entry, SL, TP, atau confidence.
+    """
+    mkt = str(market_status or "OPEN").strip().upper()
+    if mkt in ("CLOSED", "MARKET_CLOSED", "DATA UNAVAILABLE", "UNAVAILABLE", "NO_DATA") or not data_ok:
+        return "N/A"
+    dec = decision if isinstance(decision, dict) else {}
+    sc = scan if isinstance(scan, dict) else {}
+    c = ctx if isinstance(ctx, dict) else (sc.get("htf_context") or dec.get("context") or {})
+    sb = snr_bias if isinstance(snr_bias, dict) else {}
+
+    # 1. Valid confirmed direction
+    if str(dec.get("status") or "").upper() == "VALID" and str(dec.get("direction") or "").upper() in ("BUY", "SELL"):
+        return str(dec["direction"]).upper()
+    if str(dec.get("signal") or "").upper() in ("BUY", "SELL"):
+        return str(dec["signal"]).upper()
+
+    # 2. HTF bias cascade (SMC)
+    for k in ("H4", "H1", "M30", "D1", "htf_bias", "h1_structure", "bias_utama"):
+        val = str(c.get(k) or "").upper()
+        if val == "BULLISH":
+            return "BUY"
+        if val == "BEARISH":
+            return "SELL"
+
+    # 3. SNR market bias cascade & weighted score
+    for k in ("overall_bias", "h4", "h1", "m30"):
+        val = str(sb.get(k) or "").upper()
+        if val == "BULLISH":
+            return "BUY"
+        if val == "BEARISH":
+            return "SELL"
+    per_tf = sb.get("per_timeframe") if isinstance(sb.get("per_timeframe"), dict) else {}
+    if per_tf:
+        w_score = 0.0
+        for tf_k, w in (("H4", 0.45), ("H1", 0.35), ("M30", 0.20)):
+            tf_sc = (per_tf.get(tf_k) or {}).get("score")
+            if isinstance(tf_sc, (int, float)) and math.isfinite(tf_sc):
+                w_score += float(tf_sc) * w
+        if abs(w_score) > 1e-9:
+            return "BUY" if w_score > 0 else "SELL"
+
+    # 4. Primary/active zone direction
+    for z_cand in (dec.get("zone"), dec.get("primary_zone"), dec.get("nearest_valid_zone")):
+        if isinstance(z_cand, dict):
+            zt = str(z_cand.get("zone_type") or z_cand.get("type") or "").upper()
+            if zt in ("DEMAND", "SUPPORT"):
+                return "BUY"
+            if zt in ("SUPPLY", "RESISTANCE"):
+                return "SELL"
+
+    # 5. Deterministic tie-breaker from OHLC / EMA when pure sideways
+    f_src = frames if isinstance(frames, dict) else (sc.get("snapshot") or {}).get("frames") if isinstance(sc.get("snapshot"), dict) else None
+    if isinstance(f_src, dict):
+        for tf_k in ("H4", "H1", "M30", "M5"):
+            df_t = f_src.get(tf_k)
+            if df_t is not None and len(df_t) >= 2 and "Close" in df_t.columns:
+                c_last = float(df_t["Close"].iloc[-1])
+                if "EMA50" in df_t.columns and math.isfinite(float(df_t["EMA50"].iloc[-1])):
+                    return "BUY" if c_last >= float(df_t["EMA50"].iloc[-1]) else "SELL"
+                o_last = float(df_t["Open"].iloc[-1]) if "Open" in df_t.columns else float(df_t["Close"].iloc[-2])
+                return "BUY" if c_last >= o_last else "SELL"
+    return "BUY"
 
 
 def evaluate_smc_zone_closed_invalidation(
@@ -2544,7 +2833,7 @@ def evaluate_smc_zone_closed_invalidation(
         b_close = float(closes.loc[first_idx])
         b_time = str(first_idx)
         cmp_op = "<" if z_type == "DEMAND" else ">"
-        rsn = f"INVALID — BROKEN (Close {origin_tf} {b_close:.2f} {cmp_op} batas invalidasi {inval:.2f})"
+        rsn = f"{INVALIDATION_ZONE_STRUCTURAL} (Close {origin_tf} {b_close:.2f} {cmp_op} batas invalidasi {inval:.2f})"
         return True, rsn, b_close, b_time, origin_tf
     return False, "", None, None, origin_tf
 
@@ -2572,6 +2861,8 @@ def is_zone_active_and_valid(
     if not isinstance(zd, dict):
         return False
     if not zd.get("is_valid", True) or zd.get("is_broken") is True:
+        return False
+    if str(zd.get("invalidation_type") or "").upper() in (INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL):
         return False
     rej = str(zd.get("rejection_reason", "")).lower()
     if any(k in rej for k in ("invalid", "broken", "expired", "dimitigasi", "mitigated", "terlalu lebar", "terlalu sempit")):
@@ -3930,12 +4221,41 @@ def prioritize_radar_zones(
 
         # Status pemantauan zona MT5:
         # RADAR, APPROACHING, ZONE_TOUCHED, MITIGATED, INVALIDATED, EXPIRED
-        closed_inv_p, _, _, _, _ = evaluate_smc_zone_closed_invalidation(zd, frames)
+        closed_inv_p, closed_rsn_p, _, _, _ = evaluate_smc_zone_closed_invalidation(zd, frames)
+        live_inv_p, live_rsn_p, live_px_p, live_inv_lvl_p, _ = evaluate_smc_setup_live_invalidation(
+            zd, current_price=current_price, bid=bid, ask=ask, frames=frames, market_status=market_status,
+        )
+        if live_inv_lvl_p and live_inv_lvl_p > 0:
+            zd["setup_invalidation_price"] = live_inv_lvl_p
         is_mkt_closed = str(market_status or "").upper() in ("CLOSED", "MARKET_CLOSED")
-        if not is_valid or not origin_ok or "invalid" in rejection.lower() or fresh == "INVALIDATED" or closed_inv_p or zd.get("is_broken") is True or str(zd.get("status") or "").upper() in ("INVALIDATED", "BROKEN"):
+        if (
+            not is_valid or not origin_ok or "invalid" in rejection.lower()
+            or fresh == "INVALIDATED" or closed_inv_p or live_inv_p
+            or zd.get("is_broken") is True
+            or str(zd.get("status") or "").upper() in ("INVALIDATED", "BROKEN")
+            or str(zd.get("invalidation_type") or "").upper() in (INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL)
+        ):
             zone_status = "INVALIDATED"
-            zd["is_broken"] = True
-            zd["invalid_label"] = "INVALID — BROKEN"
+            zd["is_valid"] = False
+            zd["freshness"] = "INVALIDATED"
+            zd["zone_relevance"] = "INVALID"
+            if closed_inv_p or zd.get("is_broken") is True or str(zd.get("invalidation_type") or "").upper() == INVALIDATION_ZONE_STRUCTURAL:
+                zd["is_broken"] = True
+                zd["invalidation_type"] = INVALIDATION_ZONE_STRUCTURAL
+                zd["invalid_label"] = INVALIDATION_ZONE_STRUCTURAL
+                if closed_rsn_p and not zd.get("rejection_reason"):
+                    zd["rejection_reason"] = closed_rsn_p
+            elif live_inv_p or str(zd.get("invalidation_type") or "").upper() == INVALIDATION_SETUP_SL_BREACHED:
+                zd["invalidation_type"] = INVALIDATION_SETUP_SL_BREACHED
+                zd["invalid_label"] = INVALIDATION_SETUP_SL_BREACHED
+                if live_rsn_p:
+                    zd["rejection_reason"] = live_rsn_p
+                if live_px_p is not None:
+                    zd["break_price"] = live_px_p
+            else:
+                zd["is_broken"] = True
+                zd["invalidation_type"] = zd.get("invalidation_type") or INVALIDATION_ZONE_STRUCTURAL
+                zd["invalid_label"] = zd["invalidation_type"]
         elif zd.get("touch_count", 0) > 2 or fresh == "MITIGATED" or "dimitigasi" in rejection.lower():
             zone_status = "MITIGATED"
         elif approach in ("TOUCHED", "ZONE_TOUCHED"):
@@ -4106,6 +4426,9 @@ def prioritize_radar_zones(
             is_zone_active_and_valid(z, current_price)
             and not z.get("is_broken")
             and str(z.get("status", "")).upper() not in ("INVALIDATED", "BROKEN", "EXPIRED", "MITIGATED")
+            and str(z.get("zone_relevance", "")).upper() != "FAR_REFERENCE"
+            and str(z.get("risk_tier", "")).upper() != "FAR_ZONE"
+            and not is_far_reference_zone(z, current_price=current_price, atr=atr_val)
         )
 
     def _primary_intraday_rank(z: Dict[str, Any]) -> Tuple:
@@ -4431,10 +4754,18 @@ def prioritize_radar_zones(
             dynamic_wait = f"WAIT: {primary_blocker}"
 
     # PENDING LIMIT BLOCKERS & CONFIRMED ENTRY BLOCKERS
-    if (htf_bias == "BULLISH" and h1_structure == "BEARISH") or (htf_bias == "BEARISH" and h1_structure == "BULLISH"):
+    htf_conflict_blk = (htf_bias == "BULLISH" and h1_structure == "BEARISH") or (htf_bias == "BEARISH" and h1_structure == "BULLISH")
+    if htf_conflict_blk:
         pending_blockers.append(f"Konflik struktur H4 ({htf_bias}) vs H1 ({h1_structure})")
+        confirmed_blockers.append(
+            f"[HTF_CONFLICT]: Konflik struktur H4 ({htf_bias}) vs H1 ({h1_structure}) — belum ada setup eligible sehingga trigger M5 tidak dijalankan"
+        )
     if m30_status in ("CONFLICT", "INVALID", "WEAK"):
         pending_blockers.append(f"Momentum M30 tidak mendukung pending ({m30_status})")
+        if not htf_conflict_blk:
+            confirmed_blockers.append(
+                f"[M30_BLOCKER]: Momentum/struktur M30 ({m30_status}) belum selaras dengan H4 ({htf_bias}) — trigger M5 tidak dijalankan"
+            )
 
     if eval_target:
         if eval_target.get("grade") not in ("A+", "A"):
@@ -4445,43 +4776,45 @@ def prioritize_radar_zones(
         if p_rsn and p_rsn not in pending_blockers and "memenuhi" not in str(p_rsn).lower():
             pending_blockers.append(p_rsn)
 
-        # Confirmed M5 blockers: Berurutan, tidak menampilkan sweep/trigger gagal jika zone belum tersentuh
-        st_zt = (m5_stages or {}).get("zone_touch", {}).get("status")
-        st_sw = (m5_stages or {}).get("liquidity_sweep", {}).get("status")
-        st_tr = (m5_stages or {}).get("structure_trigger", {}).get("status")
-        st_dp = (m5_stages or {}).get("displacement", {}).get("status")
-        st_rr = (m5_stages or {}).get("risk_reward", {}).get("status")
-        st_ev = (m5_stages or {}).get("entry_validation", {}).get("status")
-        rr_m_blk = str((m5_stages or {}).get("risk_reward", {}).get("msg") or "").strip()
-        ev_m_blk = str((m5_stages or {}).get("entry_validation", {}).get("msg") or "").strip()
-        blk_m = rr_m_blk or ev_m_blk
+        # Confirmed M5 blockers: Berurutan, tidak menampilkan sweep/trigger gagal jika zone belum tersentuh atau HTF/M30 konflik
+        if not htf_conflict_blk and m30_status not in ("CONFLICT", "INVALID", "WEAK"):
+            st_zt = (m5_stages or {}).get("zone_touch", {}).get("status")
+            st_sw = (m5_stages or {}).get("liquidity_sweep", {}).get("status")
+            st_tr = (m5_stages or {}).get("structure_trigger", {}).get("status")
+            st_dp = (m5_stages or {}).get("displacement", {}).get("status")
+            st_rr = (m5_stages or {}).get("risk_reward", {}).get("status")
+            st_ev = (m5_stages or {}).get("entry_validation", {}).get("status")
+            rr_m_blk = str((m5_stages or {}).get("risk_reward", {}).get("msg") or "").strip()
+            ev_m_blk = str((m5_stages or {}).get("entry_validation", {}).get("msg") or "").strip()
+            blk_m = rr_m_blk or ev_m_blk
 
-        is_touched = (eval_target.get("approach") in ("TOUCHED", "ZONE_TOUCHED") or st_zt in ("CONFIRMED", "PASS", "PASSED"))
-        if not is_touched:
-            confirmed_blockers.append(f"[ZONE_TOUCH]: Harga belum mencapai atau menyentuh {eval_target['zone_type'].capitalize()} ({eval_target['price_low']:.2f}-{eval_target['price_high']:.2f}, jarak {eval_target['distance']:.2f} USD) — konfirmasi M5 menunggu zone touch")
-        else:
-            if st_sw not in ("CONFIRMED", "OPTIONAL_OK", "PASS", "PASSED"):
-                want_sw = "Buy-Side Liquidity (EQH/Swing High)" if eval_target["zone_type"] == "SUPPLY" else "Sell-Side Liquidity (EQL/Swing Low)"
-                sw_m = (m5_stages or {}).get("liquidity_sweep", {}).get("msg", "")
-                if "jauh" in str(sw_m).lower():
-                    confirmed_blockers.append("[LIQUIDITY_SWEEP]: Sweep likuiditas M5 terjadi terlalu jauh dari area zona")
-                else:
-                    confirmed_blockers.append(f"[LIQUIDITY_SWEEP]: Belum ada validasi sweep {want_sw} M5 di area zona")
-            elif st_tr not in ("CONFIRMED", "PASS", "PASSED"):
-                want_tr = "CHoCH/BOS/CISD bearish" if eval_target["zone_type"] == "SUPPLY" else "CHoCH/BOS/CISD bullish"
-                confirmed_blockers.append(f"[STRUCTURE_TRIGGER]: Belum ada konfirmasi perubahan struktur {want_tr} M5 setelah sweep")
-            elif st_dp not in ("CONFIRMED", "PASS", "PASSED"):
-                dp_m = (m5_stages or {}).get("displacement", {}).get("msg", "Displacement lemah")
-                confirmed_blockers.append(f"[DISPLACEMENT]: Belum ada konfirmasi dorongan displacement momentum M5 searah ({dp_m})")
-            elif st_rr in ("FAILED", "FAIL", "WAIT") or st_ev in ("FAILED", "FAIL", "INVALID", "WAIT"):
-                confirmed_blockers.append(
-                    f"[RISK_REWARD]: {blk_m}"
-                    if blk_m
-                    else "[RISK_REWARD]: Kalkulasi Risk/Reward belum mencapai minimum 1:1.5"
-                )
+            is_touched = (eval_target.get("approach") in ("TOUCHED", "ZONE_TOUCHED") or st_zt in ("CONFIRMED", "PASS", "PASSED"))
+            if not is_touched:
+                confirmed_blockers.append(f"[ZONE_TOUCH]: Harga belum mencapai atau menyentuh {eval_target['zone_type'].capitalize()} ({eval_target['price_low']:.2f}-{eval_target['price_high']:.2f}, jarak {eval_target['distance']:.2f} USD) — konfirmasi M5 menunggu zone touch")
+            else:
+                if st_sw not in ("CONFIRMED", "OPTIONAL_OK", "PASS", "PASSED"):
+                    want_sw = "Buy-Side Liquidity (EQH/Swing High)" if eval_target["zone_type"] == "SUPPLY" else "Sell-Side Liquidity (EQL/Swing Low)"
+                    sw_m = (m5_stages or {}).get("liquidity_sweep", {}).get("msg", "")
+                    if "jauh" in str(sw_m).lower():
+                        confirmed_blockers.append("[LIQUIDITY_SWEEP]: Sweep likuiditas M5 terjadi terlalu jauh dari area zona")
+                    else:
+                        confirmed_blockers.append(f"[LIQUIDITY_SWEEP]: Belum ada validasi sweep {want_sw} M5 di area zona")
+                elif st_tr not in ("CONFIRMED", "PASS", "PASSED"):
+                    want_tr = "CHoCH/BOS/CISD bearish" if eval_target["zone_type"] == "SUPPLY" else "CHoCH/BOS/CISD bullish"
+                    confirmed_blockers.append(f"[STRUCTURE_TRIGGER]: Belum ada konfirmasi perubahan struktur {want_tr} M5 setelah sweep")
+                elif st_dp not in ("CONFIRMED", "PASS", "PASSED"):
+                    dp_m = (m5_stages or {}).get("displacement", {}).get("msg", "Displacement lemah")
+                    confirmed_blockers.append(f"[DISPLACEMENT]: Belum ada konfirmasi dorongan displacement momentum M5 searah ({dp_m})")
+                elif st_rr in ("FAILED", "FAIL", "WAIT") or st_ev in ("FAILED", "FAIL", "INVALID", "WAIT"):
+                    confirmed_blockers.append(
+                        f"[RISK_REWARD]: {blk_m}"
+                        if blk_m
+                        else "[RISK_REWARD]: Kalkulasi Risk/Reward belum mencapai minimum 1:1.5"
+                    )
     else:
         pending_blockers.append(f"Tidak ada zona Grade A yang selaras dengan bias HTF ({htf_bias})")
-        confirmed_blockers.append(f"Tidak ada zona aktif yang selaras dengan arah bias HTF ({htf_bias})")
+        if not htf_conflict_blk and m30_status not in ("CONFLICT", "INVALID", "WEAK"):
+            confirmed_blockers.append(f"Tidak ada zona aktif yang selaras dengan arah bias HTF ({htf_bias}) — trigger M5 tidak dijalankan")
 
     if eval_target and eval_target.get("approach") == "FAR":
         sec_warnings.append(f"Zona prioritas berjarak jauh ({eval_target['distance']:.2f} USD / {eval_target.get('distance_atr_ratio', 0.0)}x ATR).")
@@ -4572,6 +4905,9 @@ def prioritize_radar_zones(
             return False
         st_u = str(z_cand.get("lifecycle_status") or z_cand.get("status") or "").upper()
         fr_u = str(z_cand.get("freshness") or "").upper()
+        inv_t = str(z_cand.get("invalidation_type") or z_cand.get("invalid_label") or "").upper()
+        if inv_t in (INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL):
+            return True
         if not (z_cand.get("is_broken") is True or st_u in ("INVALIDATED", "BROKEN") or fr_u == "INVALIDATED"):
             return False
         if st_u in ("REJECTED", "MITIGATED", "EXPIRED"):
@@ -5259,28 +5595,66 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
 
             persisted_inv, persisted_rec = _scan_trk.is_zone_invalidated(z) if _scan_trk else (False, None)
             closed_inv, closed_rsn, closed_px, closed_tm, closed_tf = evaluate_smc_zone_closed_invalidation(z, frames)
-            live_valid = (not persisted_inv) and (not closed_inv) and is_zone_active_and_valid(z, snapshot_price, frames=frames)
+            eff_spr_scan = round(float(ask) - float(bid), 2) if (bid and ask and ask >= bid) else 0.0
+            live_inv, live_rsn, live_px, live_inv_lvl, _ = evaluate_smc_setup_live_invalidation(
+                z, current_price=snapshot_price, bid=bid, ask=ask,
+                frames=frames, spread=eff_spr_scan, market_status=eff_mkt_status,
+            )
+            if live_inv_lvl and live_inv_lvl > 0:
+                z.setup_invalidation_price = live_inv_lvl
+            live_valid = (not persisted_inv) and (not closed_inv) and (not live_inv) and is_zone_active_and_valid(z, snapshot_price, frames=frames)
             if not live_valid:
                 z.is_valid = False
-                z.is_broken = True
                 z.freshness = "INVALIDATED"
                 z.status = "INVALIDATED"
                 z.zone_relevance = "INVALID"
-                z.invalid_label = "INVALID — BROKEN"
+                pers_type = str((persisted_rec or {}).get("invalidation_type") or "").upper() if isinstance(persisted_rec, dict) else ""
+                if closed_inv or pers_type == INVALIDATION_ZONE_STRUCTURAL:
+                    inv_kind = INVALIDATION_ZONE_STRUCTURAL
+                    z.is_broken = True
+                elif live_inv or pers_type == INVALIDATION_SETUP_SL_BREACHED:
+                    inv_kind = INVALIDATION_SETUP_SL_BREACHED
+                    z.is_broken = False
+                else:
+                    inv_kind = INVALIDATION_ZONE_STRUCTURAL
+                    z.is_broken = True
+                z.invalidation_type = inv_kind
+                z.invalid_label = inv_kind
+                if not z.original_grade and z.grade and str(z.grade).upper() != "REJECTED":
+                    z.original_grade = str(z.grade)
                 z.grade = "REJECTED"
+                _inv_lvl_msg = (
+                    f"SETUP_SL {z.setup_invalidation_price:.2f}"
+                    if (inv_kind == INVALIDATION_SETUP_SL_BREACHED and z.setup_invalidation_price > 0)
+                    else f"STRUCTURE_INV {z.invalidation_price:.2f}"
+                )
                 z.rejection_reason = (
                     closed_rsn
+                    or live_rsn
                     or (persisted_rec.get("reason") if isinstance(persisted_rec, dict) and persisted_rec.get("reason") else "")
-                    or f"INVALID — BROKEN (Close {z.timeframe} menembus invalidation {z.invalidation_price:.2f})"
+                    or f"{inv_kind} ({z.timeframe} {_inv_lvl_msg})"
                 )
                 z.zone_relevance_reason = z.rejection_reason
                 z.audit.append(z.rejection_reason)
-                if _scan_trk and closed_inv and not persisted_inv:
-                    _scan_trk.mark_invalidated(z, z.rejection_reason, break_close=closed_px, break_time=closed_tm, origin_tf=closed_tf)
+                if _scan_trk and (closed_inv or live_inv) and not persisted_inv:
+                    _scan_trk.mark_invalidated(
+                        z,
+                        z.rejection_reason,
+                        break_close=closed_px if closed_inv else None,
+                        break_time=closed_tm if closed_inv else snapshot_time,
+                        origin_tf=closed_tf if closed_inv else z.timeframe,
+                        invalidation_type=inv_kind,
+                        break_price=live_px if (live_inv and not closed_inv) else closed_px,
+                    )
                     _newly_invalidated = True
                 total_invalidated += 1
                 rej_desc = z.rejection_reason
-                rejection_reasons_counter["INVALID — BROKEN (Candle closed menembus batas invalidasi)"] = rejection_reasons_counter.get("INVALID — BROKEN (Candle closed menembus batas invalidasi)", 0) + 1
+                rej_bucket = (
+                    f"{INVALIDATION_ZONE_STRUCTURAL} (Candle closed menembus batas invalidasi)"
+                    if inv_kind == INVALIDATION_ZONE_STRUCTURAL
+                    else f"{INVALIDATION_SETUP_SL_BREACHED} (Live price menembus batas SL setup)"
+                )
+                rejection_reasons_counter[rej_bucket] = rejection_reasons_counter.get(rej_bucket, 0) + 1
                 rejected.append(z)
             elif z.is_valid and z.score >= SCORE_MIN_ACTIVE:
                 total_scored_pass += 1
@@ -5366,18 +5740,44 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
 
             persisted_inv_b, persisted_rec_b = _scan_trk.is_zone_invalidated(z) if _scan_trk else (False, None)
             closed_inv_b, closed_rsn_b, closed_px_b, closed_tm_b, closed_tf_b = evaluate_smc_zone_closed_invalidation(z, frames)
+            eff_spr_b = round(float(ask) - float(bid), 2) if (bid and ask and ask >= bid) else 0.0
+            live_inv_b, live_rsn_b, live_px_b, live_inv_lvl_b, _ = evaluate_smc_setup_live_invalidation(
+                z, current_price=snapshot_price, bid=bid, ask=ask,
+                frames=frames, spread=eff_spr_b, market_status=eff_mkt_status,
+            )
+            if live_inv_lvl_b and live_inv_lvl_b > 0:
+                z.setup_invalidation_price = live_inv_lvl_b
             _non_break_reasons_b = [
                 rp for rp in (rej.split("; ") if rej else [])
-                if rp and "INVALID — BROKEN" not in rp and "Zona invalid" not in rp
+                if rp and "INVALID — BROKEN" not in rp and INVALIDATION_ZONE_STRUCTURAL not in rp and INVALIDATION_SETUP_SL_BREACHED not in rp and "Zona invalid" not in rp
             ]
-            if "Zona invalid" in rej or "INVALID — BROKEN" in rej or z.is_broken or persisted_inv_b or closed_inv_b:
+            if "Zona invalid" in rej or "INVALID — BROKEN" in rej or INVALIDATION_ZONE_STRUCTURAL in rej or z.is_broken or persisted_inv_b or closed_inv_b or live_inv_b:
                 total_invalidated += 1
                 z.status = "INVALIDATED" if not _non_break_reasons_b else "REJECTED"
                 z.freshness = "INVALIDATED"
-                z.is_broken = True
-                z.invalid_label = "INVALID — BROKEN"
+                if closed_inv_b or z.is_broken or "Zona invalid" in rej or INVALIDATION_ZONE_STRUCTURAL in rej:
+                    inv_kind_b = INVALIDATION_ZONE_STRUCTURAL
+                    z.is_broken = True
+                elif live_inv_b:
+                    inv_kind_b = INVALIDATION_SETUP_SL_BREACHED
+                    z.is_broken = False
+                else:
+                    inv_kind_b = str((persisted_rec_b or {}).get("invalidation_type") or INVALIDATION_ZONE_STRUCTURAL)
+                    z.is_broken = (inv_kind_b == INVALIDATION_ZONE_STRUCTURAL)
+                z.invalidation_type = inv_kind_b
+                z.invalid_label = inv_kind_b
+                if live_inv_b and not closed_inv_b and live_rsn_b:
+                    z.rejection_reason = live_rsn_b
                 if _scan_trk and not persisted_inv_b and not _non_break_reasons_b:
-                    _scan_trk.mark_invalidated(z, closed_rsn_b or rej, break_close=closed_px_b, break_time=closed_tm_b, origin_tf=closed_tf_b or z.timeframe)
+                    _scan_trk.mark_invalidated(
+                        z,
+                        closed_rsn_b or live_rsn_b or rej,
+                        break_close=closed_px_b if closed_inv_b else None,
+                        break_time=closed_tm_b if closed_inv_b else snapshot_time,
+                        origin_tf=closed_tf_b or z.timeframe,
+                        invalidation_type=inv_kind_b,
+                        break_price=live_px_b if (live_inv_b and not closed_inv_b) else closed_px_b,
+                    )
                     _newly_invalidated = True
             if "Zona sudah dimitigasi" in rej:
                 total_mitigated += 1
@@ -5385,8 +5785,13 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
                 total_expired += 1
                 z.status = "EXPIRED"
 
-            # Kategori A: Radar Zone untuk zona yang utuh secara struktural (TIDAK pernah memasukkan zona INVALID — BROKEN)
-            is_inval = (z.freshness == "INVALIDATED" or z.is_broken or "Zona invalid" in rej or "INVALID — BROKEN" in rej or persisted_inv_b or closed_inv_b)
+            # Kategori A: Radar Zone untuk zona yang utuh secara struktural (TIDAK pernah memasukkan zona INVALID)
+            is_inval = (
+                z.freshness == "INVALIDATED" or z.is_broken or "Zona invalid" in rej
+                or "INVALID — BROKEN" in rej or INVALIDATION_ZONE_STRUCTURAL in rej
+                or INVALIDATION_SETUP_SL_BREACHED in rej
+                or persisted_inv_b or closed_inv_b or live_inv_b
+            )
             is_mit = (z.touch_count > MAX_TOUCH_COUNT or "Zona sudah dimitigasi" in rej)
             origin_ok = z.origin_bos.get("origin_valid", True)
             is_struct_valid = is_zone_active_and_valid(z, snapshot_price, frames=frames)
@@ -6077,7 +6482,9 @@ def _structural_targets(
 def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread: float = 0.0,
                  news_blackout=False, htf_frames: Optional[Dict[str, pd.DataFrame]] = None,
                  require_sweep: Optional[bool] = None, server_time: Any = None,
-                 snr_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                 snr_context: Optional[Dict[str, Any]] = None,
+                 bid: Optional[float] = None, ask: Optional[float] = None,
+                 market_status: Optional[str] = None) -> Dict[str, Any]:
     """Hasil terstruktur: status VALID/WAIT/INVALID, reasons, stages, plan.
     Urutan validasi ketat konsisten untuk semua grade zona:
       1. Validasi zona & integritas data candle close selesai
@@ -6125,14 +6532,26 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
     closed_inv_ec, closed_rsn_ec, _, _, _ = evaluate_smc_zone_closed_invalidation(zone, htf_frames)
     if closed_inv_ec or getattr(zone, "is_broken", False) or str(getattr(zone, "status", "")).upper() in ("INVALIDATED", "BROKEN"):
         res["status"] = "INVALID"
-        msg = closed_rsn_ec or f"INVALID — BROKEN: Zona {zone.zone_id} telah ditembus candle close"
+        res["invalidation_type"] = INVALIDATION_ZONE_STRUCTURAL
+        msg = closed_rsn_ec or f"{INVALIDATION_ZONE_STRUCTURAL}: Zona {zone.zone_id} telah ditembus candle close"
         stages["zone_validation"] = {"status": "INVALID", "msg": msg}
         stages["entry_validation"] = {"status": "INVALID", "msg": msg}
         W.append(msg)
         return res
+    live_inv_ec, live_rsn_ec, _, _, _ = evaluate_smc_setup_live_invalidation(
+        zone, current_price=price, bid=bid, ask=ask,
+        frames=htf_frames, spread=float(spread or 0.0), market_status=market_status,
+    )
+    if live_inv_ec:
+        res["status"] = "INVALID"
+        res["invalidation_type"] = INVALIDATION_SETUP_SL_BREACHED
+        stages["zone_validation"] = {"status": "INVALID", "msg": live_rsn_ec}
+        stages["entry_validation"] = {"status": "INVALID", "msg": live_rsn_ec}
+        W.append(live_rsn_ec)
+        return res
     if (demand and price < zone.invalidation_price) or ((not demand) and price > zone.invalidation_price):
-        # Wick / harga intrabar melewati batas invalidasi tanpa candle closed TF asal -> WAIT (jangan invalidasi prematur)
-        msg = f"Harga intrabar ({price:.2f}) melewati batas invalidasi {zone.invalidation_price:.2f}; menunggu close candle TF asal"
+        # Wick / harga intrabar melewati batas distal namun belum tembus SL buffer & tanpa candle closed TF asal -> WAIT
+        msg = f"Harga intrabar ({price:.2f}) melewati batas distal {zone.invalidation_price:.2f} (wick belum membatalkan struktur); menunggu close candle TF asal"
         stages["zone_validation"] = {"status": "WAIT", "msg": msg}
         stages["entry_validation"] = {"status": "WAIT", "msg": msg}
         W.append(msg)
@@ -6774,18 +7193,36 @@ def plan_pending_order(
         res["rejection_reason"] = "Harga saat ini tidak valid"
         return res
 
-    # 2. Invalidation Level Check (Hanya candle closed pada timeframe asal + status invalid tersimpan; wick tidak cukup)
+    # 2. Invalidation Level Check (Closed candle TF asal = ZONE_STRUCTURALLY_INVALID; Live Bid/Ask tembus SL = SETUP_INVALID_SL_BREACHED)
     inval = res["invalidation_price"]
     trk_pend = get_zone_tracker(auto_save=False)
     pers_inv_p, pers_rec_p = trk_pend.is_zone_invalidated(zone) if trk_pend else (False, None)
     closed_inv_p, closed_rsn_p, _, _, _ = evaluate_smc_zone_closed_invalidation(zone, frames)
-    if pers_inv_p or closed_inv_p or getattr(zone, "is_broken", False):
+    eff_spr_p = round(float(ask) - float(bid), 2) if (bid and ask and ask >= bid) else 0.0
+    live_inv_p, live_rsn_p, live_px_p, live_inv_lvl_p, _ = evaluate_smc_setup_live_invalidation(
+        zone, current_price=current_price, bid=bid, ask=ask,
+        frames=frames, spread=eff_spr_p, market_status=("CLOSED" if premarket else "OPEN"),
+    )
+    if live_inv_lvl_p and live_inv_lvl_p > 0:
+        res["setup_invalidation_price"] = live_inv_lvl_p
+    if pers_inv_p or closed_inv_p or live_inv_p or getattr(zone, "is_broken", False):
+        inv_kind_p = (
+            INVALIDATION_ZONE_STRUCTURAL
+            if (closed_inv_p or getattr(zone, "is_broken", False))
+            else (
+                INVALIDATION_SETUP_SL_BREACHED
+                if live_inv_p
+                else str((pers_rec_p or {}).get("invalidation_type") or INVALIDATION_ZONE_STRUCTURAL)
+            )
+        )
         res["status"] = "INVALID"
         res["early_pending_status"] = "INVALID"
+        res["invalidation_type"] = inv_kind_p
         res["rejection_reason"] = (
             closed_rsn_p
+            or live_rsn_p
             or (pers_rec_p.get("reason") if isinstance(pers_rec_p, dict) and pers_rec_p.get("reason") else "")
-            or f"INVALID — BROKEN: Zona {res['zone_id']} telah menembus batas invalidasi ({inval:.2f})"
+            or f"{inv_kind_p}: Zona {res['zone_id']} telah menembus batas invalidasi ({inval:.2f})"
         )
         return res
 
@@ -7131,6 +7568,12 @@ def detect_early_setups(
     cands = []
     far_skipped_reasons = []
     for zd in raw_cands:
+        live_inv_e, _, _, _, _ = evaluate_smc_setup_live_invalidation(
+            zd, current_price=float(current_price), bid=scan.get("bid"), ask=scan.get("ask"),
+            frames=frames, market_status=scan.get("market_status"),
+        )
+        if live_inv_e:
+            continue
         rel_e = classify_zone_relevance(
             zd, float(current_price), atr=atr_early,
             htf_bias=h4_bias, h1_structure=h1_struct, m30_status=m30_status,
@@ -7228,18 +7671,45 @@ class ZoneTracker:
     def mark_invalidated(
         self,
         zone: Union[Zone, Dict[str, Any]],
-        reason: str = "INVALID — BROKEN",
+        reason: str = INVALIDATION_ZONE_STRUCTURAL,
         break_close: Optional[float] = None,
         break_time: Optional[str] = None,
         origin_tf: Optional[str] = None,
+        invalidation_type: str = INVALIDATION_ZONE_STRUCTURAL,
+        break_price: Optional[float] = None,
     ) -> None:
-        """Simpan status INVALID — BROKEN secara permanen agar zona lama tidak muncul kembali pada scan berikutnya."""
+        """Simpan status invalidasi secara permanen agar zona/setup lama tidak muncul kembali tanpa setup/zone ID baru."""
         zd = zone.to_dict() if hasattr(zone, "to_dict") else (zone if isinstance(zone, dict) else {})
         if not zd:
             return
         inv_key = _smc_zone_invalid_key(zd)
         z_id = str(zd.get("zone_id") or inv_key).strip()
+        inv_type_u = str(invalidation_type or INVALIDATION_ZONE_STRUCTURAL).upper()
+        if inv_type_u not in (INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL):
+            inv_type_u = INVALIDATION_ZONE_STRUCTURAL
         now_str = get_current_wib().strftime("%Y-%m-%d %H:%M:%S WIB")
+        struct_inv_px = float(
+            zd.get("structure_invalidation")
+            or zd.get("structural_invalidation")
+            or zd.get("invalidation_price")
+            or 0.0
+        )
+        setup_inv_px = float(
+            zd.get("setup_sl")
+            or zd.get("setup_invalidation_price")
+            or zd.get("sl")
+            or 0.0
+        )
+        orig_grade = str(zd.get("original_grade") or "").strip()
+        raw_grade = str(zd.get("grade") or "").strip()
+        saved_grade = orig_grade if orig_grade else (raw_grade if raw_grade.upper() != "REJECTED" else "")
+        saved_score = float(zd.get("score") or 0.0) if zd.get("score") is not None else None
+        origin_reason_txt = str(zd.get("origin_reason") or "").strip()
+        if not origin_reason_txt:
+            try:
+                origin_reason_txt = build_smc_zone_reason(zd)
+            except Exception:
+                origin_reason_txt = ""
         rec_inv = {
             "zone_id": z_id,
             "key": inv_key,
@@ -7248,18 +7718,28 @@ class ZoneTracker:
             "zone_type": str(zd.get("zone_type") or "").upper(),
             "price_low": float(zd.get("price_low", zd.get("low", 0.0)) or 0.0),
             "price_high": float(zd.get("price_high", zd.get("high", 0.0)) or 0.0),
-            "invalidation_price": float(zd.get("invalidation_price") or 0.0),
+            "invalidation_price": struct_inv_px,
+            "structure_invalidation": struct_inv_px,
+            "setup_invalidation_price": setup_inv_px,
+            "setup_sl": setup_inv_px,
+            "grade": saved_grade,
+            "original_grade": saved_grade,
+            "score": saved_score,
+            "origin_reason": origin_reason_txt,
             "status": "INVALIDATED",
-            "invalid_label": "INVALID — BROKEN",
-            "is_broken": True,
-            "reason": str(reason or "INVALID — BROKEN"),
+            "invalidation_type": inv_type_u,
+            "invalid_label": inv_type_u,
+            "is_broken": (inv_type_u == INVALIDATION_ZONE_STRUCTURAL),
+            "reason": str(reason or inv_type_u),
             "break_close": float(break_close) if break_close is not None else None,
+            "break_price": float(break_price) if break_price is not None else (float(break_close) if break_close is not None else None),
             "break_time": str(break_time) if break_time else None,
             "invalidated_at": now_str,
         }
         geo_key = _smc_zone_geo_key(zd)
         rec_inv["geo_key"] = geo_key
-        self.invalidated_zones[geo_key] = rec_inv
+        if inv_type_u == INVALIDATION_ZONE_STRUCTURAL:
+            self.invalidated_zones[geo_key] = rec_inv
         self.invalidated_zones[inv_key] = rec_inv
         if z_id and z_id != inv_key:
             self.invalidated_zones[z_id] = rec_inv
@@ -7269,8 +7749,9 @@ class ZoneTracker:
             tr = self.tracked_zones[z_id]
             tr["status"] = "INVALIDATED"
             tr["lifecycle_status"] = "INVALIDATED"
-            tr["invalid_label"] = "INVALID — BROKEN"
-            tr["is_broken"] = True
+            tr["invalidation_type"] = inv_type_u
+            tr["invalid_label"] = inv_type_u
+            tr["is_broken"] = (inv_type_u == INVALIDATION_ZONE_STRUCTURAL)
             tr["pending_plan"] = None
             tr["rejection_reason"] = rec_inv["reason"]
             tr["last_updated"] = now_str
@@ -7317,7 +7798,7 @@ class ZoneTracker:
                     continue
                 return True, rec_src
         tr = self.tracked_zones.get(z_id) if z_id else None
-        if isinstance(tr, dict) and tr.get("is_broken") is True:
+        if isinstance(tr, dict) and (tr.get("is_broken") is True or str(tr.get("invalidation_type") or "").upper() in (INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL)):
             if _is_breach_invalidation_valid(zd, tr):
                 return True, tr
         return False, None
@@ -7331,6 +7812,10 @@ class ZoneTracker:
         m30_status: Optional[str] = None,
         server_time: Any = None,
         conservative_dec: Optional[Dict[str, Any]] = None,
+        bid: Optional[float] = None,
+        ask: Optional[float] = None,
+        spread: float = 0.0,
+        market_status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Perbarui siklus hidup zona:
@@ -7459,26 +7944,52 @@ class ZoneTracker:
             if curr_st in ("EXPIRED", "INVALIDATED"):
                 continue
 
-            # B. Cek Invalidation Level (HANYA candle closed pada timeframe asal; wick & harga menjauh tidak membatalkan zona!)
-            # Konflik bias H4 / momentum M30 hanya membatalkan pending plan sementara, TIDAK membuang zona struktural valid.
+            # B. Cek Invalidation Level:
+            # 1) Struktur zona: closed candle TF asal -> ZONE_STRUCTURALLY_INVALID (wick tidak membatalkan struktur)
+            # 2) Setup aktif: live Bid/Ask tembus SL/invalidasi setup -> SETUP_INVALID_SL_BREACHED
             inv_reason = None
+            inv_kind_t = ""
             is_price_broken = False
-            b_close_val, b_time_val, b_tf_val = None, None, None
+            b_close_val, b_time_val, b_tf_val, b_px_val = None, None, None, None
             if isinstance(frames, dict):
                 is_price_broken, closed_rsn_t, b_close_val, b_time_val, b_tf_val = evaluate_smc_zone_closed_invalidation(rec, frames)
                 if is_price_broken:
                     inv_reason = closed_rsn_t
+                    inv_kind_t = INVALIDATION_ZONE_STRUCTURAL
+                    b_px_val = b_close_val
+
+            if not is_price_broken:
+                live_inv_t, live_rsn_t, live_px_t, live_inv_lvl_t, _ = evaluate_smc_setup_live_invalidation(
+                    rec, current_price=current_price, bid=bid, ask=ask,
+                    frames=frames, spread=spread, market_status=market_status,
+                )
+                if live_inv_lvl_t and live_inv_lvl_t > 0:
+                    rec["setup_invalidation_price"] = live_inv_lvl_t
+                if live_inv_t:
+                    is_price_broken = True
+                    inv_reason = live_rsn_t
+                    inv_kind_t = INVALIDATION_SETUP_SL_BREACHED
+                    b_px_val = live_px_t
 
             if is_price_broken and inv_reason:
                 rec["status"] = "INVALIDATED"
                 rec["lifecycle_status"] = "INVALIDATED"
                 rec["pending_plan"] = None
                 rec["rejection_reason"] = inv_reason
-                rec["is_broken"] = True
-                rec["invalid_label"] = "INVALID — BROKEN"
-                self.mark_invalidated(rec, inv_reason, break_close=b_close_val, break_time=b_time_val, origin_tf=b_tf_val)
+                rec["invalidation_type"] = inv_kind_t
+                rec["is_broken"] = (inv_kind_t == INVALIDATION_ZONE_STRUCTURAL)
+                rec["invalid_label"] = inv_kind_t
+                self.mark_invalidated(
+                    rec,
+                    inv_reason,
+                    break_close=b_close_val,
+                    break_time=b_time_val or now_str,
+                    origin_tf=b_tf_val or rec.get("timeframe"),
+                    invalidation_type=inv_kind_t,
+                    break_price=b_px_val,
+                )
                 rec["history"].append({"status": "INVALIDATED", "time": now_str, "reason": inv_reason})
-                msg = f"[ALERT] Zona {z_id} INVALID — BROKEN: {inv_reason}"
+                msg = f"[ALERT] Zona {z_id} {inv_kind_t}: {inv_reason}"
                 new_alerts.append({"type": "INVALIDATED", "zone_id": z_id, "msg": msg, "time": now_str})
                 continue
 
@@ -8148,6 +8659,429 @@ def _provisional_zone_plans(dec, price, frames, h4_bias, m30_status, server_time
     return plans
 
 
+def generate_smc_trade_plan(
+    zone_dict: Dict[str, Any],
+    price: float,
+    frames: Optional[Dict[str, pd.DataFrame]] = None,
+    *,
+    dec: Optional[Dict[str, Any]] = None,
+    scan: Optional[Dict[str, Any]] = None,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+    spread: float = 0.0,
+    opposing_zones: Optional[List[Any]] = None,
+    snr_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Trade Plan Generator deterministik untuk satu zona SMC ACTIVE/RADAR.
+    Mendelegasikan ke generator bersama `build_shared_trade_plan` agar PLANNED_ENTRY, SetupSL,
+    TP1, TP2, dan RR stabil per Zone ID + setup_version serta terpisah dari LIVE_ENTRY/Market RR.
+    """
+    from modules.utils import build_shared_trade_plan
+
+    zd = zone_dict if isinstance(zone_dict, dict) else (zone_dict.to_dict() if hasattr(zone_dict, "to_dict") else {})
+    zid = str(zd.get("zone_id") or "").strip()
+    tf = str(zd.get("timeframe") or "H1").strip().upper()
+    z_type = str(zd.get("zone_type") or zd.get("type") or "").strip().upper()
+    direction = "BUY" if z_type == "DEMAND" else ("SELL" if z_type == "SUPPLY" else "NONE")
+    grd = str(zd.get("original_grade") or zd.get("grade") or "N/A").strip()
+    sc = float(zd.get("score") or 0.0) if zd.get("score") is not None else 0.0
+    lo = float(zd.get("price_low", zd.get("low", 0.0)) or 0.0)
+    hi = float(zd.get("price_high", zd.get("high", 0.0)) or 0.0)
+    if lo > hi > 0:
+        lo, hi = hi, lo
+
+    d_obj = dec if isinstance(dec, dict) else {}
+    s_obj = scan if isinstance(scan, dict) else {}
+    ctx = d_obj.get("context") or s_obj.get("htf_context") or {}
+    h4_bias = str(ctx.get("H4") or ctx.get("htf_bias") or "NETRAL").upper()
+    h1_bias = str(ctx.get("H1") or ctx.get("h1_structure") or "NETRAL").upper()
+    stages = d_obj.get("stages") or {}
+    m30_st = str((stages.get("M30") or {}).get("status") or ctx.get("m30_status") or "").upper()
+    mkt_st = str(d_obj.get("market_status") or s_obj.get("market_status") or "OPEN").upper()
+    is_closed = mkt_st in ("CLOSED", "MARKET_CLOSED") or str(d_obj.get("snapshot_status") or "").upper() == "MARKET_CLOSED"
+
+    try:
+        why_txt = build_smc_zone_reason(zd, h4_bias=h4_bias)
+    except Exception:
+        why_txt = ""
+
+    struct_inv = resolve_smc_structure_invalidation_price(zd)
+    if struct_inv <= 0 and lo > 0:
+        struct_inv = lo if direction == "BUY" else (hi if direction == "SELL" else 0.0)
+
+    z_life = str(zd.get("lifecycle_status") or zd.get("status") or "").upper()
+    z_fr = str(zd.get("freshness") or "FRESH").upper()
+    is_expired_z = bool(zd.get("is_expired") or z_life == "EXPIRED" or z_fr == "EXPIRED")
+    is_invalid_z = bool(
+        (not is_expired_z) and (
+            zd.get("is_valid") is False
+            or zd.get("is_broken") is True
+            or z_life in ("INVALIDATED", "BROKEN", "MITIGATED", "REJECTED")
+            or z_fr in ("INVALIDATED", "BROKEN", "MITIGATED")
+            or str(zd.get("grade") or "").upper() == "REJECTED"
+        )
+    )
+    is_far_z = bool(
+        str(zd.get("zone_relevance") or "").upper() == "FAR_REFERENCE"
+        or (price > 0 and is_far_reference_zone(zd, current_price=price))
+    )
+
+    u_spec = extract_unit_spec_from_container(s_obj if s_obj else d_obj)
+    digits = int(u_spec.get("digits", 2))
+    point = float(u_spec.get("point") or 0.01)
+    stops_lvl = u_spec.get("trade_stops_level")
+    min_stop = (float(stops_lvl) * point) if (isinstance(stops_lvl, (int, float)) and stops_lvl > 0) else 0.0
+    eff_spread = float(spread or 0.0)
+    if eff_spread <= 0 and bid and ask and ask >= bid > 0:
+        eff_spread = round(float(ask) - float(bid), max(digits, 2))
+
+    htf_conflict = bool(
+        ctx.get("has_conflict")
+        or (h4_bias in ("BULLISH", "BEARISH") and h1_bias in ("BULLISH", "BEARISH") and h4_bias != h1_bias)
+    )
+    counter_htf = bool(
+        (h4_bias == "BULLISH" and direction == "SELL")
+        or (h4_bias == "BEARISH" and direction == "BUY")
+    )
+    m30_bad = m30_st in ("CONFLICT", "INVALID", "WEAK")
+    demand = (direction == "BUY")
+    inside = bool(lo > 0 and hi >= lo and lo <= price <= hi)
+
+    if is_closed:
+        cond_rsn = "MARKET_CLOSED"
+    elif htf_conflict:
+        cond_rsn = "HTF_CONFLICT"
+    elif counter_htf:
+        cond_rsn = "COUNTER_HTF"
+    elif m30_bad:
+        cond_rsn = f"M30_{m30_st}"
+    elif inside:
+        cond_rsn = "WAIT_M5_CONFIRM"
+    else:
+        cond_rsn = "WAIT_CONFIRM"
+
+    # 1. Existing CONFIRMED entry plan (jika valid untuk zona ini)
+    confirmed_payload = None
+    conf_plan = d_obj.get("plan") if isinstance(d_obj.get("plan"), dict) else None
+    conf_zid = str((d_obj.get("zone") or {}).get("zone_id") or "")
+    if (
+        not is_closed
+        and str(d_obj.get("status") or "").upper() == "VALID"
+        and conf_plan
+        and str(d_obj.get("direction") or "").upper() == direction
+        and zid and conf_zid == zid
+    ):
+        ce = float(conf_plan.get("entry_acuan", conf_plan.get("entry", 0.0)) or 0.0)
+        csl = float(conf_plan.get("sl") or 0.0)
+        ctp1 = float(conf_plan.get("tp1") or 0.0)
+        ctp2 = float(conf_plan.get("tp2") or 0.0)
+        if (csl < ce < ctp1) if demand else (csl > ce > ctp1 > 0):
+            confirmed_payload = {
+                "entry": ce,
+                "sl": csl,
+                "tp1": ctp1,
+                "tp2": ctp2,
+                "struct_inv": struct_inv,
+            }
+
+    # 2. Existing Early Pending plan (jika ada untuk zona ini)
+    early_payload = None
+    early = d_obj.get("early_setup") if isinstance(d_obj.get("early_setup"), dict) else {}
+    early_pool = ([early["best_setup"]] if isinstance(early.get("best_setup"), dict) else []) + list(early.get("all_setups") or [])
+    matched_early = next(
+        (ep for ep in early_pool if isinstance(ep, dict) and str(ep.get("zone_id") or "") == zid),
+        None,
+    )
+    if matched_early:
+        ep_ready = bool(
+            matched_early.get("valid")
+            and str(matched_early.get("status") or "").upper() == "READY"
+            and not matched_early.get("is_expired")
+            and not is_closed and not htf_conflict and not counter_htf and not m30_bad
+        )
+        early_payload = {
+            "entry": float(matched_early.get("entry_price") or 0.0),
+            "sl": float(matched_early.get("sl") or 0.0),
+            "tp1": float(matched_early.get("tp1") or 0.0),
+            "tp2": float(matched_early.get("tp2") or 0.0),
+            "ready": ep_ready,
+            "is_expired": bool(matched_early.get("is_expired")),
+        }
+
+    ref_atr_z = zd.get("atr_value")
+    if not ref_atr_z and frames and "H1" in frames and "ATR14" in frames["H1"].columns:
+        try:
+            ref_atr_z = float(frames["H1"]["ATR14"].iloc[-1])
+        except Exception:
+            ref_atr_z = 0.0
+    atr_num = float(ref_atr_z) if (isinstance(ref_atr_z, (int, float)) and math.isfinite(ref_atr_z) and ref_atr_z > 0) else 0.0
+
+    def _compute_smc_levels(planned_e: float) -> Dict[str, Any]:
+        try:
+            z_obj = _zone_from_dict(zd)
+            setup_sl_v = compute_structural_sl(z_obj, frames, eff_spread)
+        except Exception:
+            setup_sl_v = 0.0
+        if setup_sl_v <= 0.0:
+            return {"ok": False, "reason": "SL_UNAVAILABLE"}
+        targets = _structural_targets(
+            frames or {},
+            z_type,
+            planned_e,
+            opposing_zones=opposing_zones,
+            snr_context=snr_context,
+            atr=atr_num if atr_num > 0 else None,
+        ) if frames else []
+        if not targets:
+            return {"ok": False, "reason": "NO_STRUCTURAL_TARGET"}
+        tp_buf = 0.3
+        if demand:
+            tp1_v = round(targets[0] - tp_buf, digits)
+            tp2_v = round(targets[1] - tp_buf, digits) if len(targets) > 1 else 0.0
+        else:
+            tp1_v = round(targets[0] + tp_buf, digits)
+            tp2_v = round(targets[1] + tp_buf, digits) if len(targets) > 1 else 0.0
+        return {
+            "ok": True,
+            "setup_sl": round(setup_sl_v, digits),
+            "struct_inv": round(struct_inv, digits),
+            "tp1": tp1_v,
+            "tp2": tp2_v,
+        }
+
+    is_bo_pending_z = bool(
+        (not is_invalid_z) and (not is_expired_z) and (
+            z_life in ("BREAKOUT_PENDING", "BREAKDOWN_PENDING", "SUSPENDED")
+            or (lo > 0 and hi >= lo and price > 0 and ((direction == "SELL" and price > hi) or (direction == "BUY" and price < lo)))
+        )
+    )
+
+    # Bukti touch aktual & jendela validitas existing SMC (bars_since_trig > 2 & chase_tol = max(1.0, 0.5*atr5))
+    was_touched_smc = bool(int(zd.get("touch_count") or 0) > 0 or z_life in ("TOUCHED", "ZONE_TOUCHED"))
+    touch_time_smc = None
+    bars_since_touch_smc = None
+    atr5_smc = 1.5
+    m5_df_tp = frames.get("M5") if isinstance(frames, dict) else None
+    if m5_df_tp is not None and not m5_df_tp.empty and lo > 0 and hi >= lo:
+        try:
+            if "ATR14" in m5_df_tp.columns:
+                _a5 = float(m5_df_tp["ATR14"].iloc[-1])
+                if math.isfinite(_a5) and _a5 > 0:
+                    atr5_smc = _a5
+            origin_dt = _resolve_smc_zone_origin_time(zd, frames)
+            post_m5 = m5_df_tp
+            if origin_dt is not None:
+                try:
+                    t_col = m5_df_tp["Time"] if "Time" in m5_df_tp.columns else m5_df_tp.index
+                    t_ser = pd.to_datetime(t_col, errors="coerce")
+                    orig_ts = pd.Timestamp(origin_dt)
+                    if getattr(t_ser.dt if hasattr(t_ser, "dt") else t_ser, "tz", None) is None and orig_ts.tzinfo is not None:
+                        orig_ts = orig_ts.tz_localize(None)
+                    mask_post = t_ser > orig_ts
+                    if mask_post.any():
+                        post_m5 = m5_df_tp.loc[mask_post]
+                except Exception:
+                    post_m5 = m5_df_tp.tail(24)
+            else:
+                post_m5 = m5_df_tp.tail(24)
+            if not post_m5.empty:
+                ov_m = (post_m5["High"] >= lo) & (post_m5["Low"] <= hi)
+                if ov_m.any():
+                    was_touched_smc = True
+                    hit_idx_list = [idx_i for idx_i, flag in enumerate(ov_m.tolist()) if flag]
+                    last_rel = hit_idx_list[-1]
+                    last_label = post_m5.index[last_rel]
+                    try:
+                        last_abs = int(m5_df_tp.index.get_loc(last_label))
+                        bars_since_touch_smc = max(0, (len(m5_df_tp) - 1) - last_abs)
+                    except Exception:
+                        bars_since_touch_smc = max(0, (len(post_m5) - 1) - last_rel)
+                    raw_t = post_m5["Time"].iloc[last_rel] if "Time" in post_m5.columns else last_label
+                    touch_time_smc = format_wib_timestamp(raw_t, source_tz="MT5")
+        except Exception:
+            pass
+
+    chase_tol_smc = round(max(1.0, 0.5 * atr5_smc), digits)
+    is_missed_smc = bool((d_obj.get("is_missed") or (d_obj.get("m5") or {}).get("is_missed")) and conf_zid == zid)
+    m5_eval_st_smc = str(d_obj.get("m5_eval_status") or (stages.get("M5") or {}).get("status") or "").strip().upper() or None
+    mt5_snap_smc = s_obj.get("mt5_orders_snapshot") or d_obj.get("mt5_orders_snapshot")
+
+    return build_shared_trade_plan(
+        source="SMC",
+        zone_id=zid,
+        timeframe=tf,
+        zone_type=z_type,
+        direction=direction,
+        grade=grd,
+        score=sc,
+        lo=lo,
+        hi=hi,
+        struct_inv=struct_inv,
+        live_price=price,
+        why=why_txt,
+        bid=bid,
+        ask=ask,
+        spread=eff_spread,
+        max_spread=max(float(SPREAD_MAKS_POIN), 0.0),
+        digits=digits,
+        min_stop=min_stop,
+        min_rr=float(RR_MIN),
+        max_sl_dist=float(SL_JARAK_MAKS),
+        atr_value=atr_num,
+        is_closed=is_closed,
+        is_invalid_zone=is_invalid_z,
+        invalid_reason="ZONE_INVALID",
+        is_expired_zone=is_expired_z,
+        is_breakout_pending=is_bo_pending_z,
+        is_far_zone=is_far_z,
+        confirmed_plan=confirmed_payload,
+        early_pending_plan=early_payload,
+        cond_reason=cond_rsn,
+        compute_levels_fn=_compute_smc_levels,
+        was_touched=was_touched_smc,
+        touch_time=touch_time_smc,
+        m5_eval_status=m5_eval_st_smc,
+        is_missed=is_missed_smc,
+        missed_move_threshold=chase_tol_smc,
+        bars_since_touch=bars_since_touch_smc,
+        max_bars_after_touch=2,
+        mt5_orders_snapshot=mt5_snap_smc,
+    )
+
+
+def generate_smc_trade_plans(
+    dec: Optional[Dict[str, Any]],
+    scan: Optional[Dict[str, Any]],
+    frames: Optional[Dict[str, pd.DataFrame]],
+    price: float,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+    spread: float = 0.0,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Evaluasi semua zona SMC ACTIVE/RADAR unik untuk menghasilkan trade_plans & best_trade_plan."""
+    from modules.utils import is_tracked_trade_plan_zone, resolve_trade_plan_focus
+
+    d_obj = dec if isinstance(dec, dict) else {}
+    s_obj = scan if isinstance(scan, dict) else {}
+    r_prio = d_obj.get("radar_priority") or s_obj.get("radar_priority") or {}
+    snr_ctx = d_obj.get("snr_context") or s_obj.get("snr_context")
+    all_raw = []
+    for item in (
+        d_obj.get("zone"),
+        d_obj.get("primary_zone"),
+        d_obj.get("nearest_valid_zone"),
+        d_obj.get("next_radar_zone"),
+        r_prio.get("primary_directional_zone"),
+        r_prio.get("nearest_radar_zone"),
+    ):
+        if isinstance(item, dict):
+            all_raw.append(item)
+    for z_list in (s_obj.get("active_zones") or [], s_obj.get("radar_zones") or []):
+        for item in z_list:
+            zd = item.to_dict() if hasattr(item, "to_dict") else (item if isinstance(item, dict) else None)
+            if isinstance(zd, dict):
+                all_raw.append(zd)
+    for z_list in (s_obj.get("invalidated_zones") or [], s_obj.get("broken_zones") or [], s_obj.get("expired_zones") or []):
+        for item in z_list:
+            zd = item.to_dict() if hasattr(item, "to_dict") else (item if isinstance(item, dict) else None)
+            if isinstance(zd, dict) and is_tracked_trade_plan_zone("SMC", str(zd.get("zone_id") or "")):
+                all_raw.append(zd)
+
+    seen_ids = set()
+    unique_zones: List[Dict[str, Any]] = []
+    for zd in all_raw:
+        zid = str(zd.get("zone_id") or "").strip()
+        if not zid or zid in seen_ids:
+            continue
+        is_tracked = is_tracked_trade_plan_zone("SMC", zid)
+        if not is_tracked:
+            if str(zd.get("zone_relevance") or "").upper() == "FAR_REFERENCE" or is_far_reference_zone(zd, current_price=price if price > 0 else None):
+                continue
+            if zd.get("is_valid") is False or zd.get("is_broken") is True:
+                continue
+            z_st = str(zd.get("lifecycle_status") or zd.get("status") or "").upper()
+            if z_st in ("INVALIDATED", "BROKEN", "EXPIRED", "MITIGATED", "REJECTED"):
+                continue
+        seen_ids.add(zid)
+        unique_zones.append(zd)
+
+    plans: List[Dict[str, Any]] = []
+    plan_by_zid: Dict[str, Dict[str, Any]] = {}
+    for zd in unique_zones:
+        opp = [oz for oz in unique_zones if oz.get("zone_type") != zd.get("zone_type")]
+        tp = generate_smc_trade_plan(
+            zd,
+            price=price,
+            frames=frames,
+            dec=d_obj,
+            scan=s_obj,
+            bid=bid,
+            ask=ask,
+            spread=spread,
+            opposing_zones=opp,
+            snr_context=snr_ctx,
+        )
+        plans.append(tp)
+        tp_zid = str(tp.get("zone_id") or "").strip()
+        if tp_zid and float(tp.get("setup_sl") or 0.0) > 0.0:
+            plan_by_zid[tp_zid] = tp
+
+    if plan_by_zid:
+        for zd_ref in all_raw:
+            if not isinstance(zd_ref, dict):
+                continue
+            rz = str(zd_ref.get("zone_id") or "").strip()
+            matched_tp = plan_by_zid.get(rz)
+            if isinstance(matched_tp, dict):
+                zd_ref["setup_sl"] = float(matched_tp["setup_sl"])
+                zd_ref["setup_version"] = int(matched_tp.get("setup_version") or 1)
+
+    mkt_st_p = str(d_obj.get("market_status") or s_obj.get("market_status") or "OPEN").upper()
+    is_closed_p = mkt_st_p in ("CLOSED", "MARKET_CLOSED") or str(d_obj.get("snapshot_status") or "").upper() == "MARKET_CLOSED"
+
+    # Sinkronkan Trade Plan SMC + SNR bersama agar `scan`, `scan snr`, dan `pantau` memakai selector & fokus UNIFIED yang sama
+    if not isinstance(snr_ctx, dict) and isinstance(frames, dict) and price > 0:
+        try:
+            snr_ctx = extract_snr_supporting_context(
+                frames,
+                float(price),
+                market_status=("CLOSED" if is_closed_p else mkt_st_p),
+                snapshot=(s_obj if isinstance(s_obj, dict) else None),
+            )
+            if isinstance(d_obj, dict) and isinstance(snr_ctx, dict):
+                d_obj["snr_context"] = snr_ctx
+        except Exception:
+            snr_ctx = None
+    if isinstance(snr_ctx, dict):
+        snr_tp_pool = list(snr_ctx.get("trade_plans") or [])
+        if not snr_tp_pool and isinstance(snr_ctx.get("best_trade_plan"), dict):
+            snr_tp_pool = [snr_ctx["best_trade_plan"]]
+        seen_tp_keys = {
+            f"{str(p.get('source') or 'SMC').upper()}:{str(p.get('zone_id') or '').strip()}"
+            for p in plans if isinstance(p, dict) and p.get("zone_id")
+        }
+        for sp in snr_tp_pool:
+            if not isinstance(sp, dict):
+                continue
+            sk = f"{str(sp.get('source') or 'SNR').upper()}:{str(sp.get('zone_id') or '').strip()}"
+            if sk not in seen_tp_keys:
+                seen_tp_keys.add(sk)
+                plans.append(sp)
+
+    best_tp = resolve_trade_plan_focus(
+        plans,
+        direction=d_obj.get("analysis_direction"),
+        scope="UNIFIED",
+        live_price=price,
+        bid=bid,
+        ask=ask,
+        is_closed=is_closed_p,
+        mt5_orders_snapshot=(s_obj.get("mt5_orders_snapshot") or d_obj.get("mt5_orders_snapshot")),
+    )
+    return plans, best_tp
+
+
 def _decide(dec, frames, price, spread, news, server_time, live,
             snapshot: Optional[Dict[str, Any]] = None,
             scan_result: Optional[Dict[str, Any]] = None,
@@ -8178,7 +9112,14 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             if not isinstance(eff_p, (int, float)) or not math.isfinite(eff_p) or eff_p <= 0 or st.get("DATA", {}).get("ok") is False:
                 return
             old_focus = next((rec for rec in tracker.tracked_zones.values() if rec.get("monitor_focus")), None)
-            tracker.update(zones_to_track, eff_p, frames=frames, htf_bias=None, m30_status=None, server_time=server_time, conservative_dec=dec_obj)
+            tracker.update(
+                zones_to_track, eff_p, frames=frames, htf_bias=None, m30_status=None,
+                server_time=server_time, conservative_dec=dec_obj,
+                bid=(scan_obj.get("bid") if isinstance(scan_obj, dict) else None),
+                ask=(scan_obj.get("ask") if isinstance(scan_obj, dict) else None),
+                spread=float(spread or 0.0),
+                market_status=dec_obj.get("market_status"),
+            )
             focus_id = (dec_obj.get("zone") or {}).get("zone_id")
             focus_evaluated = bool(dec_obj.get("focus_selection_evaluated")) or bool(focus_id)
             if old_focus and focus_evaluated and old_focus.get("zone_id") != focus_id:
@@ -8477,9 +9418,19 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         identity = dec.get("monitored_zone_identity") or {}
         zone_id = zone.get("zone_id")
         pending_setup = (dec.get("early_setup") or {}).get("best_setup") or {}
+        _act_struct_inv = resolve_smc_structure_invalidation_price(zone) if isinstance(zone, dict) and zone else 0.0
+        _act_setup_sl = (
+            float((dec.get("plan") or {}).get("sl") or 0.0)
+            or resolve_smc_setup_invalidation_price(zone, frames=frames, spread=float(spread or 0.0))
+        ) if isinstance(zone, dict) and zone else 0.0
         dec["active_setup"] = {
             **identity,
             "zone_id": zone_id,
+            "structure_invalidation": _act_struct_inv,
+            "invalidation_price": _act_struct_inv,
+            "setup_sl": _act_setup_sl,
+            "setup_invalidation_price": _act_setup_sl,
+            "invalidation_type": str(zone.get("invalidation_type") or "") if isinstance(zone, dict) else "",
             "snapshot_id": dec.get("snapshot_id"),
             "validation_time": dec.get("snapshot_time") or dec.get("timestamp"),
             "last_closed_m5": (dec.get("last_candle_times") or {}).get("M5"),
@@ -8493,6 +9444,30 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             "final_decision": dec.get("direction") if status == "VALID" else status,
             "blocker": (dec.get("reasons") or [""])[0] if status != "VALID" else "",
         }
+        dec["analysis_direction"] = resolve_analysis_direction(
+            ctx=ctx,
+            decision=dec,
+            scan=scan if isinstance(scan, dict) else None,
+            frames=frames if isinstance(frames, dict) else None,
+            market_status=dec.get("market_status"),
+            data_ok=(st.get("DATA") or {}).get("ok") is not False and bool(not isinstance(scan, dict) or scan.get("data_ok", True)),
+        )
+        try:
+            _smc_tp_list, _smc_tp_best = generate_smc_trade_plans(
+                dec=dec,
+                scan=scan if isinstance(scan, dict) else None,
+                frames=frames if isinstance(frames, dict) else None,
+                price=float(price or 0.0),
+                bid=(scan.get("bid") if isinstance(scan, dict) else None),
+                ask=(scan.get("ask") if isinstance(scan, dict) else None),
+                spread=float(spread or 0.0),
+            )
+            dec["trade_plans"] = _smc_tp_list
+            dec["best_trade_plan"] = _smc_tp_best
+        except Exception as _tp_exc:
+            _catat_error("generate_smc_trade_plans", _tp_exc)
+            dec["trade_plans"] = []
+            dec["best_trade_plan"] = None
         _audit("entry_decision", _entry_audit(dec), _sig(status, dec["reasons"], dec.get("direction")))
         return dec
 
@@ -8780,6 +9755,102 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         frames.get("H1"), h4_eval_tf, regime_h1=ctx.get("h1_regime"), explicit_conflict=bool(ctx.get("has_conflict"))
     )
 
+    def _eval_m5_during_conflict(conflict_code: str, conflict_summary: str):
+        """Saat HTF/M30 konflik, tetap evaluasi M5 pada zona eligible yang didekati/disentuh/baru ditinggalkan tanpa auto-signal."""
+        m5_df_c = frames.get("M5") if isinstance(frames, dict) else None
+        if m5_df_c is None or len(m5_df_c) < MIN_BARS_DECISION or not isinstance(scan, dict):
+            dec["m5_eval_status"] = "DATA_UNAVAILABLE"
+            st["M5"] = {"ok": False, "status": "DATA_UNAVAILABLE", "msg": f"{conflict_code}: data M5 tidak tersedia/belum cukup"}
+            return finish("WAIT", f"{conflict_summary} ({conflict_code})")
+        recent_m5_c = m5_df_c.tail(6)
+        pool_c = []
+        seen_c = set()
+        fallback_pool_c = []
+        for zl_c in (scan.get("active_zones") or [], scan.get("radar_zones") or []):
+            for item_c in zl_c:
+                zd_c = item_c.to_dict() if hasattr(item_c, "to_dict") else (item_c if isinstance(item_c, dict) else None)
+                if not isinstance(zd_c, dict):
+                    continue
+                zid_c = str(zd_c.get("zone_id") or "").strip()
+                if not zid_c or zid_c in seen_c:
+                    continue
+                if zd_c.get("is_valid") is False or zd_c.get("is_broken") is True:
+                    continue
+                if str(zd_c.get("grade") or "").upper() == "REJECTED" or zd_c.get("risk_rejected") is True:
+                    continue
+                if is_far_reference_zone(zd_c, current_price=float(price)):
+                    continue
+                lo_c = float(zd_c.get("price_low", zd_c.get("low", 0.0)) or 0.0)
+                hi_c = float(zd_c.get("price_high", zd_c.get("high", 0.0)) or 0.0)
+                if lo_c <= 0 or hi_c < lo_c:
+                    continue
+                dist_c = max(lo_c - float(price), float(price) - hi_c, 0.0)
+                recently_touched_c = bool(
+                    not recent_m5_c.empty
+                    and ((recent_m5_c["Low"] <= hi_c) & (recent_m5_c["High"] >= lo_c)).any()
+                )
+                was_touched_c = bool(
+                    recently_touched_c
+                    or int(zd_c.get("touch_count") or 0) > 0
+                    or str(zd_c.get("lifecycle_status") or zd_c.get("status") or "").upper() in ("TOUCHED", "ZONE_TOUCHED", "BREAKOUT_PENDING")
+                )
+                seen_c.add(zid_c)
+                if dist_c <= float(ZONE_APPROACH_DISTANCE_POINTS) or was_touched_c:
+                    # Prioritaskan zona yang disentuh/baru ditinggalkan sebelum approaching
+                    pool_c.append((0 if (dist_c == 0.0 or recently_touched_c) else 1, dist_c, zd_c))
+                else:
+                    fallback_pool_c.append((2, dist_c, zd_c))
+        if not pool_c and fallback_pool_c:
+            # HTF_CONFLICT tetap filter entry, bukan alasan melewati evaluasi M5 bila zona SMC eligible tersedia.
+            pool_c = fallback_pool_c
+        if not pool_c:
+            snr_c_fb = dec.get("snr_context") or scan.get("snr_context") or {}
+            snr_m5_fb = str(
+                (snr_c_fb.get("decision") or {}).get("m5_eval_status")
+                or (snr_c_fb.get("entry_validation") or {}).get("m5_eval_status")
+                or ""
+            ).strip().upper()
+            if snr_m5_fb in ("CONFIRMED", "UNCONFIRMED"):
+                dec["m5_conflict_evaluated"] = True
+                dec["m5_eval_status"] = snr_m5_fb
+                st["M5"] = {"ok": False, "status": snr_m5_fb, "blocked_by": conflict_code, "msg": f"M5 {snr_m5_fb} (SNR) namun diblokir {conflict_code}"}
+                return finish("WAIT", f"{conflict_code}: M5 {snr_m5_fb} (SNR) — diblokir filter risiko {conflict_code}")
+            dec["m5_eval_status"] = "NOT_CHECKED"
+            st["M5"] = {"ok": False, "status": "NOT_CHECKED", "msg": f"{conflict_code}: belum ada zona eligible didekati/disentuh"}
+            return finish("WAIT", f"{conflict_summary} — belum ada zona eligible didekati/disentuh ({conflict_code})")
+        pool_c.sort(key=lambda item: (item[0], round(item[1], 2), -round(float(item[2].get("score") or 0.0), 1), str(item[2].get("zone_id") or "")))
+        _, _, target_zd = pool_c[0]
+        target_zn = _zone_from_dict(target_zd)
+        snr_c = dec.get("snr_context") or scan.get("snr_context")
+        r_c = _entry_check(
+            target_zn,
+            float(price),
+            m5_df_c,
+            float(spread or 0.0),
+            news,
+            frames,
+            server_time=server_time,
+            snr_context=snr_c,
+            bid=scan.get("bid"),
+            ask=scan.get("ask"),
+            market_status=eff_mkt_dec,
+        )
+        for k_st, v_st in (r_c.get("stages") or {}).items():
+            st[k_st] = v_st
+        dec["m5"] = dict(r_c.get("m5") or {})
+        dec["m5_conflict_evaluated"] = True
+        if dec.get("zone") is None:
+            dec["zone"] = target_zd
+        m5_trig_ok = bool(r_c.get("smc_technical_confirmed") or r_c.get("status") == "VALID")
+        m5_rsn_short = (r_c.get("reasons") or ["M5 dievaluasi (belum konfirmasi)"])[0]
+        if m5_trig_ok:
+            dec["m5_eval_status"] = "CONFIRMED"
+            st["M5"] = {"ok": False, "status": "CONFIRMED", "blocked_by": conflict_code, "msg": f"M5 CONFIRMED di {target_zn.timeframe} {target_zn.zone_type} namun diblokir {conflict_code}"}
+            return finish("WAIT", f"{conflict_code}: M5 CONFIRMED di {target_zn.timeframe} {target_zn.zone_type} ({target_zn.price_low:.2f}-{target_zn.price_high:.2f}), diblokir filter risiko {conflict_code}")
+        dec["m5_eval_status"] = "UNCONFIRMED"
+        st["M5"] = {"ok": False, "status": "UNCONFIRMED", "blocked_by": conflict_code, "msg": f"M5 UNCONFIRMED ({conflict_code}): {m5_rsn_short}"}
+        return finish("WAIT", f"{conflict_code}: M5 UNCONFIRMED di {target_zn.timeframe} {target_zn.zone_type} — {m5_rsn_short}")
+
     if ctx.get("has_conflict"):
         # Saat H4 vs H1 konflik serius: periksa strict Reversal HTF sebelum menolak
         tf_rev = evaluate_trend_following_setup(
@@ -8809,7 +9880,12 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 "price_low": float(bc["price_low"]),
                 "price_high": float(bc["price_high"]),
                 "midpoint": round((float(bc["price_low"]) + float(bc["price_high"])) / 2.0, 2),
-                "invalidation_price": float(bc.get("invalidation_price", plan_rev["sl"])),
+                "invalidation_price": float(
+                    bc.get("invalidation_price")
+                    or (float(bc["price_low"]) if str(bc.get("zone_type") or ("DEMAND" if tf_rev["direction"] == "BUY" else "SUPPLY")).upper() == "DEMAND" else float(bc["price_high"]))
+                ),
+                "setup_sl": float(plan_rev["sl"]),
+                "setup_invalidation_price": float(plan_rev["sl"]),
                 "sl_recommended": float(plan_rev["sl"]),
                 "grade": bc.get("grade", "B"),
                 "score": float(bc.get("score", 74.0)),
@@ -8837,7 +9913,12 @@ def _decide(dec, frames, price, spread, news, server_time, live,
 
         st["H1"] = {"ok": False, "msg": f"H1 {ctx['H1']} bertentangan dengan H4 {h4}"}
         st["H4"] = {"ok": True, "msg": f"Bias H4 {h4}"}
-        return finish("WAIT", f"Konflik struktur H4 {h4} vs H1 {ctx['H1']}")
+        m30_c_dir = str(ctx.get("M30") or "").upper()
+        if m30_c_dir in ("BULLISH", "BEARISH") and m30_c_dir == str(ctx.get("H1") or "").upper() and m30_c_dir != h4:
+            conflict_reason = f"Konflik struktur H4 {h4} vs H1/M30 {ctx['H1']}"
+        else:
+            conflict_reason = f"Konflik struktur H4 {h4} vs H1 {ctx['H1']}"
+        return _eval_m5_during_conflict("HTF_CONFLICT", conflict_reason)
 
     # --- H1: konfirmasi / pullback sehat ---
     h1_tag = ctx.get("h1_confirmation") or h1_eval_tf.get("status", "ALIGNED")
@@ -8862,12 +9943,12 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             or f"M30 bertentangan dengan H4 {h4}"
         )
         st["M30"] = {"ok": False, "status": "CONFLICT", "msg": m30_msg}
-        return finish("WAIT", m30_msg if f"H4 {h4}" in m30_msg else f"M30 bertentangan dengan struktur utama H4 {h4} ({m30_msg})")
+        return _eval_m5_during_conflict("M30_CONFLICT", m30_msg if f"H4 {h4}" in m30_msg else f"M30 konflik terhadap H4 {h4}")
     if m30_cond.get("status") == "INVALID" or m30_val.get("status") == "INVALID":
         st["M30"] = {"ok": False, "status": "INVALID", "msg": m30_val.get("msg") or m30_cond.get("msg", "Data M30 tidak valid")}
         return finish("WAIT", f"M30 INVALID: {st['M30']['msg']}")
     if m30_cond.get("status") == "WEAK":
-        st["M30"] = {"ok": False, "status": "WEAK", "msg": m30_val.get("msg") or m30_cond.get("msg")}
+        st["M30"] = {"ok": False, "status": "WEAK", "msg": m30_cond.get("msg") or m30_val.get("msg")}
         return finish("WAIT", f"M30 tidak memiliki momentum (status WEAK: {st['M30']['msg']})")
 
     m30_effective_status = (
@@ -8903,18 +9984,18 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             z.get("grade") in ("A+", "A")
             or (float(z.get("score", 0.0) or 0.0) >= 70.0 and str(z.get("freshness") or "").upper() in ("FRESH", "TESTED_1X"))
         )
-        bucket = 0 if (rel_is_active and qual_ok) else (1 if qual_ok else (2 if rel_is_active else 3))
+        bucket = 0 if (rel_is_active and qual_ok) else (1 if rel_is_active else (2 if qual_ok else 3))
         rank = {"A+": 0, "A": 1, "B": 2}
         tf_rank = _intraday_tf_rank(str(z.get("timeframe", "")), m30_status=m30_effective_status, h1_aligned=h1_aligned_dec)
         fresh_rank = {"FRESH": 0, "TESTED_1X": 1, "TESTED_2X": 2}.get(z.get("freshness", ""), 9)
         return (
             bucket,
             fresh_rank,
+            round(float(z.get("distance", 9999.0) or 9999.0), 2),
             tf_rank,
             rank.get(z.get("grade", ""), 9),
             -round(float(z.get("score", 0.0) or 0.0), 1),
             -round(float(z.get("displacement_strength", 0.0) or 0.0), 2),
-            round(float(z.get("distance", 9999.0) or 9999.0), 2),
             str(z.get("zone_id", "")),
         )
 
@@ -8983,17 +10064,33 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             if pers_inv_f:
                 return False
             closed_inv_f, closed_rsn_f, b_px_f, b_tm_f, b_tf_f = evaluate_smc_zone_closed_invalidation(z, frames)
-            if closed_inv_f:
+            live_inv_f, live_rsn_f, live_px_f, live_inv_lvl_f, _ = evaluate_smc_setup_live_invalidation(
+                z, current_price=float(price), bid=scan.get("bid"), ask=scan.get("ask"),
+                frames=frames, spread=float(spread or 0.0), market_status=eff_mkt_dec,
+            )
+            if live_inv_lvl_f and live_inv_lvl_f > 0:
+                z["setup_invalidation_price"] = live_inv_lvl_f
+            if closed_inv_f or live_inv_f:
+                inv_kind_f = INVALIDATION_ZONE_STRUCTURAL if closed_inv_f else INVALIDATION_SETUP_SL_BREACHED
+                inv_rsn_f = closed_rsn_f if closed_inv_f else live_rsn_f
                 z["is_valid"] = False
-                z["is_broken"] = True
+                z["is_broken"] = (inv_kind_f == INVALIDATION_ZONE_STRUCTURAL)
                 z["status"] = "INVALIDATED"
                 z["lifecycle_status"] = "INVALIDATED"
                 z["freshness"] = "INVALIDATED"
                 z["zone_relevance"] = "INVALID"
-                z["invalid_label"] = "INVALID — BROKEN"
-                z["rejection_reason"] = closed_rsn_f
+                z["invalidation_type"] = inv_kind_f
+                z["invalid_label"] = inv_kind_f
+                z["rejection_reason"] = inv_rsn_f
                 if tracker:
-                    tracker.mark_invalidated(z, closed_rsn_f, break_close=b_px_f, break_time=b_tm_f, origin_tf=b_tf_f)
+                    tracker.mark_invalidated(
+                        z, inv_rsn_f,
+                        break_close=b_px_f if closed_inv_f else None,
+                        break_time=b_tm_f if closed_inv_f else dec.get("snapshot_time"),
+                        origin_tf=b_tf_f if closed_inv_f else z.get("timeframe"),
+                        invalidation_type=inv_kind_f,
+                        break_price=live_px_f if (live_inv_f and not closed_inv_f) else b_px_f,
+                    )
                     inval_persisted_dirty = True
                 return False
             # Klasifikasi Distance-Aware Relevance SEBELUM sorting & pemilihan zona utama
@@ -9051,9 +10148,13 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         in_range_raw.sort(key=lambda z_s: (1 if z_s.get("risk_rejected") else 0, _cand_sort(z_s)))
         in_range_eligible, _ = _deduplicate_overlapping_zones(in_range_raw)
         far_eligible = [z for z in eligible if z.get("zone_relevance") == "FAR_REFERENCE" or _is_far_zone_cand(z)]
-        far_eligible.sort(key=_cand_sort)
+        far_eligible.sort(key=lambda z_f: (
+            round(float(z_f.get("distance", 9999.0) or 9999.0), 2),
+            -round(float(z_f.get("score", 0.0) or 0.0), 1),
+            str(z_f.get("zone_id", "")),
+        ))
         far_eligible, _ = _deduplicate_overlapping_zones(far_eligible)
-        dec["primary_zone"] = in_range_eligible[0] if in_range_eligible else (far_eligible[0] if far_eligible else None)
+        dec["primary_zone"] = in_range_eligible[0] if in_range_eligible else None
 
         def _distance(z):
             return max(float(z["price_low"]) - price, price - float(z["price_high"]), 0.0)
@@ -9062,13 +10163,13 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             dec["far_reference_zone"] = min(far_eligible, key=_distance)
 
         directional = [
-            z for z in (in_range_eligible or far_eligible)
+            z for z in in_range_eligible
             if (
                 (ztype == "SUPPLY" and float(z["price_high"]) >= price)
                 or (ztype == "DEMAND" and float(z["price_low"]) <= price)
             )
         ]
-        dec["nearest_valid_zone"] = min(directional, key=_distance) if directional else (in_range_eligible[0] if in_range_eligible else (far_eligible[0] if far_eligible else None))
+        dec["nearest_valid_zone"] = min(directional, key=_distance) if directional else (in_range_eligible[0] if in_range_eligible else None)
         setup_ready_in_range = [z for z in in_range_eligible if not z.get("risk_rejected")]
         inside = [z for z in setup_ready_in_range if _distance(z) == 0]
         old_focus = next((rec for rec in tracker.tracked_zones.values() if rec.get("monitor_focus")), None)
@@ -9144,15 +10245,36 @@ def _decide(dec, frames, price, spread, news, server_time, live,
     # Jalur 1: Zona OB+FVG aktif searah tren dalam jangkauan (konfirmasi SMC klasik)
     valid_cands: List[Dict[str, Any]] = []
     newly_broken_cands: List[Dict[str, Any]] = []
+    _dec_bid = live_snap.get("bid") if isinstance(live_snap, dict) else (scan.get("bid") if isinstance(scan, dict) else None)
+    _dec_ask = live_snap.get("ask") if isinstance(live_snap, dict) else (scan.get("ask") if isinstance(scan, dict) else None)
     for zd in cands:
         zn = _zone_from_dict(zd)
         pers_inv_c, pers_rec_c = tracker.is_zone_invalidated(zd) if tracker else (False, None)
         closed_inv_c, closed_rsn_c, b_px_c, b_tm_c, b_tf_c = evaluate_smc_zone_closed_invalidation(zd, frames)
-        if pers_inv_c or closed_inv_c:
+        live_inv_c, live_rsn_c, live_px_c, live_inv_lvl_c, _ = evaluate_smc_setup_live_invalidation(
+            zd,
+            current_price=float(price),
+            bid=_dec_bid,
+            ask=_dec_ask,
+            frames=frames,
+            spread=float(spread or 0.0),
+            market_status=eff_mkt_dec,
+        )
+        if pers_inv_c or closed_inv_c or live_inv_c:
+            inv_kind_c = (
+                INVALIDATION_ZONE_STRUCTURAL
+                if closed_inv_c
+                else (
+                    INVALIDATION_SETUP_SL_BREACHED
+                    if live_inv_c
+                    else str((pers_rec_c or {}).get("invalidation_type") or INVALIDATION_ZONE_STRUCTURAL)
+                )
+            )
             inv_reason_c = (
                 closed_rsn_c
+                or live_rsn_c
                 or (pers_rec_c.get("reason") if isinstance(pers_rec_c, dict) and pers_rec_c.get("reason") else "")
-                or f"INVALID — BROKEN (Close {zn.timeframe} menembus invalidasi {zn.invalidation_price:.2f})"
+                or f"{inv_kind_c} (Close {zn.timeframe} menembus invalidasi {zn.invalidation_price:.2f})"
             )
             zd["is_valid"] = False
             zd["is_broken"] = True
@@ -9160,10 +10282,21 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             zd["lifecycle_status"] = "INVALIDATED"
             zd["freshness"] = "INVALIDATED"
             zd["zone_relevance"] = "INVALID"
-            zd["invalid_label"] = "INVALID — BROKEN"
+            zd["invalidation_type"] = inv_kind_c
+            zd["invalid_label"] = inv_kind_c
+            if live_inv_lvl_c and live_inv_lvl_c > 0:
+                zd["setup_sl"] = float(live_inv_lvl_c)
+                zd["setup_invalidation_price"] = float(live_inv_lvl_c)
             zd["rejection_reason"] = inv_reason_c
-            if tracker and closed_inv_c and not pers_inv_c:
-                tracker.mark_invalidated(zd, inv_reason_c, break_close=b_px_c, break_time=b_tm_c, origin_tf=b_tf_c)
+            if tracker and (closed_inv_c or live_inv_c) and not pers_inv_c:
+                tracker.mark_invalidated(
+                    zd,
+                    inv_reason_c,
+                    break_close=b_px_c if closed_inv_c else live_px_c,
+                    break_time=b_tm_c if closed_inv_c else None,
+                    origin_tf=b_tf_c if closed_inv_c else zn.timeframe,
+                    invalidation_type=inv_kind_c,
+                )
                 inval_persisted_dirty = True
             newly_broken_cands.append(zd)
             if best_candidate_dict is not None and (
@@ -9277,31 +10410,52 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         if tf_candidate
         else (False, "", None, None, None)
     )
-    if tf_candidate and tf_closed_inv:
+    tf_live_inv, tf_live_rsn, tf_live_px, tf_live_lvl, _ = (
+        evaluate_smc_setup_live_invalidation(
+            tf_candidate,
+            current_price=float(price),
+            bid=_dec_bid,
+            ask=_dec_ask,
+            frames=frames,
+            spread=float(spread or 0.0),
+            market_status=eff_mkt_dec,
+        )
+        if tf_candidate
+        else (False, "", None, None, None)
+    )
+    if tf_candidate and (tf_closed_inv or tf_live_inv):
+        tf_inv_kind = INVALIDATION_ZONE_STRUCTURAL if tf_closed_inv else INVALIDATION_SETUP_SL_BREACHED
         tf_candidate["is_valid"] = False
         tf_candidate["is_broken"] = True
         tf_candidate["status"] = "INVALIDATED"
-        tf_candidate["invalid_label"] = "INVALID — BROKEN"
+        tf_candidate["invalidation_type"] = tf_inv_kind
+        tf_candidate["invalid_label"] = tf_inv_kind
+        if tf_live_lvl and tf_live_lvl > 0:
+            tf_candidate["setup_sl"] = float(tf_live_lvl)
+            tf_candidate["setup_invalidation_price"] = float(tf_live_lvl)
         if not tf_persisted_inv:
             tracker_for_focus.mark_invalidated(
                 tf_candidate,
-                tf_closed_rsn,
-                break_close=tf_b_px,
-                break_time=tf_b_tm,
-                origin_tf=tf_b_tf,
+                tf_closed_rsn or tf_live_rsn,
+                break_close=tf_b_px if tf_closed_inv else tf_live_px,
+                break_time=tf_b_tm if tf_closed_inv else None,
+                origin_tf=tf_b_tf if tf_closed_inv else tf_candidate.get("timeframe"),
+                invalidation_type=tf_inv_kind,
             )
             inval_persisted_dirty = True
     tf_cand_in_eligible = bool(tf_id and any(z.get("zone_id") == tf_id for z in valid_cands))
     tf_tracker_invalidated = bool(
         tf_rec_status == "INVALIDATED"
-        and ("invalidation" in tf_rec_reason.lower() or "broken" in tf_rec_reason.lower())
+        and ("invalidation" in tf_rec_reason.lower() or "broken" in tf_rec_reason.lower() or "sl_breached" in tf_rec_reason.lower())
         and not tf_cand_in_eligible
     )
-    tf_blocked = bool(tf_candidate) and (tf_closed_inv or tf_persisted_inv or tf_tracker_invalidated)
+    tf_blocked = bool(tf_candidate) and (tf_closed_inv or tf_live_inv or tf_persisted_inv or tf_tracker_invalidated)
     tf_block_reason = ""
     if tf_blocked:
         if tf_closed_inv:
-            tf_block_reason = f"Kandidat trend-following {tf_id or ''} INVALID — BROKEN: {tf_closed_rsn}".strip()
+            tf_block_reason = f"{INVALIDATION_ZONE_STRUCTURAL} ({tf_id or ''}): {tf_closed_rsn}".strip()
+        elif tf_live_inv:
+            tf_block_reason = f"{INVALIDATION_SETUP_SL_BREACHED} ({tf_id or ''}): {tf_live_rsn}".strip()
         elif tf_persisted_inv:
             pers_msg = (tf_persisted_rec or {}).get("reason") if isinstance(tf_persisted_rec, dict) else ""
             tf_block_reason = f"Kandidat trend-following {tf_id or ''} INVALID — BROKEN: {pers_msg or 'tercatat invalid pada scan sebelumnya'}".strip()
@@ -9336,6 +10490,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             "bos_timeframe": bc.get("bos_timeframe") or bc.get("formation_timeframe") or bc.get("timeframe", "M30"),
             "formation_time": bc.get("formation_time"),
             "sl_recommended": float(tf_plan["sl"]),
+            "setup_sl": float(tf_plan["sl"]),
             "grade": bc.get("grade", "B"),
             "score": float(bc.get("score", 75.0)),
             "freshness": "FRESH",
@@ -9546,6 +10701,7 @@ from modules.zone_formatter import (  # noqa: E402
     _format_wib_summary_time,
     _norm_stage_label,
     _num,
+    build_smc_invalidation_reason,
     build_smc_zone_reason,
     format_decision_text,
     format_diagnostic_report,
@@ -9554,8 +10710,10 @@ from modules.zone_formatter import (  # noqa: E402
     format_scan_presentation,
     format_scan_summary,
     format_scanner_audit,
+    format_smc_invalid_why,
     format_smc_zone_lines,
     format_smc_zone_plan,
     format_zone_evidence,
+    premarket_lines,
     smc_zone_summary,
 )

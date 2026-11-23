@@ -11,17 +11,198 @@ import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
 
-from modules.config import SYMBOL, TIMEFRAMES, MAKS_RISIKO_TERBUKA_PCT, MAKS_RUGI_HARIAN_PCT
+from modules.config import SYMBOL, TIMEFRAMES, MAKS_RISIKO_TERBUKA_PCT, MAKS_RUGI_HARIAN_PCT, SERVER_UTC_OFFSET_JAM
 from modules.utils import (
     _catat_error,
+    deteksi_offset,
     get_symbol_unit_spec,
     price_distance_to_mt5_points,
     price_distance_to_pips,
     format_price_distance,
+    WIB_TZ,
 )
 
 MT5_TERHUBUNG = False
 MT5_IPC_LOCK = threading.RLock()
+_MT5_SERVER_OFFSET_CACHE = {"offset": None, "ts": 0.0}
+_MT5_ITEM_HISTORY_CACHE = {}
+
+
+def get_mt5_server_utc_offset_hours(tick=None, allow_live_query=True):
+    """Deteksi offset UTC server broker MT5 (jam) dan cache agar konversi timestamp posisi/order lama tetap akurat."""
+    if SERVER_UTC_OFFSET_JAM is not None:
+        try:
+            return float(SERVER_UTC_OFFSET_JAM)
+        except (TypeError, ValueError):
+            pass
+    now_s = time.time()
+    if tick is not None and getattr(tick, "time", 0):
+        off = deteksi_offset(tick)
+        if off is not None:
+            _MT5_SERVER_OFFSET_CACHE["offset"] = float(off)
+            _MT5_SERVER_OFFSET_CACHE["ts"] = now_s
+            return float(off)
+    cached_off = _MT5_SERVER_OFFSET_CACHE.get("offset")
+    if cached_off is not None and (now_s - float(_MT5_SERVER_OFFSET_CACHE.get("ts") or 0.0)) < 300.0:
+        return float(cached_off)
+    if allow_live_query:
+        try:
+            if pastikan_mt5_aktif():
+                with MT5_IPC_LOCK:
+                    t_live = mt5.symbol_info_tick(SYMBOL)
+                if t_live is not None and getattr(t_live, "time", 0):
+                    off = deteksi_offset(t_live)
+                    if off is not None:
+                        _MT5_SERVER_OFFSET_CACHE["offset"] = float(off)
+                        _MT5_SERVER_OFFSET_CACHE["ts"] = now_s
+                        return float(off)
+        except Exception:
+            pass
+    return float(cached_off) if cached_off is not None else 0.0
+
+
+def mt5_ts_to_utc_epoch(raw_ts, raw_msc=0, server_offset_hours=None):
+    """Konversi timestamp MT5 (waktu server broker, detik/milidetik) ke UTC epoch detik; 0.0 bila tidak tersedia."""
+    try:
+        msc_v = float(raw_msc or 0.0)
+    except (TypeError, ValueError):
+        msc_v = 0.0
+    try:
+        sec_v = float(raw_ts or 0.0)
+    except (TypeError, ValueError):
+        sec_v = 0.0
+    ts_val = (msc_v / 1000.0) if msc_v > 1e11 else (sec_v if sec_v > 0 else 0.0)
+    if ts_val <= 0.0 or not math.isfinite(ts_val):
+        return 0.0
+    off_h = server_offset_hours if server_offset_hours is not None else get_mt5_server_utc_offset_hours(allow_live_query=False)
+    if off_h:
+        ts_val -= float(off_h) * 3600.0
+    return float(ts_val)
+
+
+def format_mt5_wib(utc_ts, short=False):
+    """Format UTC epoch ke WIB (Asia/Jakarta, UTC+7). Mengembalikan '' bila timestamp tidak tersedia (jangan mengarang)."""
+    try:
+        ts_f = float(utc_ts or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if ts_f <= 0.0 or not math.isfinite(ts_f):
+        return ""
+    try:
+        dt_wib = datetime.fromtimestamp(ts_f, tz=timezone.utc).astimezone(WIB_TZ)
+        if short:
+            return dt_wib.strftime("%d-%b %H:%M WIB")
+        return dt_wib.strftime("%Y-%m-%d %H:%M:%S WIB")
+    except Exception:
+        return ""
+
+
+def fetch_mt5_item_history(
+    ticket=None,
+    position_id=None,
+    is_order=False,
+    server_offset_hours=None,
+    allow_live_query=True,
+):
+    """
+    Ambil metadata histori MT5 secara targeted berdasarkan ticket/position_id (tanpa full history scan).
+    Hasil di-cache per ticket/position_id agar tidak membebani loop pantau tiap tick.
+    """
+    pid = int(position_id) if (position_id is not None and str(position_id).isdigit() and int(position_id) > 0) else None
+    tkt = int(ticket) if (ticket is not None and str(ticket).isdigit() and int(ticket) > 0) else None
+    cache_key = ("ORD" if is_order else "POS", pid or tkt)
+    if cache_key[1] is None:
+        return {}
+
+    now_s = time.time()
+    cached = _MT5_ITEM_HISTORY_CACHE.get(cache_key)
+    if isinstance(cached, dict):
+        ttl = 300.0 if cached.get("closed_ts", 0.0) > 0 else 60.0
+        if (now_s - float(cached.get("_fetched_at") or 0.0)) < ttl:
+            return cached
+
+    if not allow_live_query:
+        return cached if isinstance(cached, dict) else {}
+
+    out = {
+        "order_id": tkt if is_order else None,
+        "deal_id": None,
+        "close_deal_id": None,
+        "order_created_ts": 0.0,
+        "executed_ts": 0.0,
+        "closed_ts": 0.0,
+        "order_created_wib": "",
+        "executed_wib": "",
+        "closed_wib": "",
+        "order_created_wib_short": "",
+        "executed_wib_short": "",
+        "closed_wib_short": "",
+        "close_price": 0.0,
+        "_fetched_at": now_s,
+    }
+    try:
+        if not pastikan_mt5_aktif():
+            return cached if isinstance(cached, dict) else out
+        off_h = server_offset_hours if server_offset_hours is not None else get_mt5_server_utc_offset_hours(allow_live_query=True)
+        h_orders = ()
+        h_deals = ()
+        with MT5_IPC_LOCK:
+            if pid:
+                h_orders = mt5.history_orders_get(position=pid) or ()
+                h_deals = mt5.history_deals_get(position=pid) or ()
+            elif tkt:
+                h_orders = mt5.history_orders_get(ticket=tkt) or ()
+                if not is_order:
+                    h_deals = mt5.history_deals_get(position=tkt) or ()
+
+        if h_orders:
+            h_orders_sorted = sorted(h_orders, key=lambda o: int(getattr(o, "time_setup", 0) or 0))
+            o0 = h_orders_sorted[0]
+            out["order_id"] = getattr(o0, "ticket", out["order_id"])
+            c_ts = mt5_ts_to_utc_epoch(getattr(o0, "time_setup", 0), getattr(o0, "time_setup_msc", 0), off_h)
+            if c_ts > 0:
+                out["order_created_ts"] = c_ts
+                out["order_created_wib"] = format_mt5_wib(c_ts, short=False)
+                out["order_created_wib_short"] = format_mt5_wib(c_ts, short=True)
+            d_ts = mt5_ts_to_utc_epoch(getattr(o0, "time_done", 0), getattr(o0, "time_done_msc", 0), off_h)
+            if d_ts > 0 and getattr(o0, "state", None) == getattr(mt5, "ORDER_STATE_FILLED", 4):
+                out["executed_ts"] = d_ts
+                out["executed_wib"] = format_mt5_wib(d_ts, short=False)
+                out["executed_wib_short"] = format_mt5_wib(d_ts, short=True)
+
+        if h_deals:
+            h_deals_sorted = sorted(h_deals, key=lambda d: int(getattr(d, "time", 0) or 0))
+            in_entries = (getattr(mt5, "DEAL_ENTRY_IN", 0), getattr(mt5, "DEAL_ENTRY_INOUT", 2))
+            out_entries = (getattr(mt5, "DEAL_ENTRY_OUT", 1), getattr(mt5, "DEAL_ENTRY_INOUT", 2), getattr(mt5, "DEAL_ENTRY_OUT_BY", 3))
+            in_ds = [d for d in h_deals_sorted if getattr(d, "entry", -1) in in_entries]
+            out_ds = [d for d in h_deals_sorted if getattr(d, "entry", -1) in out_entries]
+            if in_ds:
+                d_in = in_ds[0]
+                out["deal_id"] = getattr(d_in, "ticket", None)
+                if not out["order_id"]:
+                    out["order_id"] = getattr(d_in, "order", None)
+                ex_ts = mt5_ts_to_utc_epoch(getattr(d_in, "time", 0), getattr(d_in, "time_msc", 0), off_h)
+                if ex_ts > 0:
+                    out["executed_ts"] = ex_ts
+                    out["executed_wib"] = format_mt5_wib(ex_ts, short=False)
+                    out["executed_wib_short"] = format_mt5_wib(ex_ts, short=True)
+            if out_ds:
+                d_out = out_ds[-1]
+                out["close_deal_id"] = getattr(d_out, "ticket", None)
+                out["close_price"] = float(getattr(d_out, "price", 0.0) or 0.0)
+                cl_ts = mt5_ts_to_utc_epoch(getattr(d_out, "time", 0), getattr(d_out, "time_msc", 0), off_h)
+                if cl_ts > 0:
+                    out["closed_ts"] = cl_ts
+                    out["closed_wib"] = format_mt5_wib(cl_ts, short=False)
+                    out["closed_wib_short"] = format_mt5_wib(cl_ts, short=True)
+
+        _MT5_ITEM_HISTORY_CACHE[cache_key] = out
+        if len(_MT5_ITEM_HISTORY_CACHE) > 256:
+            oldest_k = min(_MT5_ITEM_HISTORY_CACHE.keys(), key=lambda k: float(_MT5_ITEM_HISTORY_CACHE[k].get("_fetched_at") or 0.0))
+            _MT5_ITEM_HISTORY_CACHE.pop(oldest_k, None)
+    except Exception as exc_h:
+        _catat_error("fetch_mt5_item_history", exc_h)
+    return out
 
 
 def _tutup_mt5():
@@ -361,10 +542,11 @@ def _query_mt5_symbol_items(fetch_fn, target_sym, accepted_syms):
     return matched, total_all
 
 
-def _normalize_mt5_pending_order(raw_order, default_symbol=SYMBOL, retrieved_at=""):
-    """Menormalisasi objek/dict order MT5 menjadi struktur read-only yang seragam (termasuk order manual tanpa magic number)."""
+def _normalize_mt5_pending_order(raw_order, default_symbol=SYMBOL, retrieved_at="", server_offset_hours=None):
+    """Menormalisasi objek/dict order MT5 menjadi struktur read-only lengkap dengan metadata & timestamp WIB asli."""
     if isinstance(raw_order, dict):
         ticket = raw_order.get("ticket")
+        pos_id = raw_order.get("position_id") or raw_order.get("identifier")
         sym = str(raw_order.get("symbol") or default_symbol or SYMBOL).strip()
         raw_type = raw_order.get("order_type") if raw_order.get("order_type") is not None else raw_order.get("type", 2)
         entry_val = raw_order.get("price_open", raw_order.get("entry_price", raw_order.get("entry", 0.0)))
@@ -372,10 +554,15 @@ def _normalize_mt5_pending_order(raw_order, default_symbol=SYMBOL, retrieved_at=
         tp_val = raw_order.get("tp", 0.0)
         vol_val = raw_order.get("volume_current", raw_order.get("volume_initial", raw_order.get("volume", 0.0)))
         setup_ts = raw_order.get("time_setup", 0)
+        setup_msc = raw_order.get("time_setup_msc", 0)
+        done_ts = raw_order.get("time_done", 0)
+        done_msc = raw_order.get("time_done_msc", 0)
         magic_val = raw_order.get("magic", 0)
         comment_val = raw_order.get("comment", "")
+        pre_created_ts = raw_order.get("order_created_ts", 0.0)
     else:
         ticket = getattr(raw_order, "ticket", None)
+        pos_id = getattr(raw_order, "position_id", None)
         sym = str(getattr(raw_order, "symbol", None) or default_symbol or SYMBOL).strip()
         raw_type = getattr(raw_order, "type", 2)
         entry_val = getattr(raw_order, "price_open", getattr(raw_order, "entry_price", 0.0))
@@ -383,8 +570,12 @@ def _normalize_mt5_pending_order(raw_order, default_symbol=SYMBOL, retrieved_at=
         tp_val = getattr(raw_order, "tp", 0.0)
         vol_val = getattr(raw_order, "volume_current", getattr(raw_order, "volume_initial", getattr(raw_order, "volume", 0.0)))
         setup_ts = getattr(raw_order, "time_setup", 0)
+        setup_msc = getattr(raw_order, "time_setup_msc", 0)
+        done_ts = getattr(raw_order, "time_done", 0)
+        done_msc = getattr(raw_order, "time_done_msc", 0)
         magic_val = getattr(raw_order, "magic", 0)
         comment_val = getattr(raw_order, "comment", "")
+        pre_created_ts = 0.0
 
     order_type_str, direction_str = _info_tipe_pending(raw_type)
     try:
@@ -408,12 +599,23 @@ def _normalize_mt5_pending_order(raw_order, default_symbol=SYMBOL, retrieved_at=
     except (TypeError, ValueError):
         tkt_val = ticket
     try:
+        pid_val = int(pos_id) if (pos_id is not None and int(pos_id) > 0) else None
+    except (TypeError, ValueError):
+        pid_val = None
+    try:
         magic_i = int(magic_val or 0)
     except (TypeError, ValueError):
         magic_i = 0
 
+    created_utc = float(pre_created_ts) if (isinstance(pre_created_ts, (int, float)) and pre_created_ts > 0) else mt5_ts_to_utc_epoch(setup_ts, setup_msc, server_offset_hours)
+    exec_utc = mt5_ts_to_utc_epoch(done_ts, done_msc, server_offset_hours)
+
     return {
         "ticket": tkt_val,
+        "order_id": tkt_val,
+        "position_id": pid_val,
+        "deal_id": None,
+        "mt5_status": "PENDING",
         "order_type": order_type_str,
         "direction": direction_str,
         "symbol": sym,
@@ -427,14 +629,30 @@ def _normalize_mt5_pending_order(raw_order, default_symbol=SYMBOL, retrieved_at=
         "is_manual": magic_i == 0,
         "comment": str(comment_val or ""),
         "time_setup": int(setup_ts or 0) if isinstance(setup_ts, (int, float)) else 0,
+        "time_setup_msc": int(setup_msc or 0) if isinstance(setup_msc, (int, float)) else 0,
+        "order_created_ts": created_utc,
+        "order_created_wib": format_mt5_wib(created_utc, short=False),
+        "order_created_wib_short": format_mt5_wib(created_utc, short=True),
+        "executed_ts": exec_utc,
+        "executed_wib": format_mt5_wib(exec_utc, short=False),
+        "executed_wib_short": format_mt5_wib(exec_utc, short=True),
+        "position_opened_ts": 0.0,
+        "position_opened_wib": "",
+        "position_opened_wib_short": "",
+        "closed_ts": 0.0,
+        "closed_wib": "",
+        "closed_wib_short": "",
         "retrieved_at": retrieved_at,
     }
 
 
-def _normalize_mt5_position(raw_pos, default_symbol=SYMBOL, retrieved_at=""):
-    """Menormalisasi objek/dict posisi aktif MT5 menjadi struktur read-only yang seragam (termasuk posisi manual tanpa magic number)."""
+def _normalize_mt5_position(raw_pos, default_symbol=SYMBOL, retrieved_at="", server_offset_hours=None, enrich_history=False):
+    """Menormalisasi objek/dict posisi aktif MT5 menjadi struktur read-only lengkap dengan metadata & timestamp WIB asli."""
     if isinstance(raw_pos, dict):
         ticket = raw_pos.get("ticket")
+        pos_id = raw_pos.get("position_id") or raw_pos.get("identifier") or ticket
+        order_id = raw_pos.get("order_id") or raw_pos.get("order")
+        deal_id = raw_pos.get("deal_id")
         sym = str(raw_pos.get("symbol") or default_symbol or SYMBOL).strip()
         raw_type = raw_pos.get("direction") if raw_pos.get("direction") is not None else raw_pos.get("type", 0)
         entry_val = raw_pos.get("price_open", raw_pos.get("entry_price", 0.0))
@@ -443,10 +661,19 @@ def _normalize_mt5_position(raw_pos, default_symbol=SYMBOL, retrieved_at=""):
         vol_val = raw_pos.get("volume", 0.0)
         prof_val = raw_pos.get("profit", 0.0)
         open_ts = raw_pos.get("time", 0)
+        open_msc = raw_pos.get("time_msc", 0)
         magic_val = raw_pos.get("magic", 0)
         comment_val = raw_pos.get("comment", "")
+        pre_open_utc = raw_pos.get("position_opened_ts", 0.0)
+        pre_created_utc = raw_pos.get("order_created_ts", 0.0)
+        pre_exec_utc = raw_pos.get("executed_ts", 0.0)
+        pre_closed_utc = raw_pos.get("closed_ts", 0.0)
+        raw_mt5_st = str(raw_pos.get("mt5_status") or "OPEN").strip().upper()
     else:
         ticket = getattr(raw_pos, "ticket", None)
+        pos_id = getattr(raw_pos, "identifier", None) or ticket
+        order_id = None
+        deal_id = None
         sym = str(getattr(raw_pos, "symbol", None) or default_symbol or SYMBOL).strip()
         raw_type = getattr(raw_pos, "type", 0)
         entry_val = getattr(raw_pos, "price_open", 0.0)
@@ -455,8 +682,14 @@ def _normalize_mt5_position(raw_pos, default_symbol=SYMBOL, retrieved_at=""):
         vol_val = getattr(raw_pos, "volume", 0.0)
         prof_val = getattr(raw_pos, "profit", 0.0)
         open_ts = getattr(raw_pos, "time", 0)
+        open_msc = getattr(raw_pos, "time_msc", 0)
         magic_val = getattr(raw_pos, "magic", 0)
         comment_val = getattr(raw_pos, "comment", "")
+        pre_open_utc = 0.0
+        pre_created_utc = 0.0
+        pre_exec_utc = 0.0
+        pre_closed_utc = 0.0
+        raw_mt5_st = "OPEN"
 
     if isinstance(raw_type, str):
         direction_str = "SELL" if "SELL" in raw_type.strip().upper() else "BUY"
@@ -487,12 +720,46 @@ def _normalize_mt5_position(raw_pos, default_symbol=SYMBOL, retrieved_at=""):
     except (TypeError, ValueError):
         tkt_val = ticket
     try:
+        pid_val = int(pos_id) if pos_id is not None else tkt_val
+    except (TypeError, ValueError):
+        pid_val = tkt_val
+    try:
         magic_i = int(magic_val or 0)
     except (TypeError, ValueError):
         magic_i = 0
 
+    open_utc = float(pre_open_utc) if (isinstance(pre_open_utc, (int, float)) and pre_open_utc > 0) else mt5_ts_to_utc_epoch(open_ts, open_msc, server_offset_hours)
+    created_utc = float(pre_created_utc) if (isinstance(pre_created_utc, (int, float)) and pre_created_utc > 0) else 0.0
+    exec_utc = float(pre_exec_utc) if (isinstance(pre_exec_utc, (int, float)) and pre_exec_utc > 0) else 0.0
+    closed_utc = float(pre_closed_utc) if (isinstance(pre_closed_utc, (int, float)) and pre_closed_utc > 0) else 0.0
+
+    if enrich_history and (pid_val or tkt_val):
+        hist = fetch_mt5_item_history(
+            ticket=tkt_val,
+            position_id=pid_val,
+            is_order=False,
+            server_offset_hours=server_offset_hours,
+            allow_live_query=True,
+        )
+        if hist:
+            if not order_id and hist.get("order_id"):
+                order_id = hist.get("order_id")
+            if not deal_id and hist.get("deal_id"):
+                deal_id = hist.get("deal_id")
+            if created_utc <= 0 and float(hist.get("order_created_ts") or 0.0) > 0:
+                created_utc = float(hist["order_created_ts"])
+            if exec_utc <= 0 and float(hist.get("executed_ts") or 0.0) > 0:
+                exec_utc = float(hist["executed_ts"])
+            if closed_utc <= 0 and float(hist.get("closed_ts") or 0.0) > 0:
+                closed_utc = float(hist["closed_ts"])
+
     return {
         "ticket": tkt_val,
+        "position_id": pid_val,
+        "identifier": pid_val,
+        "order_id": order_id,
+        "deal_id": deal_id,
+        "mt5_status": raw_mt5_st if raw_mt5_st in ("PENDING", "OPEN", "CLOSED") else "OPEN",
         "type": 0 if direction_str == "BUY" else 1,
         "direction": direction_str,
         "symbol": sym,
@@ -506,8 +773,257 @@ def _normalize_mt5_position(raw_pos, default_symbol=SYMBOL, retrieved_at=""):
         "is_manual": magic_i == 0,
         "comment": str(comment_val or ""),
         "time": int(open_ts or 0) if isinstance(open_ts, (int, float)) else 0,
+        "time_msc": int(open_msc or 0) if isinstance(open_msc, (int, float)) else 0,
+        "order_created_ts": created_utc,
+        "order_created_wib": format_mt5_wib(created_utc, short=False),
+        "order_created_wib_short": format_mt5_wib(created_utc, short=True),
+        "executed_ts": exec_utc,
+        "executed_wib": format_mt5_wib(exec_utc, short=False),
+        "executed_wib_short": format_mt5_wib(exec_utc, short=True),
+        "position_opened_ts": open_utc,
+        "position_opened_wib": format_mt5_wib(open_utc, short=False),
+        "position_opened_wib_short": format_mt5_wib(open_utc, short=True),
+        "closed_ts": closed_utc,
+        "closed_wib": format_mt5_wib(closed_utc, short=False),
+        "closed_wib_short": format_mt5_wib(closed_utc, short=True),
         "retrieved_at": retrieved_at,
     }
+
+
+def evaluate_mt5_setup_match(
+    item,
+    *,
+    direction="",
+    zone_low=0.0,
+    zone_high=0.0,
+    plan_entry=0.0,
+    zone_id="",
+    setup_version=None,
+    setup_created_ts=0.0,
+    zone_formation_ts=0.0,
+    linked_tickets=None,
+    signal_state=None,
+    accepted_syms=None,
+    entry_tol=0.05,
+    is_order=False,
+    method="",
+    server_offset_hours=None,
+):
+    """
+    Klasifikasi read-only yang memisahkan:
+    - `mt5_status`: PENDING | OPEN | CLOSED
+    - `setup_match`: CONFIRMED | INFERRED | UNRELATED | UNKNOWN
+    - `is_existing_position`: True bila posisi/order dibuka sebelum setup dibuat / zona terbentuk.
+
+    Aturan:
+    - CONFIRMED hanya jika ada bukti keterkaitan valid (mapping ticket/position_id/order_id/deal_id ke setup,
+      comment menyebut zone_id, atau signal_state terhubung) + symbol & arah cocok.
+    - Posisi/order yang dibuka sebelum setup_created_ts atau zone_formation_ts TIDAK boleh dianggap
+      eksekusi setup tersebut (is_existing_position=True, setup_match=UNRELATED/UNKNOWN).
+    - Kecocokan harga, arah, dan waktu saja (tanpa bukti mapping) hanya INFERRED.
+    """
+    def _get(obj, key, default=None):
+        return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+    sym = str(_get(item, "symbol", "") or "").strip().upper()
+    if accepted_syms and sym and sym not in accepted_syms:
+        return {"mt5_status": "PENDING" if is_order else "OPEN", "setup_match": "UNRELATED", "is_existing_position": False, "reason": "Symbol tidak cocok", "price_matches": False, "item_ts": 0.0}
+
+    tkt = _get(item, "ticket")
+    pid = _get(item, "position_id") or _get(item, "identifier") or tkt
+    oid = _get(item, "order_id") or _get(item, "order")
+    did = _get(item, "deal_id")
+    mt5_st = str(_get(item, "mt5_status") or ("PENDING" if is_order else "OPEN")).strip().upper()
+    if mt5_st not in ("PENDING", "OPEN", "CLOSED"):
+        mt5_st = "PENDING" if is_order else "OPEN"
+
+    if is_order:
+        raw_t = _get(item, "order_type")
+        if raw_t is None:
+            raw_t = _get(item, "type")
+        _, item_dir = _info_tipe_pending(raw_t)
+    else:
+        raw_t = _get(item, "direction")
+        if raw_t is None:
+            raw_t = _get(item, "type")
+        if isinstance(raw_t, str):
+            item_dir = "SELL" if "SELL" in raw_t.upper() else ("BUY" if "BUY" in raw_t.upper() else "")
+        else:
+            item_dir = "SELL" if int(raw_t or 0) == getattr(mt5, "ORDER_TYPE_SELL", 1) else "BUY"
+
+    want_dir = str(direction or "").strip().upper()
+    if want_dir in ("BUY", "SELL") and item_dir and item_dir != want_dir:
+        return {"mt5_status": mt5_st, "setup_match": "UNRELATED", "is_existing_position": False, "reason": "Arah tidak cocok", "price_matches": False, "item_ts": 0.0}
+
+    try:
+        px = float(_get(item, "price_open") or _get(item, "entry_price") or _get(item, "price") or 0.0)
+    except (TypeError, ValueError):
+        px = 0.0
+    tol = max(float(entry_tol or 0.0), PENDING_ENTRY_TOLERANCE_MIN_PT)
+    in_zone = bool(zone_low > 0 and zone_high >= zone_low and (zone_low - tol - 1e-9 <= px <= zone_high + tol + 1e-9))
+    near_ent = bool(plan_entry > 0 and abs(px - plan_entry) <= tol + 1e-9)
+    price_matches = bool(px > 0 and (in_zone or near_ent))
+
+    # Ambil timestamp UTC asli MT5 (jangan mengarang jika tidak ada)
+    if is_order:
+        item_ts = float(_get(item, "order_created_ts") or 0.0)
+        if item_ts <= 0:
+            item_ts = mt5_ts_to_utc_epoch(_get(item, "time_setup", 0), _get(item, "time_setup_msc", 0), server_offset_hours)
+    else:
+        item_ts = float(_get(item, "position_opened_ts") or _get(item, "executed_ts") or 0.0)
+        if item_ts <= 0:
+            item_ts = mt5_ts_to_utc_epoch(_get(item, "time", 0), _get(item, "time_msc", 0), server_offset_hours)
+
+    # Bukti keterkaitan eksplisit (CONFIRMED)
+    linked_set = set()
+    for lt in (linked_tickets or ()):
+        if lt is not None:
+            try:
+                linked_set.add(int(lt))
+            except (TypeError, ValueError):
+                linked_set.add(str(lt))
+    item_ids = set()
+    for cid in (tkt, pid, oid, did):
+        if cid is not None:
+            try:
+                item_ids.add(int(cid))
+            except (TypeError, ValueError):
+                item_ids.add(str(cid))
+
+    tkt_linked = bool(linked_set and (item_ids & linked_set))
+    comment_str = str(_get(item, "comment", "") or "").strip()
+    magic_val = 0
+    try:
+        magic_val = int(_get(item, "magic", 0) or 0)
+    except (TypeError, ValueError):
+        magic_val = 0
+    zid = str(zone_id or "").strip()
+    zid_short = zid[-8:] if len(zid) >= 8 else zid
+    comment_linked = bool(
+        comment_str and (
+            (zid and zid.lower() in comment_str.lower())
+            or (zid_short and len(zid_short) >= 8 and zid_short.lower() in comment_str.lower())
+            or (method and f"{str(method).lower()}:" in comment_str.lower())
+        )
+    )
+    sig_linked = False
+    if isinstance(signal_state, dict):
+        s_obj = signal_state.get("sinyal") if isinstance(signal_state.get("sinyal"), dict) else signal_state
+        if isinstance(s_obj, dict):
+            s_tkt = s_obj.get("ticket")
+            s_zid = str(s_obj.get("zone_id") or "")
+            s_magic = int(s_obj.get("magic") or 0)
+            if s_tkt and (s_tkt in item_ids) and (not s_zid or not zid or s_zid == zid):
+                sig_linked = True
+            elif magic_val > 0 and s_magic > 0 and magic_val == s_magic and str(s_obj.get("arah") or "").upper() == item_dir:
+                sig_linked = True
+
+    has_explicit_link = bool(tkt_linked or comment_linked or sig_linked)
+
+    z_ts = float(zone_formation_ts or 0.0)
+    s_ts = float(setup_created_ts or 0.0)
+    ref_ts = max(z_ts, s_ts) if (z_ts > 0 or s_ts > 0) else 0.0
+    opened_before_zone = bool(item_ts > 0 and z_ts > 0 and item_ts < (z_ts - 60.0))
+    opened_before_setup = bool(item_ts > 0 and s_ts > 0 and item_ts < (s_ts - 60.0))
+    is_existing = bool(opened_before_zone or opened_before_setup)
+
+    if not price_matches and not has_explicit_link:
+        return {"mt5_status": mt5_st, "setup_match": "UNRELATED", "is_existing_position": is_existing, "reason": "Harga di luar zona & tidak ada mapping setup", "price_matches": False, "item_ts": item_ts}
+
+    if has_explicit_link and not opened_before_zone:
+        return {
+            "mt5_status": mt5_st,
+            "setup_match": "CONFIRMED",
+            "is_existing_position": False,
+            "reason": "Mapping order/deal/position ke setup terkonfirmasi",
+            "price_matches": price_matches,
+            "item_ts": item_ts,
+        }
+
+    if is_existing:
+        rsn_ex = (
+            "Dibuka sebelum zona terbentuk (EXISTING POSITION)"
+            if opened_before_zone
+            else "Dibuka sebelum setup version dibuat (EXISTING POSITION)"
+        )
+        return {
+            "mt5_status": mt5_st,
+            "setup_match": "UNRELATED",
+            "is_existing_position": True,
+            "reason": rsn_ex,
+            "price_matches": price_matches,
+            "item_ts": item_ts,
+        }
+
+    if item_ts <= 0 or ref_ts <= 0:
+        return {
+            "mt5_status": mt5_st,
+            "setup_match": "UNKNOWN",
+            "is_existing_position": True if not is_order else False,
+            "reason": "Waktu pembukaan MT5 atau waktu pembentukan setup tidak lengkap",
+            "price_matches": price_matches,
+            "item_ts": item_ts,
+        }
+
+    return {
+        "mt5_status": mt5_st,
+        "setup_match": "INFERRED",
+        "is_existing_position": False,
+        "reason": "Harga, arah, dan waktu cocok namun tanpa mapping order/setup (manual)",
+        "price_matches": price_matches,
+        "item_ts": item_ts,
+    }
+
+
+def format_tracked_position_compact(pos_info, digits=2):
+    """
+    Format ringkas 1 baris untuk terminal:
+    `#60927598 SELL @3624.51 | OPEN 23-Nov 10:25 WIB | EXISTING | MATCH:UNKNOWN`
+    Menggunakan timestamp MT5 sebenarnya (bukan contoh).
+    """
+    if not isinstance(pos_info, dict):
+        return ""
+    tkt = pos_info.get("ticket")
+    if not tkt:
+        return ""
+    arah = str(pos_info.get("direction") or "").strip().upper()
+    try:
+        px = float(pos_info.get("open_price") or pos_info.get("price_open") or pos_info.get("entry_price") or 0.0)
+    except (TypeError, ValueError):
+        px = 0.0
+    px_part = f"@{px:.{digits}f}" if px > 0 else ""
+
+    mt5_st = str(pos_info.get("mt5_status") or "OPEN").strip().upper()
+    if mt5_st not in ("PENDING", "OPEN", "CLOSED"):
+        mt5_st = "OPEN"
+
+    if mt5_st == "CLOSED":
+        t_short = str(pos_info.get("closed_wib_short") or format_mt5_wib(pos_info.get("closed_ts"), short=True) or "").strip()
+    elif mt5_st == "PENDING":
+        t_short = str(pos_info.get("order_created_wib_short") or format_mt5_wib(pos_info.get("order_created_ts"), short=True) or "").strip()
+    else:
+        t_short = str(
+            pos_info.get("position_opened_wib_short")
+            or format_mt5_wib(pos_info.get("position_opened_ts"), short=True)
+            or pos_info.get("executed_wib_short")
+            or format_mt5_wib(pos_info.get("executed_ts"), short=True)
+            or ""
+        ).strip()
+
+    st_time_part = f"{mt5_st} {t_short}".strip() if t_short else f"{mt5_st} TIME:UNKNOWN"
+    raw_match = str(pos_info.get("setup_match") or pos_info.get("match_status") or "UNKNOWN").strip().upper()
+    if raw_match == "VERIFIED":
+        raw_match = "CONFIRMED"
+    elif raw_match == "UNVERIFIED":
+        raw_match = "UNKNOWN"
+    if raw_match not in ("CONFIRMED", "INFERRED", "UNRELATED", "UNKNOWN"):
+        raw_match = "UNKNOWN"
+
+    parts = [f"#{tkt} {arah} {px_part}".strip(), st_time_part]
+    if pos_info.get("is_existing_position") or raw_match in ("UNRELATED", "UNKNOWN"):
+        parts.append("EXISTING")
+    parts.append(f"MATCH:{raw_match}")
+    return " | ".join(parts)
 
 
 def fetch_mt5_pending_orders_snapshot(
@@ -703,12 +1219,13 @@ def fetch_mt5_pending_orders_snapshot(
             pos_q_ok = raw_positions is not None
             raw_positions = raw_positions or []
 
+        server_off_h = get_mt5_server_utc_offset_hours(allow_live_query=True)
         entry_tol = round(max(10.0 * tick_size, 2.0 * point, PENDING_ENTRY_TOLERANCE_MIN_PT), max(digits, 3))
         level_tol = round(max(10.0 * tick_size, 2.0 * point, PENDING_LEVEL_TOLERANCE_MIN_PT), max(digits, 3))
         norm_orders = []
         seen_ord_tkts = set()
         for raw_o in raw_orders:
-            no = _normalize_mt5_pending_order(raw_o, default_symbol=target_sym, retrieved_at=now_wib)
+            no = _normalize_mt5_pending_order(raw_o, default_symbol=target_sym, retrieved_at=now_wib, server_offset_hours=server_off_h)
             if no["symbol"].upper() in accepted_syms:
                 t_o = no.get("ticket")
                 if t_o is not None:
@@ -719,7 +1236,13 @@ def fetch_mt5_pending_orders_snapshot(
         norm_positions = []
         seen_pos_tkts = set()
         for raw_p in raw_positions:
-            np_item = _normalize_mt5_position(raw_p, default_symbol=target_sym, retrieved_at=now_wib)
+            np_item = _normalize_mt5_position(
+                raw_p,
+                default_symbol=target_sym,
+                retrieved_at=now_wib,
+                server_offset_hours=server_off_h,
+                enrich_history=True,
+            )
             if np_item["symbol"].upper() in accepted_syms:
                 t_p = np_item.get("ticket")
                 if t_p is not None:
@@ -1379,8 +1902,10 @@ def format_mt5_orders_summary_lines(
     detail ticket hanya untuk order yang cocok dengan active setup atau saat detailed=True.
     """
     snap = mt5_snapshot if isinstance(mt5_snapshot, dict) else {}
+    sync_ts = str(snap.get("retrieved_at") or "").strip()
+    sync_sfx = f" | Sync: {sync_ts}" if sync_ts else ""
     if not snap.get("query_ok"):
-        return [f"- MT5 Sync         : UNKNOWN ({snap.get('reason') or 'MT5 tidak terhubung'})"]
+        return [f"- MT5 Sync         : UNKNOWN ({snap.get('reason') or 'MT5 tidak terhubung'}){sync_sfx}"]
     digits = int(snap.get("digits") or 2)
     sym = snap.get("symbol") or SYMBOL
     orders = list(snap.get("orders") or [])
@@ -1438,7 +1963,7 @@ def format_mt5_orders_summary_lines(
     other_cnt = max(0, len(orders) - matched_cnt)
 
     lines = [
-        f"- MT5 Summary      : Positions: {len(positions)} | Pending: {len(orders)} (Matched: {matched_cnt} | Unmatched Manual: {unmatched_manual_cnt} | On Invalid Zone: {inv_ord_cnt}) | Without SL: {total_no_sl}{nosl_breakdown}",
+        f"- MT5 Summary      : Positions: {len(positions)} | Pending: {len(orders)} (Matched: {matched_cnt} | Unmatched Manual: {unmatched_manual_cnt} | On Invalid Zone: {inv_ord_cnt}) | Without SL: {total_no_sl}{nosl_breakdown}{sync_sfx}",
     ]
     if matched_ord_seq:
         m_parts = []
@@ -1468,11 +1993,10 @@ def format_mt5_orders_summary_lines(
             mp = matched_pos_map[k]
             sl_v = float(mp.get("sl") or 0.0)
             sl_tag = "SL MISSING!" if sl_v <= 0 else f"SL {sl_v:.{digits}f}"
-            p_parts.append(
-                f"#{mp.get('ticket')} {mp.get('direction')} {float(mp.get('volume') or 0.0):g}lot @ {float(mp.get('entry_price') or mp.get('price_open') or 0.0):.{digits}f} ({sl_tag})"
-            )
+            compact_p = format_tracked_position_compact(mp, digits=digits)
+            p_parts.append(f"{compact_p} ({sl_tag})" if compact_p else f"#{mp.get('ticket')} {mp.get('direction')} @ {float(mp.get('entry_price') or mp.get('price_open') or 0.0):.{digits}f} ({sl_tag})")
         extra_p = f" (+{len(matched_pos_seq) - 2})" if len(matched_pos_seq) > 2 else ""
-        lines.append(f"- Matched Position : {'; '.join(p_parts)}{extra_p}")
+        lines.append(f"- Tracked Position : {'; '.join(p_parts)}{extra_p}")
 
     if risk_sum["headline"]:
         lines.append(f"- {risk_sum['headline']}")
@@ -1570,7 +2094,15 @@ def reconcile_pending_plan_with_mt5(plan, mt5_snapshot=None, symbol=SYMBOL, excl
     positions = list(snap.get("positions") or [])
     excl_set = set(excluded_tickets or ())
 
+    setup_created_ts = float(p_dict.get("created_at_ts") or 0.0)
+    zone_form_ts = float(p_dict.get("zone_formation_ts") or 0.0)
+    linked_tkts = list(p_dict.get("linked_tickets") or [])
+    if plan_ticket is not None:
+        linked_tkts.append(plan_ticket)
+
     matched_positions = []
+    confirmed_positions = []
+    existing_positions = []
     for pos_item in positions:
         if str(pos_item.get("symbol") or "").upper() not in accepted_syms:
             continue
@@ -1579,7 +2111,30 @@ def reconcile_pending_plan_with_mt5(plan, mt5_snapshot=None, symbol=SYMBOL, excl
         in_z_p = bool(zone_low > 0 and zone_high > 0 and (zone_low - entry_tol <= pos_ent <= zone_high + entry_tol))
         near_e_p = bool(plan_entry > 0 and abs(pos_ent - plan_entry) <= max(entry_tol, 1.5))
         if p_dir in ("BUY", "SELL") and pos_dir == p_dir and (in_z_p or near_e_p):
-            matched_positions.append(pos_item)
+            ev_m = evaluate_mt5_setup_match(
+                pos_item,
+                direction=p_dir,
+                zone_low=zone_low,
+                zone_high=zone_high,
+                plan_entry=plan_entry,
+                zone_id=zone_id,
+                setup_created_ts=setup_created_ts,
+                zone_formation_ts=zone_form_ts,
+                linked_tickets=linked_tkts,
+                accepted_syms=accepted_syms,
+                entry_tol=max(entry_tol, 1.5),
+                is_order=False,
+            )
+            pos_enriched = dict(pos_item)
+            pos_enriched["mt5_status"] = ev_m["mt5_status"]
+            pos_enriched["setup_match"] = ev_m["setup_match"]
+            pos_enriched["is_existing_position"] = ev_m["is_existing_position"]
+            pos_enriched["match_reason"] = ev_m["reason"]
+            matched_positions.append(pos_enriched)
+            if ev_m["setup_match"] == "CONFIRMED":
+                confirmed_positions.append(pos_enriched)
+            elif ev_m["is_existing_position"] or ev_m["setup_match"] in ("UNRELATED", "UNKNOWN"):
+                existing_positions.append(pos_enriched)
 
     base_res = {
         "zone_id": zone_id,
@@ -1607,7 +2162,14 @@ def reconcile_pending_plan_with_mt5(plan, mt5_snapshot=None, symbol=SYMBOL, excl
         "matched_tickets": [],
         "matched_orders": [],
         "matched_positions": matched_positions,
+        "confirmed_positions": confirmed_positions,
+        "existing_positions": existing_positions,
         "active_position_tickets": [p.get("ticket") for p in matched_positions if p.get("ticket") is not None],
+        "mt5_status": "OPEN" if matched_positions else ("PENDING" if len(orders) > 0 else "NONE"),
+        "setup_match": (
+            "CONFIRMED" if confirmed_positions
+            else (existing_positions[0].get("setup_match", "UNKNOWN") if existing_positions else ("INFERRED" if matched_positions else "UNRELATED"))
+        ),
         "orders_without_sl": list(snap.get("orders_without_sl") or []),
         "positions_without_sl": list(snap.get("positions_without_sl") or []),
         "primary_match": None,
@@ -1906,6 +2468,7 @@ def cek_posisi_terbuka_mt5(harga_skrg=0.0, pending_plans=None):
         out.append("  [POSISI & PENDING ORDER]: DATA UNAVAILABLE (Gagal membaca data posisi/order dari MT5).")
         return "\n".join(out) + "\n"
 
+    server_off_live = get_mt5_server_utc_offset_hours(tick=tick, allow_live_query=False)
     if pos:
         out.append(f"  [POSISI RUNNING / FLOATING SAAT INI — TOTAL {len(pos)} POSISI AKTIF (WAJIB DIKAWAL, JANGAN DIABAIKAN!)]:")
         for p in pos:
@@ -1913,6 +2476,8 @@ def cek_posisi_terbuka_mt5(harga_skrg=0.0, pending_plans=None):
             harga_tutup = bid_live if arah == "BUY" else ask_live
             poin = (harga_tutup - p.price_open) if arah == "BUY" else (p.price_open - harga_tutup)
             pct_eq = (p.profit / eq * 100.0) if eq > 0 else 0.0
+            open_utc_p = mt5_ts_to_utc_epoch(getattr(p, "time", 0), getattr(p, "time_msc", 0), server_off_live)
+            open_wib_p = format_mt5_wib(open_utc_p, short=False) or "TIME_UNKNOWN"
             if p.sl and p.sl > 0:
                 sudah_bep = (arah == "BUY" and p.sl >= p.price_open) or (arah == "SELL" and p.sl <= p.price_open)
                 if sudah_bep:
@@ -1925,7 +2490,8 @@ def cek_posisi_terbuka_mt5(harga_skrg=0.0, pending_plans=None):
                 sl_info = f"BELUM DISET (⚠️ RAWAN TANPA PENGAMAN!) [CRITICAL WARNING: Posisi #{p.ticket} TANPA STOP LOSS!]"
             tp_info = f"{p.tp:.{digits}f}" if (p.tp and p.tp > 0) else "BELUM DISET (Terbuka / Runner)"
             out.append(
-                f"  - Ticket #{p.ticket} | Simbol: {getattr(p, 'symbol', SYMBOL)} | {arah} {p.volume} lot @ {p.price_open:.{digits}f} (Harga sekarang: {harga_tutup:.{digits}f}) | "
+                f"  - Ticket #{p.ticket} (PosID #{getattr(p, 'identifier', p.ticket)}) | MT5 STATUS: OPEN | POSITION OPENED: {open_wib_p} | "
+                f"Simbol: {getattr(p, 'symbol', SYMBOL)} | {arah} {p.volume} lot @ {p.price_open:.{digits}f} (Harga sekarang: {harga_tutup:.{digits}f}) | "
                 f"SL: {sl_info} | TP: {tp_info} | "
                 f"Floating: {p.profit:+,.2f} {cur} ({pct_eq:+.2f}% equity | {format_price_distance(poin, spec=u_spec, include_mt5_points=True, signed=True)})"
             )
@@ -1941,6 +2507,8 @@ def cek_posisi_terbuka_mt5(harga_skrg=0.0, pending_plans=None):
             vol_ord = getattr(o, "volume_current", getattr(o, "volume_initial", 0.0))
             jarak_ord = abs(bid_live - o.price_open) if bid_live > 0 else 0.0
             letak_ord = "di atas harga sekarang" if o.price_open > bid_live else "di bawah harga sekarang"
+            cr_utc_o = mt5_ts_to_utc_epoch(getattr(o, "time_setup", 0), getattr(o, "time_setup_msc", 0), server_off_live)
+            cr_wib_o = format_mt5_wib(cr_utc_o, short=False) or "TIME_UNKNOWN"
             if (o.sl and o.sl > 0):
                 sl_ord_txt = f"{o.sl:.{digits}f} (jarak SL {format_price_distance(abs(o.price_open - o.sl), spec=u_spec, include_mt5_points=True)})"
             else:
@@ -1948,17 +2516,15 @@ def cek_posisi_terbuka_mt5(harga_skrg=0.0, pending_plans=None):
             tp_ord_txt = f"{o.tp:.{digits}f}" if (o.tp and o.tp > 0) else "BELUM DISET"
             exp_time = getattr(o, "time_expiration", 0)
             if isinstance(exp_time, (int, float)) and exp_time > 0:
-                try:
-                    exp_txt = pd.Timestamp(int(exp_time), unit="s").strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    exp_txt = str(exp_time)
+                exp_utc = mt5_ts_to_utc_epoch(exp_time, 0, server_off_live)
+                exp_txt = format_mt5_wib(exp_utc, short=False) or str(exp_time)
             else:
                 exp_txt = "GTC (Good till cancelled)"
 
             out.append(
-                f"  - Ticket #{o.ticket} | Simbol: {getattr(o, 'symbol', SYMBOL)} | {nama_ord} ({arah_ord}) {vol_ord} lot @ {o.price_open:.{digits}f} "
+                f"  - Ticket #{o.ticket} | MT5 STATUS: PENDING | ORDER CREATED: {cr_wib_o} | Simbol: {getattr(o, 'symbol', SYMBOL)} | {nama_ord} ({arah_ord}) {vol_ord} lot @ {o.price_open:.{digits}f} "
                 f"(Jarak: {format_price_distance(jarak_ord, spec=u_spec, include_mt5_points=True)} {letak_ord}) | "
-                f"SL: {sl_ord_txt} | TP: {tp_ord_txt} | Expiration: {exp_txt} | Status: Placed in MT5"
+                f"SL: {sl_ord_txt} | TP: {tp_ord_txt} | Expiration: {exp_txt}"
             )
             if not (o.sl and o.sl > 0):
                 out.append(f"    CRITICAL WARNING: Pending Order #{o.ticket} tidak memiliki Stop Loss! Segera pasang Stop Loss manual di MT5 untuk membatasi risiko.")
@@ -2022,7 +2588,8 @@ def cek_posisi_terbuka_mt5(harga_skrg=0.0, pending_plans=None):
                 out.append(f"  [RIWAYAT POSISI YANG SUDAH DITUTUP HARI INI ({len(deals_hari)} transaksi selesai, terbaru di bawah)]:")
                 for d in deals_hari[-5:]:
                     arah_d = "SELL (tutup BUY)" if d.type == mt5.DEAL_TYPE_SELL else "BUY (tutup SELL)"
-                    t_d = pd.Timestamp(int(d.time), unit="s").strftime("%H:%M")
+                    d_utc = mt5_ts_to_utc_epoch(getattr(d, "time", 0), getattr(d, "time_msc", 0), server_off_live)
+                    t_d = format_mt5_wib(d_utc, short=False) or "TIME_UNKNOWN"
                     net_d = d.profit + d.commission + d.swap + getattr(d, "fee", 0.0)
                     alasan_d = {
                         getattr(mt5, "DEAL_REASON_SL", 4): "kena SL",
@@ -2030,7 +2597,7 @@ def cek_posisi_terbuka_mt5(harga_skrg=0.0, pending_plans=None):
                         getattr(mt5, "DEAL_REASON_SO", 6): "Stop Out",
                     }.get(getattr(d, "reason", -1), "tutup manual/script")
                     out.append(
-                        f"  - [{t_d} waktu server] Deal #{d.ticket} (Pos #{getattr(d, 'position_id', '-')}) | "
+                        f"  - [MT5 STATUS: CLOSED | CLOSED: {t_d}] Deal #{d.ticket} (Pos #{getattr(d, 'position_id', '-')}) | "
                         f"{arah_d} {d.volume} lot @ {d.price:.3f} | Hasil: {net_d:+,.2f} {cur} ({alasan_d})"
                     )
         except Exception as e_hist:

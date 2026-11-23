@@ -15,7 +15,7 @@ from modules.snr.config import get_snr_config
 from modules.snr.data_provider import prepare_snr_frame, safe_float, zone_confirmation_start
 from modules.snr.momentum_analysis import analyze_momentum
 from modules.snr.rejection_detection import detect_zone_rejection
-from modules.snr.retest_detection import detect_zone_retest
+from modules.snr.retest_detection import classify_snr_flip_status, detect_zone_retest
 from modules.snr.risk_reward import calculate_snr_risk_reward, opposing_risk_zones
 
 
@@ -421,17 +421,100 @@ def validate_snr_entry(
         )
 
     # Gate 4: Market Bias CONFLICT / UNCONFIRMED / M30 CONFLICT
+    # HTF_CONFLICT tetap menjadi filter risiko ketat (tidak otomatis mengeluarkan sinyal melawan momentum),
+    # namun M5 TETAP dievaluasi saat harga mendekati/menyentuh zona SNR eligible (rejection/breakout/momentum).
     mb = market_bias if isinstance(market_bias, dict) else {}
     bias_overall = str(mb.get("overall_bias", "")).upper()
     h4_bias = str(mb.get("h4", "")).upper()
+    h1_bias = str(mb.get("h1", "")).upper()
+    m30_bias = str(mb.get("m30", "")).upper()
     has_conflict = bool(mb.get("has_conflict", False)) or bias_overall == "CONFLICT"
     m30_conflict = bool(mb.get("m30_conflict", False))
-    if has_conflict or bias_overall in ("CONFLICT", "UNCONFIRMED", "DATA UNAVAILABLE"):
+    if bias_overall in ("UNCONFIRMED", "DATA UNAVAILABLE") and not has_conflict:
         return _blocked_wait(
-            f"Kondisi bias multi-timeframe ({bias_overall or 'CONFLICT'}) belum mengizinkan sinyal entry."
+            f"Kondisi bias multi-timeframe ({bias_overall}) belum mengizinkan sinyal entry.",
+            trigger_st="NOT CHECKED",
         )
-    if m30_conflict:
-        return _blocked_wait("Konflik momentum/struktur M30 terhadap arah struktur utama H4.")
+    if has_conflict or m30_conflict:
+        from modules.config import ZONE_APPROACH_DISTANCE_POINTS as _SNR_APP_PTS
+        conflict_code = "HTF_CONFLICT" if has_conflict else "M30_CONFLICT"
+        m5_mom_c = analyze_momentum(clean_m5, timeframe="M5", config=cfg, has_unclosed_last_bar=False)
+        pending_bo_c = (ranked_zones or {}).get("pending_break_zones") or []
+        recent_m5_snr = clean_m5.tail(6)
+        probe_zones = []
+        seen_pz = set()
+        for _pz in (active_sups[:1] + active_ress[:1] + list(pending_bo_c[:2])):
+            if not isinstance(_pz, dict):
+                continue
+            _pz_id = str(_pz.get("zone_id") or "")
+            if _pz_id and _pz_id in seen_pz:
+                continue
+            _lo_p = safe_float(_pz.get("low", _pz.get("price_low")), 0.0)
+            _hi_p = safe_float(_pz.get("high", _pz.get("price_high")), _lo_p)
+            _rec_touch = bool(
+                _lo_p > 0 and _hi_p >= _lo_p and not recent_m5_snr.empty
+                and ((recent_m5_snr["Low"] <= _hi_p) & (recent_m5_snr["High"] >= _lo_p)).any()
+            )
+            _was_t = bool(_rec_touch or int(_pz.get("touch_count") or 0) > 0 or str(_pz.get("lifecycle_status") or "").upper() in ("TOUCHED", "SWEEP", "BREAKOUT_PENDING", "BREAKDOWN_PENDING"))
+            if _live_zone_distance(_pz, cp) <= float(_SNR_APP_PTS) or _was_t:
+                if _pz_id:
+                    seen_pz.add(_pz_id)
+                probe_zones.append(_pz)
+        if not probe_zones:
+            # HTF_CONFLICT tetap filter entry, bukan alasan melewati evaluasi M5 bila zona SNR aktif tersedia.
+            _fb_cands = [
+                _z_fb for _z_fb in ([focus_zone] + active_sups[:1] + active_ress[:1])
+                if isinstance(_z_fb, dict)
+                and not _z_fb.get("is_far_reference")
+                and not _z_fb.get("is_distant_historical")
+                and str(_z_fb.get("zone_relevance") or "").upper() not in ("FAR_REFERENCE", "INVALID")
+            ]
+            if _fb_cands:
+                _fb_cands.sort(key=lambda _z_fb: _live_zone_distance(_z_fb, cp))
+                probe_zones.append(_fb_cands[0])
+        m5_notes = []
+        m5_eval_done = False
+        m5_confirmed_any = False
+        trig_c = f"NOT_CHECKED ({conflict_code})"
+        for _pz in probe_zones:
+            m5_eval_done = True
+            _zt = str(_pz.get("zone_type") or "").upper()
+            _rl = str(_pz.get("rank_label") or _zt)
+            _rej_c = detect_zone_rejection(_pz, clean_m5, config=cfg, has_unclosed_last_bar=False)
+            _bo_c = detect_zone_breakout(_pz, clean_m5, momentum_result=m5_mom_c, config=cfg, has_unclosed_last_bar=False)
+            _rej_st = str(_rej_c.get("status") or "NO_REJECTION").upper()
+            _bo_st = str(_bo_c.get("status") or "NO_BREAKOUT").upper()
+            if _bo_st in ("BREAKOUT_PENDING_CONFIRMATION", "VALID_BREAKOUT"):
+                m5_notes.append(f"{_rl} {_bo_st}")
+                trig_c = f"M5 UNCONFIRMED ({_bo_st} | {conflict_code})"
+            elif _rej_st in ("BULLISH_REJECTION", "BEARISH_REJECTION") and _rej_c.get("confirmed"):
+                m5_confirmed_any = True
+                m5_notes.append(f"{_rl} {_rej_st}")
+                trig_c = f"M5 CONFIRMED ({_rej_st} | BLOCKED: {conflict_code})"
+            else:
+                m5_notes.append(f"{_rl} UNCONFIRMED ({m5_mom_c.get('direction', 'NEUTRAL')})")
+                if trig_c.startswith("NOT_CHECKED"):
+                    trig_c = f"M5 UNCONFIRMED ({conflict_code})"
+        m5_eval_st = ("CONFIRMED" if m5_confirmed_any else "UNCONFIRMED") if m5_eval_done else "NOT_CHECKED"
+        if has_conflict and h4_bias in ("BULLISH", "BEARISH") and h1_bias in ("BULLISH", "BEARISH") and h4_bias != h1_bias:
+            base_c = (
+                f"{conflict_code}: H4 {h4_bias} vs H1/M30 {h1_bias}"
+                if m30_bias == h1_bias
+                else f"{conflict_code}: H4 {h4_bias} vs H1 {h1_bias} (M30 {m30_bias or 'N/A'})"
+            )
+        elif m30_conflict:
+            base_c = f"{conflict_code}: M30 ({m30_bias}) vs H4 ({h4_bias})"
+        else:
+            base_c = f"{conflict_code}: Bias multi-timeframe konflik"
+        if m5_eval_done:
+            detail_c = f"{base_c} | M5 {m5_eval_st} ({'; '.join(m5_notes)}); entry diblokir filter risiko {conflict_code}."
+        else:
+            detail_c = f"{base_c} | Belum ada zona SNR eligible yang didekati/disentuh harga."
+        res_c = _blocked_wait(detail_c, trigger_st=trig_c)
+        res_c["m5_conflict_evaluated"] = m5_eval_done
+        res_c["m5_eval_status"] = m5_eval_st
+        res_c["m5_conflict_notes"] = m5_notes
+        return res_c
 
     h4_bear_counter = (h4_bias == "BEARISH") or (not h4_bias and bias_overall == "BEARISH")
     h4_bull_counter = (h4_bias == "BULLISH") or (not h4_bias and bias_overall == "BULLISH")
@@ -742,39 +825,109 @@ def validate_snr_entry(
     # ------------------------------------------------------------------
     pending_break_zones = (ranked_zones or {}).get("pending_break_zones") or []
     retest_candidates = list(broken_zones) + list(pending_break_zones[:2]) + list(active_ress[:1]) + list(active_sups[:1])
+    flip_status_overall = "NONE"
+    flip_context_msg = ""
     for bz in retest_candidates:
         z_type = str(bz.get("zone_type", "RESISTANCE")).upper()
+        bz_tf = str(bz.get("timeframe", "HTF")).upper()
         bz_life = str(bz.get("lifecycle_status", bz.get("status", ""))).upper()
-        if bz_life == "RECLAIMED":
-            wait_reasons.append(
-                f"Zona {z_type} ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) berstatus RECLAIMED setelah gagal sebelumnya; tidak dipromosikan sebagai S/R aktif."
+        orig_bo = bz.get("breakout_info") if isinstance(bz.get("breakout_info"), dict) else {}
+        orig_bo_st = str(orig_bo.get("status") or "NO_BREAKOUT").upper()
+        origin_is_pending = (
+            bz_life in ("BREAKOUT_PENDING", "BREAKDOWN_PENDING")
+            or orig_bo_st == "BREAKOUT_PENDING_CONFIRMATION"
+        )
+        origin_is_invalid_flip = (
+            bz_life in ("RECLAIMED", "RECLAIM_PENDING", "INVALIDATED")
+            or bool(bz.get("is_invalidated"))
+            or bool(orig_bo.get("reclaim_detected"))
+            or orig_bo_st == "FALSE_BREAKOUT"
+        )
+        origin_confirmed_break = (
+            not origin_is_pending
+            and not origin_is_invalid_flip
+            and (bz_life in ("BROKEN", "RETEST") or bool(bz.get("is_broken")))
+            and orig_bo_st == "VALID_BREAKOUT"
+        )
+
+        if origin_is_invalid_flip:
+            if flip_status_overall == "NONE":
+                flip_status_overall = "INVALID"
+            inv_flip_msg = (
+                f"INVALID_FLIP: Zona asal {bz_tf} {z_type} ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) "
+                f"berstatus {bz_life or orig_bo_st}; skenario role-reversal tidak valid."
             )
+            if not flip_context_msg:
+                flip_context_msg = inv_flip_msg
+            wait_reasons.append(inv_flip_msg)
             continue
+
         bo_res = detect_zone_breakout(bz, clean_m5, momentum_result=m5_mom, config=cfg)
+
+        # Zona asal masih BREAKOUT PENDING / BREAKDOWN PENDING / belum confirmed broken di TF asal:
+        # DILARANG mempromosikan FLIPPED SUPPORT/RESISTANCE terkonfirmasi hanya dari M5.
+        if not origin_confirmed_break:
+            if origin_is_pending or bo_res.get("status") in ("VALID_BREAKOUT", "BREAKOUT_PENDING_CONFIRMATION"):
+                pend_lbl = "BREAKDOWN PENDING" if z_type == "SUPPORT" else "BREAKOUT PENDING"
+                pot_target = "RESISTANCE" if z_type == "SUPPORT" else "SUPPORT"
+                if flip_status_overall in ("NONE", "INVALID"):
+                    flip_status_overall = "POTENTIAL_FLIP"
+                pot_msg = (
+                    f"POTENTIAL_FLIP (belum CONFIRMED_FLIP): Zona asal {bz_tf} {z_type} "
+                    f"({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) masih {pend_lbl}; "
+                    f"calon FLIP {pot_target} menunggu konfirmasi candle closed {bz_tf}."
+                )
+                if not flip_context_msg:
+                    flip_context_msg = pot_msg
+                wait_reasons.append(pot_msg)
+            elif bo_res.get("status") == "FALSE_BREAKOUT":
+                if flip_status_overall == "NONE":
+                    flip_status_overall = "INVALID"
+                invalid_reasons.append(bo_res.get("reason", f"False breakout pada {z_type} (INVALID flip)."))
+            continue
+
         rt_res = detect_zone_retest(bz, clean_m5, breakout_result=bo_res, config=cfg)
+        flip_st = classify_snr_flip_status(bz, breakout_info=bo_res, retest_info=rt_res)
 
         if bo_res.get("status") == "BREAKOUT_PENDING_CONFIRMATION":
+            if flip_status_overall in ("NONE", "INVALID"):
+                flip_status_overall = "POTENTIAL_FLIP"
             if z_type == "SUPPORT":
                 wait_reasons.append(
-                    f"Potensi breakdown Support ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) terdeteksi; menunggu konfirmasi candle close."
+                    f"POTENTIAL_FLIP: Potensi breakdown Support ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) terdeteksi; menunggu konfirmasi candle close."
                 )
             else:
                 wait_reasons.append(
-                    f"Potensi breakout Resistance ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) terdeteksi; menunggu konfirmasi candle close."
+                    f"POTENTIAL_FLIP: Potensi breakout Resistance ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) terdeteksi; menunggu konfirmasi candle close."
                 )
             continue
-        if bo_res.get("status") == "FALSE_BREAKOUT":
+        if bo_res.get("status") == "FALSE_BREAKOUT" or flip_st == "INVALID":
+            if flip_status_overall == "NONE":
+                flip_status_overall = "INVALID"
             if bo_res.get("reclaim_detected"):
-                wait_reasons.append(bo_res.get("reason", f"Reclaim terdeteksi pada {z_type} yang sudah gagal."))
+                wait_reasons.append(bo_res.get("reason", f"INVALID_FLIP: Reclaim terdeteksi pada {z_type} yang sudah gagal."))
             else:
-                invalid_reasons.append(bo_res.get("reason", f"False breakout pada {z_type}."))
+                invalid_reasons.append(bo_res.get("reason", f"INVALID_FLIP: False breakout pada {z_type}."))
             continue
         if rt_res.get("status") == "RETEST_FAILED":
-            invalid_reasons.append(rt_res.get("reason", f"Retest gagal pada {z_type}."))
+            if flip_status_overall == "NONE":
+                flip_status_overall = "INVALID"
+            invalid_reasons.append(rt_res.get("reason", f"INVALID_FLIP: Retest gagal pada {z_type}."))
+            continue
+        if rt_res.get("status") in ("RETEST_WAITING", "RETEST_IN_PROGRESS"):
+            if flip_status_overall in ("NONE", "INVALID"):
+                flip_status_overall = "POTENTIAL_FLIP"
+            pot_rt_msg = (
+                f"POTENTIAL_FLIP: Breakout {bz_tf} {z_type} ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) terkonfirmasi, "
+                f"status retest {rt_res.get('label', 'WAITING')} (belum CONFIRMED_FLIP)."
+            )
+            if not flip_context_msg:
+                flip_context_msg = pot_rt_msg
+            wait_reasons.append(pot_rt_msg)
             continue
 
-        # 1B. BUY — RESISTANCE BREAKOUT + RETEST BERHASIL
-        if z_type == "RESISTANCE" and rt_res.get("status") == "RETEST_CONFIRMED" and rt_res.get("direction") == "BULLISH":
+        # 1B. BUY — RESISTANCE BREAKOUT + RETEST BERHASIL (Hanya jika origin TF CONFIRMED & retest CONFIRMED_FLIP)
+        if z_type == "RESISTANCE" and flip_st == "CONFIRMED_FLIP" and rt_res.get("status") == "RETEST_CONFIRMED" and rt_res.get("direction") == "BULLISH":
             dist_atr = max(0.0, cp - safe_float(bz.get("high"), cp)) / max(m5_atr, safe_float(bz.get("ref_atr"), m5_atr))
             if m5_bull_close and m5_bull_mom and dist_atr <= max_entry_dist_atr:
                 rr_res = calculate_snr_risk_reward(
@@ -792,8 +945,9 @@ def validate_snr_entry(
                         "buy_status": "CONFIRMED",
                         "sell_status": "WAIT",
                         "setup_type": "RESISTANCE_BREAKOUT_RETEST",
+                        "flip_status": "CONFIRMED_FLIP",
                         "direction": "BUY",
-                        "zone_label": f"FLIPPED SUPPORT ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f})",
+                        "zone_label": f"FLIPPED SUPPORT ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) [CONFIRMED_FLIP]",
                         "target_zone": bz,
                         "focus_selection_reason": focus_selection_reason,
                         "trigger_status": "BREAKOUT + RETEST CONFIRMED",
@@ -801,14 +955,16 @@ def validate_snr_entry(
                         "rr_calculation": rr_res,
                         "checklist": {
                             "valid_breakout": True,
+                            "origin_tf_breakout_confirmed": True,
                             "retest_confirmed": True,
+                            "flip_confirmed": True,
                             "bullish_confirmation": True,
                             "structural_sl_valid": True,
                             "min_rr_met": True,
                         },
                         "wait_reasons": [],
                         "reason": (
-                            f"BUY terkonfirmasi melalui Resistance Breakout + Retest pada "
+                            f"BUY terkonfirmasi (CONFIRMED_FLIP) melalui Resistance Breakout + Retest pada "
                             f"{bz.get('low', 0):.2f}-{bz.get('high', 0):.2f} dengan RR {rr_res.get('rr_display')}."
                         ),
                     }
@@ -819,8 +975,9 @@ def validate_snr_entry(
                         "buy_status": "WAIT",
                         "sell_status": "WAIT",
                         "setup_type": "RESISTANCE_BREAKOUT_RETEST_BLOCKED_BY_RR",
+                        "flip_status": "CONFIRMED_FLIP",
                         "direction": "NONE",
-                        "zone_label": f"FLIPPED SUPPORT ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f})",
+                        "zone_label": f"FLIPPED SUPPORT ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) [CONFIRMED_FLIP]",
                         "target_zone": bz,
                         "focus_selection_reason": focus_selection_reason,
                         "trigger_status": "CONFIRMED (RR/SL BLOCKED)",
@@ -828,17 +985,19 @@ def validate_snr_entry(
                         "rr_calculation": rr_res,
                         "checklist": {
                             "valid_breakout": True,
+                            "origin_tf_breakout_confirmed": True,
                             "retest_confirmed": True,
+                            "flip_confirmed": True,
                             "bullish_confirmation": True,
                             "structural_sl_valid": bool(rr_res.get("structural_sl_available", False)),
                             "min_rr_met": False,
                         },
                         "wait_reasons": wait_reasons,
-                        "reason": rr_res.get("reason", "Retest BUY terkonfirmasi namun RR/SL tidak memenuhi syarat."),
+                        "reason": rr_res.get("reason", "Retest BUY (CONFIRMED_FLIP) namun RR/SL tidak memenuhi syarat."),
                     }
 
-        # 2B. SELL — SUPPORT BREAKDOWN + RETEST (gagal reclaim / retest bertahan sebagai resistance)
-        if z_type == "SUPPORT" and rt_res.get("status") == "RETEST_CONFIRMED" and rt_res.get("direction") == "BEARISH":
+        # 2B. SELL — SUPPORT BREAKDOWN + RETEST (Hanya jika origin TF CONFIRMED & retest CONFIRMED_FLIP)
+        if z_type == "SUPPORT" and flip_st == "CONFIRMED_FLIP" and rt_res.get("status") == "RETEST_CONFIRMED" and rt_res.get("direction") == "BEARISH":
             dist_atr = max(0.0, safe_float(bz.get("low"), cp) - cp) / max(m5_atr, safe_float(bz.get("ref_atr"), m5_atr))
             if m5_bear_close and m5_bear_mom and dist_atr <= max_entry_dist_atr:
                 rr_res = calculate_snr_risk_reward(
@@ -856,8 +1015,9 @@ def validate_snr_entry(
                         "buy_status": "WAIT",
                         "sell_status": "CONFIRMED",
                         "setup_type": "SUPPORT_BREAKDOWN_RETEST",
+                        "flip_status": "CONFIRMED_FLIP",
                         "direction": "SELL",
-                        "zone_label": f"FLIPPED RESISTANCE ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f})",
+                        "zone_label": f"FLIPPED RESISTANCE ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) [CONFIRMED_FLIP]",
                         "target_zone": bz,
                         "focus_selection_reason": focus_selection_reason,
                         "trigger_status": "BREAKDOWN + RETEST CONFIRMED",
@@ -865,14 +1025,16 @@ def validate_snr_entry(
                         "rr_calculation": rr_res,
                         "checklist": {
                             "valid_breakdown": True,
+                            "origin_tf_breakout_confirmed": True,
                             "retest_confirmed": True,
+                            "flip_confirmed": True,
                             "bearish_confirmation": True,
                             "structural_sl_valid": True,
                             "min_rr_met": True,
                         },
                         "wait_reasons": [],
                         "reason": (
-                            f"SELL terkonfirmasi melalui Support Breakdown + Retest pada "
+                            f"SELL terkonfirmasi (CONFIRMED_FLIP) melalui Support Breakdown + Retest pada "
                             f"{bz.get('low', 0):.2f}-{bz.get('high', 0):.2f} dengan RR {rr_res.get('rr_display')}."
                         ),
                     }
@@ -883,8 +1045,9 @@ def validate_snr_entry(
                         "buy_status": "WAIT",
                         "sell_status": "WAIT",
                         "setup_type": "SUPPORT_BREAKDOWN_RETEST_BLOCKED_BY_RR",
+                        "flip_status": "CONFIRMED_FLIP",
                         "direction": "NONE",
-                        "zone_label": f"FLIPPED RESISTANCE ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f})",
+                        "zone_label": f"FLIPPED RESISTANCE ({bz.get('low', 0):.2f}-{bz.get('high', 0):.2f}) [CONFIRMED_FLIP]",
                         "target_zone": bz,
                         "focus_selection_reason": focus_selection_reason,
                         "trigger_status": "CONFIRMED (RR/SL BLOCKED)",
@@ -892,13 +1055,15 @@ def validate_snr_entry(
                         "rr_calculation": rr_res,
                         "checklist": {
                             "valid_breakdown": True,
+                            "origin_tf_breakout_confirmed": True,
                             "retest_confirmed": True,
+                            "flip_confirmed": True,
                             "bearish_confirmation": True,
                             "structural_sl_valid": bool(rr_res.get("structural_sl_available", False)),
                             "min_rr_met": False,
                         },
                         "wait_reasons": wait_reasons,
-                        "reason": rr_res.get("reason", "Retest SELL terkonfirmasi namun RR/SL tidak memenuhi syarat."),
+                        "reason": rr_res.get("reason", "Retest SELL (CONFIRMED_FLIP) namun RR/SL tidak memenuhi syarat."),
                     }
 
     far_ref_pool = [
@@ -1103,6 +1268,8 @@ def validate_snr_entry(
         "buy_status": "WAIT",
         "sell_status": "WAIT",
         "setup_type": "NONE",
+        "flip_status": flip_status_overall,
+        "flip_context": flip_context_msg,
         "direction": "NONE",
         "zone_label": focus_label,
         "target_zone": focus_zone,
@@ -1116,6 +1283,7 @@ def validate_snr_entry(
         "entry_trigger_zone": entry_trigger_zone,
         "entry_trigger_label": entry_trigger_label,
         "trigger_status": "NOT CONFIRMED",
+        "m5_eval_status": "UNCONFIRMED" if (s1 is not None or r1 is not None) else "NOT_CHECKED",
         "rr_status": "NOT CHECKED",
         "rr_calculation": {
             "checked": False,

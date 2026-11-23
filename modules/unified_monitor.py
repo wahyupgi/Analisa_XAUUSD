@@ -32,6 +32,8 @@ except Exception:  # pragma: no cover
 
 from modules.config import (
     FILE_STATE_ZONE_TRACKER,
+    INVALIDATION_SETUP_SL_BREACHED,
+    INVALIDATION_ZONE_STRUCTURAL,
     LOW_RISK_MAX_ATR_RATIO,
     LOW_RISK_MAX_DISTANCE_PT,
     PANTAU_FULL_REFRESH_SECONDS,
@@ -65,9 +67,11 @@ from modules.snr.monitor import (
 )
 from modules.zone_scanner import (
     _extract_risk_monitor_snapshot,
+    build_smc_zone_reason,
     create_market_snapshot,
     evaluate_smc_zone_closed_invalidation,
     evaluate_trade_decision,
+    format_smc_invalid_why,
     format_smc_zone_lines,
     format_scan_presentation,
     is_far_reference_zone,
@@ -556,14 +560,8 @@ class PantauFocusTracker:
     @staticmethod
     def _normalize_mt5_epoch(raw_ts, raw_msc=0.0):
         """Konversi timestamp posisi/order MT5 (broker server time) ke UTC epoch seconds."""
-        ts_val = safe_float(raw_msc, 0.0) / 1000.0 if safe_float(raw_msc, 0.0) > 0 else safe_float(raw_ts, 0.0)
-        if ts_val <= 0:
-            return 0.0
-        # Jika ts broker melebihi jam UTC sistem > 30 menit, kurangi SERVER_UTC_OFFSET_JAM
-        now_utc = time.time()
-        if ts_val > now_utc + 1800 and SERVER_UTC_OFFSET_JAM:
-            ts_val -= float(SERVER_UTC_OFFSET_JAM) * 3600.0
-        return ts_val
+        from modules.mt5_conn import mt5_ts_to_utc_epoch
+        return mt5_ts_to_utc_epoch(raw_ts, raw_msc)
 
     def _resolve_match_tolerance(self, snap):
         """Toleransi pencocokan harga berbasis tick size / spread MT5 yang wajar (bukan arbitrer)."""
@@ -576,89 +574,51 @@ class PantauFocusTracker:
 
     def _classify_mt5_item_match(self, method, item, record, accepted_syms, tol, is_order=False, signal_state=None):
         """
-        Evaluasi kriteria wajib MT5 matching:
-        - Wajib cocok: symbol, arah BUY/SELL, jenis posisi/order, harga dalam zona + toleransi tick/spread,
-          dan waktu buka sesuai periode validitas zona (tidak boleh sebelum zona terbentuk).
-        - VERIFIED   : identitas setup terbukti (ticket/zone_id/magic/comment/riwayat sinyal) + seluruh kriteria wajib cocok.
-        - INFERRED   : symbol, arah, jenis, harga, dan waktu cocok, tetapi identitas setup belum terbukti.
-        - UNVERIFIED : data kurang, tidak cocok, atau dibuka sebelum zona terbentuk.
+        Evaluasi kriteria wajib MT5 matching yang memisahkan MT5 STATUS dan SETUP MATCH:
+        - CONFIRMED : bukti keterkaitan valid (mapping order/deal/position ke setup / comment zone_id / signal_state)
+                      + symbol, arah, dan waktu valid.
+        - INFERRED  : symbol, arah, harga, dan waktu (sesudah zona & setup dibuat) cocok tanpa bukti mapping.
+        - UNRELATED : dibuka sebelum zona/setup dibuat (EXISTING POSITION) atau tidak cocok.
+        - UNKNOWN   : timestamp MT5 atau waktu pembentukan zona/setup tidak lengkap.
         """
-        sym = str(_position_value(item, "symbol", "") or "").strip()
-        if sym.upper() not in accepted_syms:
-            return "UNVERIFIED", "Symbol tidak cocok"
-        ticket = _position_value(item, "ticket")
-        if not ticket:
-            return "UNVERIFIED", "Ticket tidak tersedia"
+        from modules.mt5_conn import evaluate_mt5_setup_match
+        from modules.utils import get_linked_mt5_tickets_for_setup
 
-        if is_order:
-            raw_t = _position_value(item, "order_type")
-            if raw_t is None:
-                raw_t = _position_value(item, "type")
-            if raw_t is None:
-                return "UNVERIFIED", "Jenis order tidak tersedia"
-            ord_label, direction = _info_tipe_pending(raw_t)
-            if not any(tok in ord_label for tok in ("LIMIT", "STOP")):
-                return "UNVERIFIED", "Bukan pending order"
-        else:
-            raw_t = _position_value(item, "type")
-            if raw_t is None:
-                raw_t = _position_value(item, "direction")
-            direction = (
-                "BUY" if raw_t == 0 or str(raw_t).upper() == "BUY"
-                else ("SELL" if raw_t == 1 or str(raw_t).upper() == "SELL" else "")
-            )
-            if direction not in ("BUY", "SELL"):
-                return "UNVERIFIED", "Bukan open position valid"
-
-        if direction != record.get("direction"):
-            return "UNVERIFIED", "Arah tidak cocok"
-
-        entry_px = safe_float(_position_value(item, "price_open", _position_value(item, "entry_price")), 0.0)
-        if entry_px <= 0:
-            return "UNVERIFIED", "Harga entry tidak valid"
-        plan_entry = safe_float((record.get("plan") or {}).get("entry"), 0.0)
-        in_zone_bounds = (record["low"] - tol - 1e-9 <= entry_px <= record["high"] + tol + 1e-9)
-        near_plan = (plan_entry > 0 and abs(entry_px - plan_entry) <= tol + 1e-9)
-        if not (in_zone_bounds or near_plan):
-            return "UNVERIFIED", "Harga di luar rentang zona & toleransi tick/spread"
-
-        zone_start_ts = self._resolve_zone_formation_ts(record)
-        raw_t_sec = _position_value(item, "time_setup" if is_order else "time", 0)
-        raw_t_msc = _position_value(item, "time_setup_msc" if is_order else "time_msc", 0)
-        item_ts = self._normalize_mt5_epoch(raw_t_sec, raw_t_msc)
-        if zone_start_ts is None or item_ts <= 0:
-            return "UNVERIFIED", "Waktu pembukaan / pembentukan zona tidak lengkap"
-        if item_ts < zone_start_ts - 60.0:
-            return "UNVERIFIED", "Dibuka sebelum zona terbentuk (tidak boleh VERIFIED)"
-
-        # Bukti identitas setup (ticket, zone_id, magic/comment, riwayat sinyal)
-        comment_str = str(_position_value(item, "comment", "") or "").strip()
-        magic_val = int(safe_float(_position_value(item, "magic", 0), 0))
+        zone_start_ts = self._resolve_zone_formation_ts(record) or 0.0
+        zone_obj = record.get("zone") if isinstance(record.get("zone"), dict) else {}
+        setup_ver = int(zone_obj.get("setup_version") or 1)
+        setup_tf = str(zone_obj.get("timeframe") or "H1").strip().upper()
         zid = str(record.get("zone_id") or "").strip()
-        zid_short = zid[-8:] if len(zid) >= 8 else zid
-        comment_linked = bool(
-            comment_str and (
-                (zid and zid.lower() in comment_str.lower())
-                or (zid_short and len(zid_short) >= 8 and zid_short.lower() in comment_str.lower())
-                or (f"{method.lower()}:" in comment_str.lower())
-            )
-        )
-        tkt_linked = bool(record.get("verified_ticket") and ticket == record.get("verified_ticket"))
-        sig_linked = False
-        if isinstance(signal_state, dict):
-            s_obj = signal_state.get("sinyal") if isinstance(signal_state.get("sinyal"), dict) else signal_state
-            if isinstance(s_obj, dict):
-                s_tkt = s_obj.get("ticket")
-                s_zid = str(s_obj.get("zone_id") or "")
-                s_magic = int(safe_float(s_obj.get("magic", 0), 0))
-                if s_tkt and ticket == s_tkt and (not s_zid or s_zid == zid):
-                    sig_linked = True
-                elif magic_val > 0 and s_magic > 0 and magic_val == s_magic and str(s_obj.get("arah") or "").upper() == direction:
-                    sig_linked = True
+        setup_created_ts = safe_float(record.get("issued_at"), 0.0)
+        plan_obj = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+        plan_cr_ts = safe_float(plan_obj.get("created_at_ts"), 0.0)
+        if plan_cr_ts > 0:
+            setup_created_ts = plan_cr_ts
 
-        if tkt_linked or comment_linked or sig_linked:
-            return "VERIFIED", "Identitas setup & kriteria symbol/arah/harga/waktu terverifikasi"
-        return "INFERRED", "Symbol/arah/harga/waktu cocok; identitas setup manual belum terbukti"
+        linked_tkts = []
+        if record.get("verified_ticket"):
+            linked_tkts.append(record["verified_ticket"])
+        if zid:
+            linked_tkts.extend(get_linked_mt5_tickets_for_setup(method, setup_tf, zid, setup_ver))
+
+        ev = evaluate_mt5_setup_match(
+            item,
+            direction=str(record.get("direction") or ""),
+            zone_low=safe_float(record.get("low"), 0.0),
+            zone_high=safe_float(record.get("high"), 0.0),
+            plan_entry=safe_float(plan_obj.get("entry"), 0.0),
+            zone_id=zid,
+            setup_version=setup_ver,
+            setup_created_ts=setup_created_ts,
+            zone_formation_ts=zone_start_ts,
+            linked_tickets=linked_tkts,
+            signal_state=signal_state,
+            accepted_syms=accepted_syms,
+            entry_tol=tol,
+            is_order=is_order,
+            method=method,
+        )
+        return ev["setup_match"], ev["reason"], ev
 
     def update(self, results, snapshot, positions, full_refresh, orders=None):
         alerts = []
@@ -742,8 +702,15 @@ class PantauFocusTracker:
                 trk_life = str((trk_rec or {}).get("lifecycle_status") or (trk_rec or {}).get("status") or "").upper()
                 snap_frames_f = snap.get("frames") if isinstance(snap.get("frames"), dict) else None
                 smc_inval_breached = False
-                if method == "SMC" and cur_chk is not None and snap_frames_f is not None:
-                    smc_inval_breached, _, _, _, _ = evaluate_smc_zone_closed_invalidation(cur_chk, snap_frames_f)
+                if method == "SMC" and cur_chk is not None:
+                    if snap_frames_f is not None:
+                        smc_inval_breached, _, _, _, _ = evaluate_smc_zone_closed_invalidation(cur_chk, snap_frames_f)
+                    if not smc_inval_breached:
+                        from modules.zone_scanner import evaluate_smc_setup_live_invalidation
+                        smc_inval_breached, _, _, _, _ = evaluate_smc_setup_live_invalidation(
+                            cur_chk, current_price=price, bid=snap.get("bid"), ask=snap.get("ask"),
+                            frames=snap_frames_f, market_status=snap.get("market_status"),
+                        )
                 snr_side_breached = bool(
                     method == "SNR" and cur_chk is not None and (
                         cur_chk.get("is_broken") is True
@@ -827,6 +794,8 @@ class PantauFocusTracker:
                 direction = "BUY" if kind in ("DEMAND", "SUPPORT") else "SELL" if kind in ("SUPPLY", "RESISTANCE") else ""
                 completed = self.completed[method]
                 if completed and completed["zone_id"] == zone["zone_id"]:
+                    if completed.get("invalid_reason"):
+                        continue
                     if not low <= price <= high:
                         completed["left"] = True
                     if not (completed["left"] and low <= price <= high and (
@@ -886,39 +855,65 @@ class PantauFocusTracker:
             if not record or orders is None:
                 continue
             for order in orders:
-                m_st, m_rsn = self._classify_mt5_item_match(
+                m_st, m_rsn, m_ev = self._classify_mt5_item_match(
                     method, order, record, accepted_syms, match_tol, is_order=True, signal_state=sig_state_ref,
                 )
-                if m_st in ("VERIFIED", "INFERRED"):
-                    pending_matches[method].append((order, m_st, m_rsn))
+                if m_st in ("CONFIRMED", "INFERRED"):
+                    pending_matches[method].append((order, m_st, m_rsn, m_ev))
 
         matches = {}
+        existing_overlaps = {}
         for method, record in self.focus.items():
             matches[method] = []
+            existing_overlaps[method] = None
             if not record or positions is None:
                 continue
             for position in positions:
                 ticket = _position_value(position, "ticket")
                 if record.get("ticket") and ticket != record["ticket"]:
                     continue
-                m_st, m_rsn = self._classify_mt5_item_match(
+                m_st, m_rsn, m_ev = self._classify_mt5_item_match(
                     method, position, record, accepted_syms, match_tol, is_order=False, signal_state=sig_state_ref,
                 )
-                if m_st in ("VERIFIED", "INFERRED"):
-                    matches[method].append((position, m_st, m_rsn))
+                if m_st in ("CONFIRMED", "INFERRED"):
+                    matches[method].append((position, m_st, m_rsn, m_ev))
+                elif m_ev.get("price_matches") and existing_overlaps[method] is None:
+                    existing_overlaps[method] = (position, m_st, m_rsn, m_ev)
+
+        from modules.mt5_conn import format_mt5_wib
+        from modules.utils import link_mt5_ticket_to_setup
 
         for method, record in list(self.focus.items()):
             if not record or method not in self.active_methods:
                 continue
             if pending_matches.get(method):
-                p_ord, p_mst, p_mrsn = pending_matches[method][0]
+                p_ord, p_mst, p_mrsn, _ = pending_matches[method][0]
                 record["pending_ticket"] = _position_value(p_ord, "ticket")
                 record["pending_match_status"] = p_mst
                 record["pending_match_reason"] = p_mrsn
             else:
                 record["pending_ticket"] = None
-                record["pending_match_status"] = "UNVERIFIED"
+                record["pending_match_status"] = "UNRELATED"
                 record["pending_match_reason"] = ""
+            ex_ov = existing_overlaps.get(method)
+            if ex_ov:
+                ex_pos, ex_mst, ex_mrsn, ex_ev = ex_ov
+                ex_ts = float(ex_ev.get("item_ts") or 0.0)
+                record["existing_position"] = {
+                    "ticket": _position_value(ex_pos, "ticket"),
+                    "position_id": _position_value(ex_pos, "position_id", _position_value(ex_pos, "identifier", _position_value(ex_pos, "ticket"))),
+                    "direction": record.get("direction"),
+                    "open_price": safe_float(_position_value(ex_pos, "price_open", _position_value(ex_pos, "entry_price")), 0.0),
+                    "mt5_status": ex_ev.get("mt5_status", "OPEN"),
+                    "setup_match": ex_mst,
+                    "is_existing_position": True,
+                    "match_reason": ex_mrsn,
+                    "position_opened_ts": ex_ts,
+                    "position_opened_wib_short": format_mt5_wib(ex_ts, short=True),
+                    "position_opened_wib": format_mt5_wib(ex_ts, short=False),
+                }
+            else:
+                record["existing_position"] = None
             if not fresh or positions is None or not history_complete:
                 if not record["uncertain"] and not is_closed_mkt:
                     alerts.append(f"[{method}] DATA ATAU RIWAYAT TIDAK LENGKAP; FOKUS DIPERTAHANKAN")
@@ -933,16 +928,34 @@ class PantauFocusTracker:
                 "POSITION NOT OBSERVED" if record["ever_taken"] else "NO MATCHING POSITION"
             )
             if account_status == "RUNNING":
-                m_pos, m_st, m_rsn = match[0]
+                m_pos, m_st, m_rsn, m_ev = match[0]
+                m_ts = float(m_ev.get("item_ts") or 0.0)
                 record["ticket"] = _position_value(m_pos, "ticket")
+                record["position_id"] = _position_value(m_pos, "position_id", _position_value(m_pos, "identifier", record["ticket"]))
                 record["position_open_price"] = safe_float(_position_value(m_pos, "price_open", _position_value(m_pos, "entry_price")), 0.0)
+                record["mt5_status"] = m_ev.get("mt5_status", "OPEN")
                 record["match_status"] = m_st
+                record["setup_match"] = m_st
+                record["is_existing_position"] = bool(m_ev.get("is_existing_position"))
+                record["position_opened_ts"] = m_ts
+                record["position_opened_wib_short"] = format_mt5_wib(m_ts, short=True)
+                record["position_opened_wib"] = format_mt5_wib(m_ts, short=False)
                 record["match_reason"] = m_rsn
                 record["historical_tracking"] = bool(is_closed_mkt)
-                if m_st == "VERIFIED":
+                if m_st == "CONFIRMED":
                     record["verified_ticket"] = record["ticket"]
+                    z_ref_m = record.get("zone") if isinstance(record.get("zone"), dict) else {}
+                    link_mt5_ticket_to_setup(
+                        method,
+                        str(z_ref_m.get("timeframe") or "H1"),
+                        str(record.get("zone_id") or ""),
+                        int(z_ref_m.get("setup_version") or 1),
+                        record["ticket"],
+                    )
             elif account_status != "RUNNING":
-                record.setdefault("match_status", "UNVERIFIED")
+                record.setdefault("match_status", "UNKNOWN")
+                record.setdefault("setup_match", "UNKNOWN")
+                record.setdefault("mt5_status", "NONE")
                 record.setdefault("match_reason", "")
                 record["historical_tracking"] = False
 
@@ -1014,7 +1027,15 @@ class PantauFocusTracker:
             )
             plan = record.get("plan") or {}
             sl, tp = safe_float(plan.get("sl")), safe_float(plan.get("tp1"))
+            if sl <= 0 and method == "SMC":
+                from modules.zone_scanner import resolve_smc_setup_invalidation_price
+                sl = resolve_smc_setup_invalidation_price(
+                    record.get("zone") or {}, frames=snap_frames_inv,
+                    spread=max(0.0, safe_float(snap.get("ask"), 0.0) - safe_float(snap.get("bid"), 0.0)),
+                )
             outcome = ""
+            outcome_inv_type = ""
+            outcome_break_px = None
             ticks = observations[-1:] if method in new_focus else observations
             for tick_stamp, tick_bid, tick_ask in ticks:
                 if tick_stamp < record["issued_at"] * 1000:
@@ -1043,8 +1064,15 @@ class PantauFocusTracker:
                     if not full_refresh:
                         self.refresh_required = True
                 exit_price = tick_bid if record["direction"] == "BUY" else tick_ask
-                sl_hit = sl > 0 and (exit_price <= sl if record["direction"] == "BUY" else exit_price >= sl)
-                tp_hit = tp > 0 and (exit_price >= tp if record["direction"] == "BUY" else exit_price <= tp)
+                sl_hit = (not is_closed_mkt) and sl > 0 and (exit_price <= sl if record["direction"] == "BUY" else exit_price >= sl)
+                tp_hit = (not is_closed_mkt) and tp > 0 and (exit_price >= tp if record["direction"] == "BUY" else exit_price <= tp)
+                # Live SL/invalidation breach tanpa posisi tereksekusi -> SETUP_INVALID_SL_BREACHED (BUKAN SL HIT!)
+                if sl_hit and not record["ever_taken"] and account_status != "RUNNING":
+                    side_lbl = "BID" if record["direction"] == "BUY" else "ASK"
+                    outcome = f"{INVALIDATION_SETUP_SL_BREACHED} ({record['direction']} {side_lbl} {exit_price:.2f} tembus inv {sl:.2f})"
+                    outcome_inv_type = INVALIDATION_SETUP_SL_BREACHED
+                    outcome_break_px = exit_price
+                    break
                 if new_touch and (sl_hit or tp_hit) and account_status != "RUNNING":
                     record["uncertain"] = True
                     alerts.append(f"[{method}] ZONA DAN BATAS RENCANA DALAM TICK SAMA; URUTAN TIDAK PASTI")
@@ -1052,16 +1080,17 @@ class PantauFocusTracker:
                 if not opened_msc and account_status == "RUNNING":
                     opened_msc = safe_float(_position_value(match[0][0], "time")) * 1000
                 if not record["uncertain"] and account_status != "AMBIGUOUS" and record["touched"] and tick_stamp >= opened_msc:
-                    if sl_hit:
-                        outcome = f"HARGA TERPANTAU DI SL RENCANA {sl:.2f}"
-                    elif tp_hit:
-                        outcome = f"HARGA TERPANTAU DI TP1 RENCANA {tp:.2f}"
+                    if sl_hit and (record["ever_taken"] or account_status == "RUNNING"):
+                        outcome = f"HARGA TERPANTAU DI SL POSISI {sl:.2f}"
+                    elif tp_hit and (record["ever_taken"] or account_status == "RUNNING"):
+                        outcome = f"HARGA TERPANTAU DI TP1 POSISI {tp:.2f}"
                 if outcome:
                     break
             if not outcome and account_status == "NO MATCHING POSITION" and invalid and not record["ever_taken"]:
                 unc_tag = " (RIWAYAT SEBELUMNYA TIDAK PASTI)" if record["uncertain"] else ""
-                if broken_or_reclaimed:
-                    outcome = f"ZONA {lifecycle or 'BROKEN'} SEBELUM POSISI TERDETEKSI{unc_tag}"
+                if smc_inval_breached_inv or broken_or_reclaimed:
+                    outcome = f"{INVALIDATION_ZONE_STRUCTURAL} SEBELUM POSISI TERDETEKSI{unc_tag}"
+                    outcome_inv_type = INVALIDATION_ZONE_STRUCTURAL
                 elif vanished:
                     outcome = f"ZONA TIDAK LAGI TERDETEKSI SEBELUM POSISI TERDETEKSI{unc_tag}"
                 else:
@@ -1069,7 +1098,30 @@ class PantauFocusTracker:
             elif not outcome and account_status == "POSITION NOT OBSERVED" and (invalid or broken_or_reclaimed or vanished or not (record["low"] <= price <= record["high"])):
                 outcome = f"POSISI SELESAI / TERTUTUP (ZONA {lifecycle or 'HISTORICAL'})"
             if outcome:
-                note = "POSISI BELUM TERDETEKSI" if not record["ever_taken"] else "STATUS PENUTUPAN MT5 BELUM DIPASTIKAN"
+                if method == "SMC" and outcome_inv_type in (INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL):
+                    try:
+                        from modules.zone_scanner import get_zone_tracker
+                        _trk_inv_m = trk_obj_inv or get_zone_tracker(auto_save=False)
+                        if _trk_inv_m is not None:
+                            z_rec_inv = dict(record.get("zone") or {})
+                            z_rec_inv.setdefault("zone_id", record["zone_id"])
+                            z_rec_inv.setdefault("price_low", record["low"])
+                            z_rec_inv.setdefault("price_high", record["high"])
+                            z_rec_inv.setdefault("zone_type", "DEMAND" if record["direction"] == "BUY" else "SUPPLY")
+                            if sl > 0:
+                                z_rec_inv["setup_invalidation_price"] = sl
+                            _trk_inv_m.mark_invalidated(
+                                z_rec_inv,
+                                outcome,
+                                break_time=str(snap.get("snapshot_time") or ""),
+                                invalidation_type=outcome_inv_type,
+                                break_price=outcome_break_px,
+                            )
+                            if snap.get("live") is True:
+                                _trk_inv_m.save()
+                    except Exception:
+                        pass
+                note = "TIDAK ADA POSISI TEREKSEKUSI" if not record["ever_taken"] else "STATUS PENUTUPAN MT5 BELUM DIPASTIKAN"
                 self._emit_lifecycle_alert(
                     alerts,
                     method,
@@ -1082,6 +1134,7 @@ class PantauFocusTracker:
                     "low": record["low"],
                     "high": record["high"],
                     "left": not record["low"] <= price <= record["high"],
+                    "invalid_reason": outcome_inv_type,
                 }
                 self.focus[method] = None
                 self.refresh_required = True
@@ -1622,10 +1675,10 @@ def extract_smc_monitor_summary(scan_result, decision):
     h1_struct = ctx.get("h1_structure") or scan.get("h1_structure") or (raw_h1.get("bias") if isinstance(raw_h1, dict) else raw_h1) or "NETRAL"
     m30_dir = raw_m30.get("bias") if isinstance(raw_m30, dict) else raw_m30
     m30_status = (
-        ctx.get("m30_status")
+        m30_stage.get("status")
+        or ctx.get("m30_status")
         or scan.get("m30_status")
         or htf_ctx.get("m30_status")
-        or m30_stage.get("status")
         or m30_dir
         or "NETRAL"
     )
@@ -1804,6 +1857,77 @@ def format_smc_monitor_section(smc_cycle_result, detailed=False):
 
     s = smc_cycle_result.get("summary") or {}
     alerts = smc_cycle_result.get("alerts") or []
+    decision = smc_cycle_result.get("decision") or {}
+    scan_res_m = smc_cycle_result.get("scan_result") or {}
+
+    if not detailed:
+        from modules.utils import (
+            extract_unit_spec_from_container,
+            format_invalid_zone_compact,
+            resolve_entry_blocker_code,
+            select_relevant_invalid_zone,
+        )
+        from modules.zone_scanner import resolve_analysis_direction
+        _u_smc_m = extract_unit_spec_from_container(scan_res_m)
+        mkt_m = str(decision.get("market_status") or scan_res_m.get("market_status") or "OPEN").upper()
+        px_m = safe_float(decision.get("current_price") or scan_res_m.get("current_price"), 0.0)
+        dir_m = resolve_analysis_direction(
+            ctx=scan_res_m.get("htf_context") or decision.get("context"),
+            decision=decision, scan=scan_res_m,
+            market_status=mkt_m, data_ok=(mkt_m == "OPEN" and px_m > 0 and scan_res_m.get("data_ok", True)),
+        )
+        sig_m = str(s.get("decision_signal", "WAIT")).upper()
+        act_m = s.get("primary_zone_label") if s.get("primary_zone_label") != "NONE" else s.get("nearest_zone_label", "NONE")
+        r_prio_m = decision.get("radar_priority") or scan_res_m.get("radar_priority") or {}
+        act_z_m = (
+            decision.get("zone")
+            or decision.get("primary_zone")
+            or r_prio_m.get("primary_directional_zone")
+            or r_prio_m.get("primary_zone")
+            or decision.get("nearest_valid_zone")
+            or r_prio_m.get("nearest_radar_zone")
+        )
+        if mkt_m == "OPEN" and sig_m in ("BUY", "SELL") and s.get("entry") and s.get("sl") and s.get("tp1"):
+            ent_m = f"{sig_m} VALID | E {s['entry']:.2f} | SL {s['sl']:.2f} | TP1 {s['tp1']:.2f} | RR 1:{s.get('rr', 0.0):.1f}"
+        else:
+            htf_c_m = scan_res_m.get("htf_context") or decision.get("context") or {}
+            blk_m = resolve_entry_blocker_code(
+                s.get("main_reason"),
+                market_status=mkt_m,
+                data_ok=bool(scan_res_m.get("data_ok", True)),
+                htf_conflict=bool(htf_c_m.get("has_conflict")),
+                m30_conflict=bool(htf_c_m.get("m30_conflict")),
+                h4_bias=s.get("h4_bias"),
+                has_active_zone=(act_m != "NONE" and isinstance(act_z_m, dict)),
+                zone_touch=s.get("zone_touch"),
+            )
+            ent_m = f"NO VALID ENTRY ({blk_m})"
+        act_why_m = build_smc_zone_reason(act_z_m, h4_bias=s.get("h4_bias")) if (act_m != "NONE" and isinstance(act_z_m, dict)) else ""
+        inv_list_m = list(decision.get("invalidated_zones") or []) + list(scan_res_m.get("invalidated_zones") or [])
+        atr_m = safe_float(((decision.get("atr_diagnostics") or scan_res_m.get("atr_diagnostics") or {}).get("atr_value")), 0.0) or None
+        iz_m = select_relevant_invalid_zone(inv_list_m, current_price=px_m if px_m > 0 else None, atr=atr_m)
+        inv_why_m = ""
+        if isinstance(iz_m, dict):
+            inv_t_m = str(iz_m.get("invalidation_type") or iz_m.get("invalid_label") or INVALIDATION_ZONE_STRUCTURAL).upper()
+            inv_m = format_invalid_zone_compact(iz_m, current_price=px_m if px_m > 0 else None, unit_spec=_u_smc_m, status_override=inv_t_m)
+            inv_why_m = format_smc_invalid_why(iz_m, h4_bias=s.get("h4_bias"))
+        else:
+            inv_m = "NONE"
+        snr_m = str(s.get("snr_context_summary") or "Independen")
+        crit_m = smc_cycle_result.get("critical_warnings") or []
+        risk_m = crit_m[0] if crit_m else "AMAN"
+        return "\n".join([
+            "### A. SMC MONITOR",
+            f"MARKET       : {mkt_m} | {px_m:.2f}" if px_m > 0 else f"MARKET       : {mkt_m} | N/A",
+            f"DIRECTION    : {dir_m} (H4={s.get('h4_bias', 'N/A')} | H1(SMC Struct)={s.get('h1_bias', 'N/A')} | M30={s.get('m30_bias', 'N/A')})",
+            f"ENTRY STATUS : {ent_m}",
+            f"ACTIVE/RADAR : {act_m}",
+            *([f"  WHY        : {act_why_m}"] if act_why_m else []),
+            f"INVALID      : {inv_m}",
+            *([f"  WHY        : {inv_why_m}"] if inv_why_m else []),
+            f"SNR          : {snr_m}",
+            f"RISK         : {risk_m}",
+        ])
 
     lines = [
         "### A. SMC MONITOR",
@@ -1822,8 +1946,6 @@ def format_smc_monitor_section(smc_cycle_result, detailed=False):
     if next_zone:
         lines.append(f"NEXT RADAR ZONE : {safe_float(next_zone.get('price_low')):.2f}-{safe_float(next_zone.get('price_high')):.2f}")
 
-    decision = smc_cycle_result.get("decision") or {}
-    scan_res_m = smc_cycle_result.get("scan_result") or {}
     focus = decision.get("zone") or decision.get("primary_zone") or {}
     if focus:
         allow_plan = (decision.get("stages", {}).get("DATA") or {}).get("ok") is not False
@@ -3387,6 +3509,11 @@ class UnifiedMonitor:
                 f"H1 STRUCTURE        : SMC={comparison.get('smc_h1', 'N/A')} | "
                 f"SNR={comparison.get('snr_h1', 'N/A')} ({comparison.get('h1_agreement', 'UNCONFIRMED')})"
             )
+            if comparison.get("smc_m30") or comparison.get("snr_m30"):
+                report_lines.append(
+                    f"M30 CONTEXT         : SMC={comparison.get('smc_m30', 'N/A')} | "
+                    f"SNR={comparison.get('snr_m30', 'N/A')} ({comparison.get('m30_agreement', 'UNCONFIRMED')})"
+                )
             if mkt_ctx and detailed:
                 report_lines.extend([
                     f"MARKET CONTEXT      : {mkt_ctx.get('classification', 'N/A')}",
@@ -3474,12 +3601,20 @@ class UnifiedMonitor:
                     "historical_touch": bool(record.get("historical_touch")),
                     "ever_taken": bool(record.get("ever_taken")),
                     "ticket": record.get("ticket"),
+                    "position_id": record.get("position_id"),
                     "position_open_price": safe_float(record.get("position_open_price"), 0.0),
-                    "match_status": record.get("match_status", "UNVERIFIED"),
+                    "mt5_status": record.get("mt5_status", "NONE"),
+                    "match_status": record.get("match_status", "UNKNOWN"),
+                    "setup_match": record.get("setup_match", record.get("match_status", "UNKNOWN")),
+                    "is_existing_position": bool(record.get("is_existing_position")),
+                    "position_opened_ts": safe_float(record.get("position_opened_ts"), 0.0),
+                    "position_opened_wib_short": record.get("position_opened_wib_short", ""),
+                    "position_opened_wib": record.get("position_opened_wib", ""),
+                    "existing_position": record.get("existing_position"),
                     "match_reason": record.get("match_reason", ""),
                     "historical_tracking": bool(record.get("historical_tracking")),
                     "pending_ticket": record.get("pending_ticket"),
-                    "pending_match_status": record.get("pending_match_status", "UNVERIFIED"),
+                    "pending_match_status": record.get("pending_match_status", "UNRELATED"),
                     "account_status": record["account_status"],
                     "uncertain": record["uncertain"],
                     "plan_valid": self.focus_tracker._valid_plan(record.get("plan")),
@@ -3691,8 +3826,6 @@ class UnifiedMonitor:
             clean_msg = " ".join(str(text_msg or "").replace("\n", " ").split())
             if not clean_msg:
                 return
-            if len(clean_msg) > 96:
-                clean_msg = clean_msg[:93].rstrip(" |;,:-") + "..."
             dedup_scope = (ticket_key, event_type)
             canonical_key = (ticket_key, event_type, state_id)
             if terminal:
@@ -3916,7 +4049,20 @@ def compare_scanner_snapshots(smc_scan, smc_dec, snr_scan, shared_snap=None, snr
     snr_h1 = str(snr_mb.get("h1") or "UNCONFIRMED").upper().replace("NETRAL", "NEUTRAL")
     h1_agreement = (
         "ALIGNED" if smc_h1 == snr_h1 and smc_h1 in ("BULLISH", "BEARISH")
-        else "DIVERGENT" if smc_h1 in ("BULLISH", "BEARISH", "NEUTRAL") and snr_h1 in ("BULLISH", "BEARISH", "NEUTRAL") and smc_h1 != snr_h1
+        else "DIVERGENT (SMC=BOS/CHoCH vs SNR=Swing/S&R)" if smc_h1 in ("BULLISH", "BEARISH", "NEUTRAL") and snr_h1 in ("BULLISH", "BEARISH", "NEUTRAL", "SIDEWAYS") and smc_h1 != snr_h1
+        else "UNCONFIRMED"
+    )
+    smc_m30_dir = str((s_smc.get("htf_context") or {}).get("M30") or "UNCONFIRMED").upper().replace("NETRAL", "NEUTRAL")
+    smc_m30_st = str(((d_smc.get("stages") or {}).get("M30") or {}).get("status") or s_smc.get("m30_status") or "").upper()
+    smc_m30 = (
+        f"{smc_m30_dir} ({smc_m30_st})"
+        if (smc_m30_dir in ("BULLISH", "BEARISH") and smc_m30_st and smc_m30_st != smc_m30_dir)
+        else (smc_m30_dir or smc_m30_st or "UNCONFIRMED")
+    )
+    snr_m30 = str(snr_mb.get("m30") or "UNCONFIRMED").upper().replace("NETRAL", "NEUTRAL")
+    m30_agreement = (
+        "ALIGNED" if smc_m30_dir == snr_m30 and smc_m30_dir in ("BULLISH", "BEARISH")
+        else "DIVERGENT (SMC=BOS/CHoCH+H4-Momentum vs SNR=Swing/S&R)" if smc_m30_dir in ("BULLISH", "BEARISH", "NEUTRAL") and snr_m30 in ("BULLISH", "BEARISH", "NEUTRAL", "SIDEWAYS") and smc_m30_dir != snr_m30
         else "UNCONFIRMED"
     )
 
@@ -3997,6 +4143,9 @@ def compare_scanner_snapshots(smc_scan, smc_dec, snr_scan, shared_snap=None, snr
         "smc_h1": smc_h1,
         "snr_h1": snr_h1,
         "h1_agreement": h1_agreement,
+        "smc_m30": smc_m30,
+        "snr_m30": snr_m30,
+        "m30_agreement": m30_agreement,
         "smc_signal": smc_sig,
         "snr_signal": snr_sig,
         "signal_agreement": "SAME" if sig_same else "DIFFERENT",

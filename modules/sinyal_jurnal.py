@@ -22,7 +22,7 @@ from modules.config import (
     SPREAD_MAKS_POIN, SPREAD_MAKS_RASIO_ATR, SINYAL_TTL_BELUM_TERISI_JAM,
     FILTER_TREND_AKTIF, IZINKAN_COUNTER_TREND_MEDIUM, FILTER_SESI_AKTIF, SESI_DIIZINKAN_UTC,
     MAKS_RISIKO_TERBUKA_PCT, MAKS_RUGI_HARIAN_PCT, SERVER_UTC_OFFSET_JAM,
-    FILE_JURNAL_SINYAL, FILE_JURNAL_ENTRY, FILE_STATE_ZONE_TRACKER, FILE_ERROR_LOG,
+    FILE_JURNAL_SINYAL, FILE_JURNAL_ENTRY, FILE_JURNAL_ENTRY_XLSX, FILE_STATE_ZONE_TRACKER, FILE_ERROR_LOG,
     KOLOM_JURNAL_SINYAL, KOLOM_JURNAL_ENTRY,
     ST_BATAL_TERLEWAT, ST_BATAL_SL, ST_BATAL_KEDALUWARSA, ST_SELESAI_TP2, ST_TP1_TERCAPAI,
     ST_AKTIF_ENTRY, ST_VALID_BERJALAN, ST_VALID_PULLBACK, ST_VALID_DEKAT_SL, STATUS_TERMINAL_SINYAL,
@@ -31,6 +31,7 @@ from modules.config import (
     SIGNAL_STATUS_ENTRY_MISSED, SIGNAL_STATUS_ACTIVE_TRADE, SIGNAL_STATUS_TP_HIT,
     SIGNAL_STATUS_SL_HIT, SIGNAL_STATUS_CANCELLED, SIGNAL_STATUS_EXPIRED,
     CANONICAL_SIGNAL_STATUSES, TERMINAL_CANONICAL_STATUSES, SETUP_TYPES,
+    INVALIDATION_SETUP_SL_BREACHED,
 )
 from modules.utils import _catat_error, deteksi_offset, format_wib_timestamp
 from modules.mt5_conn import (
@@ -200,8 +201,8 @@ def map_status_to_canonical(status_str, has_live_position=False):
         return upper
     if raw == ST_BATAL_TERLEWAT or "TERLEWAT" in upper:
         return SIGNAL_STATUS_ENTRY_MISSED
-    if raw == ST_BATAL_SL or "SL JEBOL" in upper:
-        return SIGNAL_STATUS_SL_HIT
+    if raw == ST_BATAL_SL or "SL JEBOL" in upper or INVALIDATION_SETUP_SL_BREACHED in upper:
+        return SIGNAL_STATUS_SL_HIT if has_live_position else INVALIDATION_SETUP_SL_BREACHED
     if raw == ST_BATAL_KEDALUWARSA or "KEDALUWARSA" in upper or "EXPIRED" in upper:
         return SIGNAL_STATUS_EXPIRED
     if raw == ST_SELESAI_TP2 or raw == ST_TP1_TERCAPAI or "TP1" in upper or "TP2" in upper:
@@ -370,7 +371,7 @@ def sinyal_masih_aktif(status_str):
     if not status_str or status_str == "UNKNOWN":
         return False
     upper = str(status_str).strip().upper()
-    if upper in TERMINAL_CANONICAL_STATUSES or upper == SIGNAL_STATUS_NO_SETUP:
+    if upper in TERMINAL_CANONICAL_STATUSES or upper in (SIGNAL_STATUS_NO_SETUP, INVALIDATION_SETUP_SL_BREACHED):
         return False
     if status_str in STATUS_TERMINAL_SINYAL:
         return False
@@ -1122,10 +1123,11 @@ def evaluasi_dan_perbarui_jurnal_sinyal():
     deals_in = []
     if mt5_aktif:
         try:
+            _, accepted_syms_ev = _acceptable_trade_symbols(SYMBOL)
             all_deals = mt5.history_deals_get(datetime(2020, 1, 1), datetime(2030, 1, 1)) or ()
             deals_in = [
                 d for d in all_deals
-                if getattr(d, "symbol", "") == SYMBOL
+                if str(getattr(d, "symbol", "") or "").strip().upper() in accepted_syms_ev
                 and getattr(d, "entry", 0) in (getattr(mt5, "DEAL_ENTRY_IN", 0), getattr(mt5, "DEAL_ENTRY_INOUT", 2))
                 and getattr(d, "type", -1) in (getattr(mt5, "DEAL_TYPE_BUY", 0), getattr(mt5, "DEAL_TYPE_SELL", 1))
             ]
@@ -1256,12 +1258,17 @@ def evaluasi_dan_perbarui_jurnal_sinyal():
 
                 baru_st = "WAIT"
                 baru_r = "0.00R"
+                is_executed_row = str(row.get("diambil") or "").strip().upper().startswith("YA")
                 if h.get("batal_sebelum_isi"):
                     baru_st = "TERLEWAT"
                     baru_r = "0.00R"
                 elif h["sl"]:
-                    baru_st = "HIT SL"
-                    baru_r = "-1.00R"
+                    if is_executed_row:
+                        baru_st = "HIT SL"
+                        baru_r = "-1.00R"
+                    else:
+                        baru_st = INVALIDATION_SETUP_SL_BREACHED
+                        baru_r = "0.00R"
                 elif h["tp2"]:
                     gain = abs(sig["tp2"] - mid) / risiko
                     baru_st = "HIT TP2"
@@ -1438,6 +1445,361 @@ def _cocokkan_zona_entry(arah, harga_entry, zones, tol=2.0):
     return out
 
 
+_LAST_JURNAL_ENTRY_META = {"currency": "UNIT", "xlsx_ok": False, "xlsx_msg": ""}
+
+
+def _ambil_mata_uang_akun_mt5(mt5_aktif=None):
+    """Ambil mata uang akun MT5 secara read-only (mis. IDC, USD); fallback 'UNIT' bila tidak tersedia."""
+    aktif = pastikan_mt5_aktif() if mt5_aktif is None else bool(mt5_aktif)
+    if aktif:
+        try:
+            with MT5_IPC_LOCK:
+                acc = mt5.account_info()
+            cur = str(getattr(acc, "currency", "") or "").strip().upper()
+            if cur:
+                return cur
+        except Exception:
+            pass
+    return "UNIT"
+
+
+def _parse_wib_dt_jurnal(val):
+    """Parse string waktu WIB ('YYYY-MM-DD HH:MM:SS' atau 'YYYY-MM-DD HH:MM') ke datetime naive."""
+    s = str(val or "").strip()
+    if not s or s == "-":
+        return None
+    s_clean = s.replace(" WIB", "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s_clean[:len(fmt) + 2].strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _safe_float_jurnal(val):
+    s = str(val or "").strip()
+    if not s or s == "-":
+        return None
+    try:
+        v = float(s)
+        return v if math.isfinite(v) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def export_jurnal_entry_xlsx(rows, filepath=FILE_JURNAL_ENTRY_XLSX, currency="UNIT"):
+    """
+    Export otomatis jurnal entry ke Excel (.xlsx) dengan 3 sheet:
+    JURNAL TRADING, REKAP MINGGUAN (ISO Senin-Minggu by waktu_close WIB), REKAP BULANAN (+ grafik).
+    Penulisan aman via temporary file + atomic replace.
+    """
+    try:
+        import openpyxl
+        from openpyxl.chart import BarChart, Reference
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        return False, "Export XLSX dilewati: library openpyxl belum terpasang"
+
+    cur_unit = str(currency or "UNIT").strip().upper() or "UNIT"
+
+    # Deduplikasi berdasarkan ticket (pertahankan urutan terakhir yang paling mutakhir)
+    dedup_map = {}
+    order_keys = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            continue
+        tkt = str(r.get("ticket") or "").strip()
+        key = tkt if tkt else f"_row_{len(order_keys)}"
+        if key not in dedup_map:
+            order_keys.append(key)
+        dedup_map[key] = r
+    clean_rows = [dedup_map[k] for k in order_keys]
+
+    wb = openpyxl.Workbook()
+    ws_j = wb.active
+    ws_j.title = "JURNAL TRADING"
+    ws_w = wb.create_sheet("REKAP MINGGUAN")
+    ws_m = wb.create_sheet("REKAP BULANAN")
+
+    thin = Side(style="thin", color="D9E1F2")
+    med_top = Side(style="medium", color="1F4E78")
+    border_cell = Border(left=thin, right=thin, top=thin, bottom=thin)
+    border_total = Border(left=thin, right=thin, top=med_top, bottom=med_top)
+
+    fill_hdr = PatternFill("solid", fgColor="1F4E78")
+    fill_zebra = PatternFill("solid", fgColor="F5F8FC")
+    fill_total = PatternFill("solid", fgColor="E9EFF7")
+    fill_pos = PatternFill("solid", fgColor="E2EFDA")
+    fill_neg = PatternFill("solid", fgColor="FCE4D6")
+
+    font_hdr = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    font_body = Font(name="Calibri", size=10, color="111111")
+    font_bold = Font(name="Calibri", size=10, bold=True, color="111111")
+    font_pos = Font(name="Calibri", size=10, bold=True, color="006100")
+    font_neg = Font(name="Calibri", size=10, bold=True, color="9C0006")
+
+    align_hdr = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    align_left = Alignment(horizontal="left", vertical="center")
+    align_center = Alignment(horizontal="center", vertical="center")
+    align_right = Alignment(horizontal="right", vertical="center")
+
+    def _autofit(ws, max_w=42):
+        for col_cells in ws.columns:
+            col_idx = col_cells[0].column
+            best = 10
+            for c in col_cells:
+                val = c.value
+                if val is None:
+                    continue
+                if isinstance(val, datetime):
+                    ln = 19
+                elif isinstance(val, (int, float)):
+                    ln = 14
+                else:
+                    ln = len(str(val))
+                if ln + 3 > best:
+                    best = ln + 3
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(best, max_w)
+
+    # --- Sheet 1: JURNAL TRADING (18 kolom persis urutan CSV) ---
+    j_headers = [
+        "Ticket", "Waktu Entry (WIB)", "Waktu Close (WIB)", "Symbol", "Arah", "Lot",
+        "Harga Entry", "SL", "TP", "Harga Close", "Status Posisi", f"Profit ({cur_unit})",
+        "Status Zona", "Sumber Zona", "Zone ID", "Zona Range", "Grade Zona", "Keterangan",
+    ]
+    ws_j.append(j_headers)
+    ws_j.row_dimensions[1].height = 24
+    for c_i in range(1, len(j_headers) + 1):
+        cell = ws_j.cell(1, c_i)
+        cell.fill = fill_hdr
+        cell.font = font_hdr
+        cell.alignment = align_hdr
+        cell.border = border_cell
+
+    closed_records = []
+    for idx_r, r in enumerate(clean_rows, start=2):
+        dt_in = _parse_wib_dt_jurnal(r.get("waktu_entry"))
+        dt_out = _parse_wib_dt_jurnal(r.get("waktu_close"))
+        lot_v = _safe_float_jurnal(r.get("lot"))
+        ent_v = _safe_float_jurnal(r.get("harga_entry"))
+        sl_v = _safe_float_jurnal(r.get("sl"))
+        tp_v = _safe_float_jurnal(r.get("tp"))
+        cls_v = _safe_float_jurnal(r.get("harga_close"))
+        pnl_v = _safe_float_jurnal(r.get("profit_usd"))
+        st_pos = str(r.get("status_posisi") or "-").strip()
+
+        row_vals = [
+            str(r.get("ticket") or "-"),
+            dt_in if dt_in is not None else str(r.get("waktu_entry") or "-"),
+            dt_out if dt_out is not None else str(r.get("waktu_close") or "-"),
+            str(r.get("symbol") or "-"),
+            str(r.get("arah") or "-").upper(),
+            lot_v if lot_v is not None else "-",
+            ent_v if ent_v is not None else "-",
+            sl_v if sl_v is not None else "-",
+            tp_v if tp_v is not None else "-",
+            cls_v if cls_v is not None else "-",
+            st_pos,
+            pnl_v if pnl_v is not None else 0.0,
+            str(r.get("status_zona") or "-"),
+            str(r.get("sumber_zona") or "-"),
+            str(r.get("zone_id") or "-"),
+            str(r.get("zona_range") or "-"),
+            str(r.get("grade_zona") or "-"),
+            str(r.get("keterangan") or "-"),
+        ]
+        ws_j.append(row_vals)
+        is_zebra = (idx_r % 2 == 1)
+        for c_i in range(1, len(row_vals) + 1):
+            cell = ws_j.cell(idx_r, c_i)
+            cell.font = font_body
+            cell.border = border_cell
+            if is_zebra:
+                cell.fill = fill_zebra
+            if c_i in (2, 3):
+                cell.alignment = align_center
+                if isinstance(cell.value, datetime):
+                    cell.number_format = "yyyy-mm-dd hh:mm:ss"
+            elif c_i in (1, 4, 5, 11, 13, 14, 17):
+                cell.alignment = align_center
+            elif c_i == 6:
+                cell.alignment = align_right
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = "0.00"
+            elif c_i in (7, 8, 9, 10):
+                cell.alignment = align_right
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0.00"
+            elif c_i == 12:
+                cell.alignment = align_right
+                cell.number_format = "+#,##0.00;-#,##0.00;0.00"
+                if isinstance(cell.value, (int, float)):
+                    if cell.value > 0.05:
+                        cell.font = font_pos
+                        cell.fill = fill_pos
+                    elif cell.value < -0.05:
+                        cell.font = font_neg
+                        cell.fill = fill_neg
+            else:
+                cell.alignment = align_left
+
+        # Hanya transaksi CLOSED masuk rekap realized mingguan & bulanan
+        if st_pos.upper().startswith("CLOSED") and dt_out is not None and pnl_v is not None:
+            closed_records.append((dt_out, pnl_v))
+
+    ws_j.freeze_panes = "A2"
+    ws_j.auto_filter.ref = f"A1:{get_column_letter(len(j_headers))}{max(1, ws_j.max_row)}"
+    _autofit(ws_j)
+
+    def _build_rekap_sheet(ws, title_col, grouped_items):
+        headers = [
+            title_col, "Closed", "Win", "Loss", "BEP",
+            f"Gross Profit ({cur_unit})", f"Gross Loss ({cur_unit})", f"Net Profit ({cur_unit})", "Win Rate",
+        ]
+        ws.append(headers)
+        ws.row_dimensions[1].height = 24
+        for c_i in range(1, len(headers) + 1):
+            cell = ws.cell(1, c_i)
+            cell.fill = fill_hdr
+            cell.font = font_hdr
+            cell.alignment = align_hdr
+            cell.border = border_cell
+
+        tot_c = tot_w = tot_l = tot_b = 0
+        tot_gp = tot_gl = tot_net = 0.0
+        for r_idx, (label, pnls) in enumerate(grouped_items, start=2):
+            cnt = len(pnls)
+            w_n = sum(1 for x in pnls if x > 0.05)
+            l_n = sum(1 for x in pnls if x < -0.05)
+            b_n = cnt - w_n - l_n
+            gp = round(sum(x for x in pnls if x > 0.0), 2)
+            gl = round(sum(x for x in pnls if x < 0.0), 2)
+            net = round(sum(pnls), 2)
+            wr = (w_n / cnt) if cnt > 0 else 0.0
+            tot_c += cnt
+            tot_w += w_n
+            tot_l += l_n
+            tot_b += b_n
+            tot_gp += gp
+            tot_gl += gl
+            tot_net += net
+
+            ws.append([label, cnt, w_n, l_n, b_n, gp, gl, net, wr])
+            is_zebra = (r_idx % 2 == 1)
+            for c_i in range(1, 10):
+                cell = ws.cell(r_idx, c_i)
+                cell.font = font_body
+                cell.border = border_cell
+                if is_zebra:
+                    cell.fill = fill_zebra
+                if c_i == 1:
+                    cell.alignment = align_left
+                elif c_i in (2, 3, 4, 5):
+                    cell.alignment = align_right
+                    cell.number_format = "#,##0"
+                elif c_i in (6, 7, 8):
+                    cell.alignment = align_right
+                    cell.number_format = "+#,##0.00;-#,##0.00;0.00"
+                    if c_i == 8:
+                        if net > 0.05:
+                            cell.font = font_pos
+                            cell.fill = fill_pos
+                        elif net < -0.05:
+                            cell.font = font_neg
+                            cell.fill = fill_neg
+                elif c_i == 9:
+                    cell.alignment = align_right
+                    cell.number_format = "0.0%"
+
+        data_end_row = ws.max_row
+        tot_wr = (tot_w / tot_c) if tot_c > 0 else 0.0
+        tot_row_idx = data_end_row + 1
+        ws.append(["TOTAL", tot_c, tot_w, tot_l, tot_b, round(tot_gp, 2), round(tot_gl, 2), round(tot_net, 2), tot_wr])
+        for c_i in range(1, 10):
+            cell = ws.cell(tot_row_idx, c_i)
+            cell.font = font_bold
+            cell.fill = fill_total
+            cell.border = border_total
+            if c_i == 1:
+                cell.alignment = align_left
+            elif c_i in (2, 3, 4, 5):
+                cell.alignment = align_right
+                cell.number_format = "#,##0"
+            elif c_i in (6, 7, 8):
+                cell.alignment = align_right
+                cell.number_format = "+#,##0.00;-#,##0.00;0.00"
+                if c_i == 8:
+                    if tot_net > 0.05:
+                        cell.font = font_pos
+                    elif tot_net < -0.05:
+                        cell.font = font_neg
+            elif c_i == 9:
+                cell.alignment = align_right
+                cell.number_format = "0.0%"
+
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:I{max(1, data_end_row)}"
+        _autofit(ws)
+        return data_end_row
+
+    # --- Sheet 2: REKAP MINGGUAN (ISO Senin-Minggu berdasarkan waktu_close WIB) ---
+    weekly_map = {}
+    for dt_c, pnl_v in closed_records:
+        iso_y, iso_w, _ = dt_c.isocalendar()
+        weekly_map.setdefault((iso_y, iso_w), []).append(pnl_v)
+    weekly_items = []
+    for (iso_y, iso_w) in sorted(weekly_map.keys()):
+        mon = datetime.fromisocalendar(iso_y, iso_w, 1)
+        sun = datetime.fromisocalendar(iso_y, iso_w, 7)
+        lbl = f"{iso_y}-W{iso_w:02d} ({mon:%Y-%m-%d} s/d {sun:%Y-%m-%d})"
+        weekly_items.append((lbl, weekly_map[(iso_y, iso_w)]))
+    _build_rekap_sheet(ws_w, "Periode Mingguan (WIB)", weekly_items)
+
+    # --- Sheet 3: REKAP BULANAN (+ Grafik Net Profit Bulanan) ---
+    monthly_map = {}
+    for dt_c, pnl_v in closed_records:
+        m_key = f"{dt_c.year:04d}-{dt_c.month:02d}"
+        monthly_map.setdefault(m_key, []).append(pnl_v)
+    monthly_items = [(mk, monthly_map[mk]) for mk in sorted(monthly_map.keys())]
+    m_end_row = _build_rekap_sheet(ws_m, "Bulan (WIB)", monthly_items)
+
+    if m_end_row >= 2:
+        chart = BarChart()
+        chart.type = "col"
+        chart.style = 10
+        chart.title = f"Net Profit Bulanan ({cur_unit})"
+        chart.y_axis.title = cur_unit
+        chart.x_axis.title = "Bulan"
+        data_ref = Reference(ws_m, min_col=8, min_row=1, max_row=m_end_row)
+        cats_ref = Reference(ws_m, min_col=1, min_row=2, max_row=m_end_row)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+        chart.legend = None
+        chart.width = 16
+        chart.height = 10
+        ws_m.add_chart(chart, "K2")
+
+    # Penulisan aman via temporary file lalu atomic replace
+    tmp_path = f"{filepath}.{os.getpid()}.tmp.xlsx"
+    try:
+        wb.save(tmp_path)
+        os.replace(tmp_path, filepath)
+        return True, f"XLSX exported ({len(clean_rows)} rows, {len(closed_records)} closed, {cur_unit}): {os.path.basename(filepath)}"
+    except PermissionError:
+        return False, f"Warning: {os.path.basename(filepath)} terkunci (tutup Excel terlebih dahulu)"
+    except Exception as e:
+        _catat_error("export_jurnal_entry_xlsx", e)
+        return False, f"Warning: gagal export XLSX ({e})"
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
     """
     Sinkronisasi read-only seluruh entry MT5 (open positions, pending orders, dan deal history)
@@ -1457,7 +1819,7 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
 
     mt5_aktif = pastikan_mt5_aktif()
     zones = _kumpulkan_zona_scanner_jurnal(zones_override=zones_override)
-    accepted_syms = _acceptable_trade_symbols(SYMBOL)
+    _, accepted_syms = _acceptable_trade_symbols(SYMBOL)
 
     def _fmt_px(val):
         try:
@@ -1507,6 +1869,11 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
             positions = mt5.positions_get() or ()
             orders = mt5.orders_get() or ()
             deals = mt5.history_deals_get(start_utc, now_utc + timedelta(days=1)) or ()
+            if not deals:
+                deals = mt5.history_deals_get(
+                    datetime.now() - timedelta(days=max(1, int(days))),
+                    datetime.now() + timedelta(days=2),
+                ) or ()
 
         open_pos_ids = set()
         # 1. Open Positions (RUNNING)
@@ -1636,6 +2003,12 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
         print("   [⚠️ File jurnal_entry_xauusd.csv sedang dibuka (mis. Excel). Tutup file agar log entry tersimpan.]")
     except Exception as e:
         _catat_error("simpan_jurnal_entry", e)
+
+    acc_currency = _ambil_mata_uang_akun_mt5(mt5_aktif=mt5_aktif)
+    xlsx_ok, xlsx_msg = export_jurnal_entry_xlsx(rows_sorted, filepath=FILE_JURNAL_ENTRY_XLSX, currency=acc_currency)
+    _LAST_JURNAL_ENTRY_META["currency"] = acc_currency
+    _LAST_JURNAL_ENTRY_META["xlsx_ok"] = xlsx_ok
+    _LAST_JURNAL_ENTRY_META["xlsx_msg"] = xlsx_msg
 
     return rows_sorted, mt5_aktif
 

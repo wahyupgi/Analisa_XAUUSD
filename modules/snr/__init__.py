@@ -38,7 +38,7 @@ from modules.snr.monitor import (
 from modules.snr.radar import SnrAlertTracker, evaluate_snr_radar
 from modules.snr.rejection_detection import detect_zone_rejection
 from modules.snr.resistance_detection import detect_resistance_candidates
-from modules.snr.retest_detection import detect_zone_retest
+from modules.snr.retest_detection import classify_snr_flip_status, detect_zone_retest
 from modules.snr.risk_reward import calculate_snr_risk_reward, round_to_tick
 from modules.snr.scanner import (
     evaluate_snr_decision,
@@ -84,6 +84,7 @@ __all__ = [
     "validate_zones",
     "analyze_zone_touches",
     "detect_zone_breakout",
+    "classify_snr_flip_status",
     "detect_zone_retest",
     "detect_zone_rejection",
     "analyze_momentum",

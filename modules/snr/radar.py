@@ -589,9 +589,12 @@ class SnrAlertTracker:
                     else:
                         _emit(f"[SNR] FALSE BREAKOUT TERDETEKSI{bo_suffix}{_ts_tag(bo_ts)}", category="MARKET_ALERT", zone_id=curr_state["breakout_zone_id"], zone_label=bo_zone or None, timestamp=bo_ts)
 
-        # 4. Alert Perubahan Retest (hanya jika aktif fresh, dedup zone_id + event_type + timestamp)
-        rt_ts = rt_detail_map.get("retest_bar_time")
+        # 4. Alert Perubahan Retest (hanya jika aktif fresh, dedup zone_id + event_type + timestamp; hindari duplikasi lintas siklus/section)
+        rt_ts = rt_detail_map.get("retest_bar_time") or bo_ts
         rt_zid = curr_state["retest_zone_id"] or rt_zone
+        rt_is_bo_inv = bool(rt_detail_map.get("breakout_invalidated"))
+        rt_inv_ev_key = "BREAKDOWN_INVALIDATED" if str(rt_detail_map.get("zone_type") or "").upper() == "SUPPORT" else "BREAKOUT_INVALIDATED"
+        rt_ev_key = rt_inv_ev_key if (curr_state["retest_code"] == "RETEST_FAILED" and rt_is_bo_inv) else curr_state["retest_code"]
         rt_state_changed = (
             curr_state["retest_code"] != self.last_state.get("retest_code")
             or curr_state["retest_zone_id"] != self.last_state.get("retest_zone_id")
@@ -607,14 +610,18 @@ class SnrAlertTracker:
                 f"[SNR] RETEST (HISTORIS){rt_suffix}{_ts_tag(rt_ts)}",
             )
         elif not rt_is_hist and curr_state["retest_code"] in ("RETEST_CONFIRMED", "RETEST_IN_PROGRESS", "RETEST_FAILED"):
-            rt_allow = (rt_ts and self._claim_event(rt_zid, curr_state["retest_code"], rt_ts)) or (not rt_ts and rt_state_changed)
+            rt_allow = (rt_ts and self._claim_event(rt_zid, rt_ev_key, rt_ts)) or (not rt_ts and rt_state_changed)
             if rt_allow:
                 if curr_state["retest_code"] == "RETEST_CONFIRMED":
                     _emit(f"[SNR] RETEST TERKONFIRMASI{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
                 elif curr_state["retest_code"] == "RETEST_IN_PROGRESS":
-                    _emit(f"[SNR] RETEST SEDANG BERLANGSUNG{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
+                    _emit(f"[SNR] RETEST IN PROGRESS{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
                 elif curr_state["retest_code"] == "RETEST_FAILED":
-                    _emit(f"[SNR] RETEST GAGAL{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
+                    if rt_is_bo_inv:
+                        rt_inv_lbl = "BREAKDOWN INVALIDATED" if str(rt_detail_map.get("zone_type") or "").upper() == "SUPPORT" else "BREAKOUT INVALIDATED"
+                        _emit(f"[SNR] {rt_inv_lbl}{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
+                    else:
+                        _emit(f"[SNR] RETEST FAILED{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
 
         # 5. Alert Interaksi S1 & R1 (Approaching / Touch)
         if (curr_state["s1_state"], curr_state["s1_id"], curr_state["s1_inside"]) != (
@@ -677,9 +684,9 @@ class SnrAlertTracker:
                     continue
                 z_lbl = zm.get("label") or zone_id
                 ev_t = zm.get("event_time")
-                if not self._claim_event(zone_id, "RECLAIM_PENDING", ev_t):
+                if not self._claim_event(zone_id, "RETEST_FAILED", ev_t):
                     continue
-                _emit(f"[SNR] RECLAIM PENDING ({z_lbl}){_ts_tag(ev_t)}", category="MARKET_ALERT", zone_id=zone_id, zone_label=z_lbl, timestamp=ev_t)
+                _emit(f"[SNR] RETEST FAILED ({z_lbl}){_ts_tag(ev_t)}", category="MARKET_ALERT", zone_id=zone_id, zone_label=z_lbl, timestamp=ev_t)
 
         if "reclaimed_ids" in self.last_state:
             new_rec_c = set(curr_state["reclaimed_ids"]) - set(self.last_state["reclaimed_ids"])
@@ -689,9 +696,12 @@ class SnrAlertTracker:
                     continue
                 z_lbl = zm.get("label") or zone_id
                 ev_t = zm.get("event_time")
-                if not self._claim_event(zone_id, "RECLAIMED", ev_t):
+                z_tp_rc = str(zm.get("zone_type") or "").upper()
+                rc_inv_ev = "BREAKDOWN_INVALIDATED" if z_tp_rc == "SUPPORT" else "BREAKOUT_INVALIDATED"
+                if not self._claim_event(zone_id, rc_inv_ev, ev_t):
                     continue
-                _emit(f"[SNR] RECLAIM TERKONFIRMASI ({z_lbl}){_ts_tag(ev_t)}", category="MARKET_ALERT", zone_id=zone_id, zone_label=z_lbl, timestamp=ev_t)
+                rc_inv_lbl = "BREAKDOWN INVALIDATED" if z_tp_rc == "SUPPORT" else "BREAKOUT INVALIDATED"
+                _emit(f"[SNR] {rc_inv_lbl} ({z_lbl}){_ts_tag(ev_t)}", category="MARKET_ALERT", zone_id=zone_id, zone_label=z_lbl, timestamp=ev_t)
 
         if "invalid_ids" in self.last_state:
             new_invalid = set(curr_state["invalid_ids"]) - set(self.last_state["invalid_ids"])

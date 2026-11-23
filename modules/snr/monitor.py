@@ -8,8 +8,10 @@ from modules.config import SYMBOL as DEFAULT_APP_SYMBOL
 from modules.snr.config import get_snr_config
 from modules.snr.data_provider import log_snr_error, safe_float
 from modules.snr.formatter import (
+    build_snr_zone_reason,
     format_snr_detail,
     format_snr_focus_plan,
+    format_snr_invalid_why,
     format_snr_lifecycle_status,
     format_snr_summary,
 )
@@ -64,23 +66,92 @@ def format_snr_monitor_section(cycle_result, detailed=False):
     last_candle = str(sr.get("last_candle", "DATA UNAVAILABLE" if mkt_status == "DATA UNAVAILABLE" else "N/A"))
 
     if not detailed:
-        def _zone_label(zones):
-            if not zones:
-                return "NONE"
-            z = zones[0]
-            return f"{z.get('rank_label', 'ZONE')} {safe_float(z.get('low')):.2f}-{safe_float(z.get('high')):.2f}"
-
+        from modules.snr.breakout_detection import build_snr_breakout_watch, classify_snr_breakout_state
+        from modules.utils import (
+            extract_unit_spec_from_container,
+            format_invalid_zone_compact,
+            format_price_distance,
+            resolve_entry_blocker_code,
+            select_relevant_invalid_zone,
+        )
+        from modules.zone_scanner import resolve_analysis_direction
+        _u_mon = extract_unit_spec_from_container(sr)
+        data_ok_m = mkt_status == "OPEN" and last_price > 0
+        dir_m = resolve_analysis_direction(decision=dec, snr_bias=mb, market_status=mkt_status, data_ok=data_ok_m)
+        sig_m = str(dec.get("signal", "WAIT")).upper()
+        tz_m = dec.get("target_zone") or ev.get("target_zone") or (active_sups[0] if active_sups else (active_ress[0] if active_ress else None))
+        if mkt_status == "OPEN" and sig_m in ("BUY", "SELL"):
+            e_m, sl_m, tp_m = safe_float(dec.get("effective_entry") or dec.get("entry")), safe_float(dec.get("sl")), safe_float(dec.get("tp1"))
+            ent_m = f"{sig_m} VALID | E {e_m:.2f} | SL {sl_m:.2f} | TP1 {tp_m:.2f}" if (e_m > 0 and sl_m > 0 and tp_m > 0) else f"{sig_m} VALID"
+        else:
+            snr_m_conflict = str(mb.get("overall_bias") or "").upper() == "CONFLICT" or (
+                str(mb.get("h4") or "").upper() in ("BULLISH", "BEARISH")
+                and str(mb.get("h1") or "").upper() in ("BULLISH", "BEARISH")
+                and str(mb.get("h4") or "").upper() != str(mb.get("h1") or "").upper()
+            )
+            blk_m_snr = resolve_entry_blocker_code(
+                dec.get("reason") or ev.get("reason"),
+                market_status=mkt_status,
+                data_ok=data_ok_m,
+                htf_conflict=snr_m_conflict,
+                h4_bias=mb.get("h4"),
+                has_active_zone=isinstance(tz_m, dict),
+                rr_failed=bool((ev.get("rr_calculation") or {}).get("rr_failed")),
+            )
+            ent_m = f"NO VALID ENTRY ({blk_m_snr})"
+        s1_m = f"{active_sups[0].get('rank_label', 'S1')} {safe_float(active_sups[0].get('low')):.2f}-{safe_float(active_sups[0].get('high')):.2f}(G:{active_sups[0].get('grade', '-')})" if active_sups else "S1 NONE"
+        r1_m = f"{active_ress[0].get('rank_label', 'R1')} {safe_float(active_ress[0].get('low')):.2f}-{safe_float(active_ress[0].get('high')):.2f}(G:{active_ress[0].get('grade', '-')})" if active_ress else "R1 NONE"
+        h4_m = mb.get("h4")
+        s1_why_m = build_snr_zone_reason(active_sups[0], h4_bias=h4_m) if active_sups else ""
+        r1_why_m = build_snr_zone_reason(active_ress[0], h4_bias=h4_m) if active_ress else ""
+        bo_w_m = sr.get("breakout_watch") or build_snr_breakout_watch(ranked, price_action=pa)
+        inv_pool_m = (
+            list(bo_w_m.get("retest_failed") or [])
+            + list(bo_w_m.get("breakout_invalidated") or [])
+            + list(bo_w_m.get("confirmed") or [])
+            + list(bo_w_m.get("broken") or [])
+            + list(bo_w_m.get("historical") or [])
+            + list(ranked.get("broken_zones") or [])
+            + list(ranked.get("reclaimed_zones") or [])
+            + list(ranked.get("invalidated_zones") or [])
+        )
+        h1_atr_m = safe_float(((sr.get("atr_diagnostics") or {}).get("H1") or {}).get("atr14"), 0.0) or None
+        iz_m = select_relevant_invalid_zone(inv_pool_m, current_price=last_price if last_price > 0 else None, atr=h1_atr_m)
+        if isinstance(iz_m, dict):
+            iz_m_z = iz_m.get("zone") if isinstance(iz_m.get("zone"), dict) else iz_m
+            iz_m_st = str(iz_m.get("state") or classify_snr_breakout_state(iz_m_z).get("state") or "BROKEN").upper()
+            inv_m = format_invalid_zone_compact(iz_m, current_price=last_price if last_price > 0 else None, unit_spec=_u_mon, status_override=iz_m_st)
+            inv_why_m = format_snr_invalid_why(iz_m, h4_bias=h4_m)
+        else:
+            inv_m = "NONE"
+            inv_why_m = ""
+        if isinstance(tz_m, dict):
+            tz_lo = safe_float(tz_m.get("low"), 0.0)
+            tz_hi = safe_float(tz_m.get("high"), tz_lo)
+            tz_zt = str(tz_m.get("zone_type") or "").upper()
+            tz_sc = f"/{safe_float(tz_m.get('score')):.1f}" if tz_m.get("score") is not None else ""
+            tz_d = 0.0 if (last_price > 0 and tz_lo <= last_price <= tz_hi) else (min(abs(last_price - tz_lo), abs(last_price - tz_hi)) if last_price > 0 else safe_float(tz_m.get("distance_points"), 0.0))
+            tz_d_txt = "IN ZONE" if tz_d <= 0 else format_price_distance(tz_d, spec=_u_mon)
+            tz_inv = safe_float(tz_m.get("invalidation_price"), 0.0) or (tz_lo if tz_zt == "SUPPORT" else (tz_hi if tz_zt == "RESISTANCE" else 0.0))
+            tz_inv_t = f" | Inv {tz_inv:.2f}" if tz_inv > 0 else ""
+            act_m = f"{tz_m.get('rank_label', 'ZONE')} {tz_m.get('timeframe', '')} {tz_lo:.2f}-{tz_hi:.2f} | G:{tz_m.get('grade', '-')}{tz_sc} | Dist {tz_d_txt}{tz_inv_t} [ID:{tz_m.get('zone_id', 'N/A')}]".replace("  ", " ")
+        else:
+            act_m = "NONE"
+        act_why_m = build_snr_zone_reason(tz_m, h4_bias=h4_m) if isinstance(tz_m, dict) else ""
+        risk_m = crit[0] if crit else "AMAN"
         lines = [
             "### B. SNR MONITOR",
-            "STATUS          : OK",
-            f"BIAS            : H4={mb.get('h4', 'N/A')} | H1={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')}",
-            f"SUPPORT         : {_zone_label(active_sups)}",
-            f"RESISTANCE      : {_zone_label(active_ress)}",
-            *format_snr_lifecycle_status(sr, dec)[:3 if (sr.get("ranked_zones") or {}).get("overlaps") else 2],
-            f"PRICE ACTION    : Rejection={pa.get('rejection_summary', 'NOT CONFIRMED')} | Breakout={pa.get('breakout_summary', 'NOT CONFIRMED')} | Retest={pa.get('retest_summary', 'NOT CONFIRMED')}",
-            f"ENTRY           : {dec.get('signal', 'WAIT')} | Trigger={ev.get('trigger_status', 'NOT CONFIRMED')}",
-            format_snr_focus_plan(dec, ev, market_bias=mb),
-            f"REASON          : {dec.get('reason', 'N/A')}",
+            f"MARKET       : {mkt_status} | {last_price_str}",
+            f"DIRECTION    : {dir_m} (H4={mb.get('h4', 'N/A')} | H1(SNR Trend)={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')})",
+            f"ENTRY STATUS : {ent_m}",
+            f"ACTIVE/RADAR : {act_m}",
+            *([f"  WHY        : {act_why_m}"] if act_why_m else []),
+            f"INVALID      : {inv_m}",
+            *([f"  WHY        : {inv_why_m}"] if inv_why_m else []),
+            f"SNR          : {s1_m} | {r1_m}",
+            *([f"  WHY S1     : {s1_why_m}"] if s1_why_m else []),
+            *([f"  WHY R1     : {r1_why_m}"] if r1_why_m else []),
+            f"RISK         : {risk_m}",
         ]
         return "\n".join(lines)
 
@@ -89,7 +160,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
         f"STATUS          : OK ({sr.get('snr_status', mb.get('snr_status', 'ACTIVE'))})",
         f"MARKET STATUS   : {mkt_status} | DATA SOURCE: {data_source} | LAST PRICE: {last_price_str} | LAST CANDLE: {last_candle}",
         f"SNR ANALYSIS    : {snr_analysis} | LIVE ENTRY: {live_entry}",
-        f"MARKET BIAS     : H4={mb.get('h4', 'N/A')} | H1={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')} | M5={mb.get('m5', 'WAIT')} -> {mb.get('overall_bias', 'UNCONFIRMED')}",
+        f"MARKET BIAS     : H4={mb.get('h4', 'N/A')} | H1(SNR Trend)={mb.get('h1', 'N/A')} | M30={mb.get('m30', 'N/A')} | M5={mb.get('m5', 'WAIT')} -> {mb.get('overall_bias', 'UNCONFIRMED')}",
     ]
 
     lines.extend(format_snr_lifecycle_status(sr, dec))
@@ -111,6 +182,9 @@ def format_snr_monitor_section(cycle_result, detailed=False):
                 f"| Grade {sz.get('grade', 'D')} (Score {safe_float(sz.get('score')):.2f} - {sz.get('strength_short', 'MODERATE')}) "
                 f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {format_price_distance(dist, spec=u_spec, include_mt5_points=True)}"
             )
+            sz_why = build_snr_zone_reason(sz, h4_bias=mb.get("h4"))
+            if sz_why:
+                lines.append(f"    WHY: {sz_why}")
     else:
         lines.append("ACTIVE SUPPORT  : N/A (Tidak ada support aktif)")
 
@@ -128,6 +202,9 @@ def format_snr_monitor_section(cycle_result, detailed=False):
                 f"| Grade {rz.get('grade', 'D')} (Score {safe_float(rz.get('score')):.2f} - {rz.get('strength_short', 'MODERATE')}) "
                 f"| Touch: {t_cls} ({t_cnt}x, Q={t_q:.1f}/15) | Dist: {format_price_distance(dist, spec=u_spec, include_mt5_points=True)}"
             )
+            rz_why = build_snr_zone_reason(rz, h4_bias=mb.get("h4"))
+            if rz_why:
+                lines.append(f"    WHY: {rz_why}")
     else:
         lines.append("ACTIVE RESIST.  : N/A (Tidak ada resistance aktif)")
 
@@ -210,6 +287,7 @@ class SnrCycleEngine:
             pa = scan_res.get("price_action") or {}
             alert_bundle = self.alert_tracker.evaluate_alerts(radar, dec, price_action=pa)
 
+            bo_w_sig = scan_res.get("breakout_watch") if isinstance(scan_res.get("breakout_watch"), dict) else {}
             sig_tuple = (
                 dec.get("signal"),
                 dec.get("direction"),
@@ -217,6 +295,8 @@ class SnrCycleEngine:
                 dec.get("trigger_status"),
                 (scan_res.get("market_bias") or {}).get("overall_bias"),
                 radar.get("radar_status"),
+                bo_w_sig.get("state"),
+                bo_w_sig.get("zone_id"),
             )
             state_changed = (self.last_signature is None) or (sig_tuple != self.last_signature) or bool(alert_bundle["alerts"])
             self.last_signature = sig_tuple

@@ -12,6 +12,7 @@ import os
 import re
 from modules.config import FILE_JURNAL_SINYAL, FILE_JURNAL_ENTRY
 from modules.sinyal_jurnal import (
+    _LAST_JURNAL_ENTRY_META,
     _migrasi_header_jurnal,
     evaluasi_dan_perbarui_jurnal_sinyal,
     sinkron_jurnal_entry_mt5,
@@ -59,7 +60,9 @@ def susun_tabel_jurnal_markdown(rows):
             ikon = f"🟢 **HIT TP2 (TP Penuh)**"
         elif "HIT TP1" in st:
             ikon = f"🟢 **HIT TP1**"
-        elif "HIT SL" in st or "SL" in st:
+        elif "SETUP_INVALID" in st or "INVALID" in st:
+            ikon = "⛔ **SETUP INVALID**"
+        elif "HIT SL" in st:
             ikon = f"🔴 **HIT SL (Kalah)**"
         elif "RUNNING" in st:
             ikon = f"🟡 RUNNING"
@@ -104,16 +107,21 @@ def tampilkan_rekap():
     entry_rows, mt5_entry_ok = sinkron_jurnal_entry_mt5()
     rows, mt5_aktif = evaluasi_dan_perbarui_jurnal_sinyal()
     mt5_online = mt5_entry_ok or mt5_aktif
+    cur_unit = str(_LAST_JURNAL_ENTRY_META.get("currency") or "UNIT").upper()
+    xlsx_msg = str(_LAST_JURNAL_ENTRY_META.get("xlsx_msg") or "").strip()
 
     lebar_e = 142
     print_terminal("\n" + "=" * lebar_e)
-    print_terminal("📒 JURNAL ENTRY MT5 XAUUSD (AUTO-SYNC READ-ONLY -> CSV)")
+    print_terminal("📒 JURNAL ENTRY MT5 XAUUSD (AUTO-SYNC READ-ONLY -> CSV & XLSX)")
     print_terminal(f"   File CSV : {FILE_JURNAL_ENTRY}")
+    if xlsx_msg:
+        print_terminal(f"   Export   : {xlsx_msg}")
     print_terminal("=" * lebar_e)
     if entry_rows:
+        pnl_col_hdr = f"P/L {cur_unit}"
         print_terminal(
             f"{'#':<3} | {'Ticket':<10} | {'Waktu Entry':<16} | {'Arah':<4} | {'Lot':<5} | {'Entry':<8} | {'SL':<8} | {'TP':<8} | "
-            f"{'Status':<15} | {'P/L USD':>9} | {'Status Zona':<15} | {'Zona Scanner'}"
+            f"{'Status':<15} | {pnl_col_hdr:>9} | {'Status Zona':<15} | {'Zona Scanner'}"
         )
         print_terminal("-" * lebar_e)
         e_zona = 0
@@ -122,6 +130,24 @@ def tampilkan_rekap():
         e_win = 0
         e_loss = 0
         e_pnl = 0.0
+        for er_all in entry_rows:
+            st_z_all = str(er_all.get("status_zona") or "").upper()
+            if "ZONA DIAMBIL" in st_z_all or "PENDING DI ZONA" in st_z_all:
+                e_zona += 1
+            else:
+                e_manual += 1
+            st_p_all = str(er_all.get("status_posisi") or "").upper()
+            if st_p_all.startswith("CLOSED"):
+                try:
+                    pv_all = float(str(er_all.get("profit_usd") or "0.00"))
+                except ValueError:
+                    pv_all = 0.0
+                e_closed += 1
+                e_pnl += pv_all
+                if pv_all > 0.05:
+                    e_win += 1
+                elif pv_all < -0.05:
+                    e_loss += 1
         for idx_e, er in enumerate(entry_rows[-30:], 1):
             tkt = str(er.get("ticket") or "-")[:10]
             wkt = str(er.get("waktu_entry") or "-")[:16]
@@ -139,21 +165,11 @@ def tampilkan_rekap():
             st_z = str(er.get("status_zona") or "-")
             st_z_up = st_z.upper()
             if "ZONA DIAMBIL" in st_z_up:
-                e_zona += 1
                 st_z_disp = "ZONA DIAMBIL"
             elif "PENDING DI ZONA" in st_z_up:
-                e_zona += 1
                 st_z_disp = "PENDING DI ZONA"
             else:
-                e_manual += 1
                 st_z_disp = "MANUAL"
-            if st_p.upper().startswith("CLOSED"):
-                e_closed += 1
-                e_pnl += pnl_v
-                if pnl_v > 0.05:
-                    e_win += 1
-                elif pnl_v < -0.05:
-                    e_loss += 1
             src_z = str(er.get("sumber_zona") or "-")
             rng_z = str(er.get("zona_range") or "-")
             grd_z = str(er.get("grade_zona") or "-")
@@ -166,7 +182,7 @@ def tampilkan_rekap():
         wr_e = f"{(e_win / e_closed * 100):.1f}%" if e_closed > 0 else "-"
         print_terminal(
             f"• Total Entry MT5 : {len(entry_rows)} | Zona Diambil/Pending: {e_zona} | Manual: {e_manual} | "
-            f"Closed: {e_closed} (Win {e_win} / Loss {e_loss}, WR {wr_e}) | Realized P/L: {e_pnl:+.2f} USD"
+            f"Closed: {e_closed} (Win {e_win} / Loss {e_loss}, WR {wr_e}) | Realized P/L: {e_pnl:+.2f} {cur_unit}"
         )
         if len(entry_rows) > 30:
             print_terminal(f"  *(Menampilkan 30 entry terbaru; seluruh {len(entry_rows)} entry lengkap tersimpan di {FILE_JURNAL_ENTRY})*")
@@ -224,7 +240,9 @@ def tampilkan_rekap():
             ikon_st = "🟢 HIT TP2 (Penuh)"
         elif "HIT TP1" in st_hasil:
             ikon_st = "🟢 HIT TP1"
-        elif "HIT SL" in st_hasil or "SL" in st_hasil:
+        elif "SETUP_INVALID" in st_hasil or "INVALID" in st_hasil:
+            ikon_st = "⛔ SETUP INVALID"
+        elif "HIT SL" in st_hasil:
             ikon_st = "🔴 HIT SL"
         elif "RUNNING" in st_hasil:
             ikon_st = "🟡 RUNNING"

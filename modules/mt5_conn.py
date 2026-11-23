@@ -1241,7 +1241,7 @@ def fetch_mt5_pending_orders_snapshot(
                 default_symbol=target_sym,
                 retrieved_at=now_wib,
                 server_offset_hours=server_off_h,
-                enrich_history=True,
+                enrich_history=False,
             )
             if np_item["symbol"].upper() in accepted_syms:
                 t_p = np_item.get("ticket")

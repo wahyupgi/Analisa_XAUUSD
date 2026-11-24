@@ -251,16 +251,22 @@ def calculate_snr_risk_reward(
                 "reason": "Zona Resistance struktural berikutnya untuk Take Profit BUY tidak tersedia.",
             }
 
-        # TP1 adalah batas bawah Resistance relevan terdekat di atas entry
-        first_res_low = opp_candidates[0][0]
+        # TP1 adalah batas bawah Resistance relevan terdekat di atas entry yang memenuhi min_rr
+        min_rew_pts = min_rr * risk_pts
+        valid_opp = [c for c in opp_candidates if (round_to_tick(c[0] - spread_pts, tick_size, digits) - eff_entry) >= min_rew_pts - 1e-6]
+        chosen_opp = valid_opp if valid_opp else opp_candidates
+        first_res_low = chosen_opp[0][0]
         tp1_price = round_to_tick(first_res_low - spread_pts, tick_size, digits)
-        if len(opp_candidates) >= 2:
-            tp2_price = round_to_tick(opp_candidates[1][0] - spread_pts, tick_size, digits)
-        else:
-            tp2_price = tp1_price
+        min_tp2_gap = max(1.5, 0.5 * atr_val, 0.3 * risk_pts)
+        tp2_price = None
+        for opp_cand in chosen_opp[1:]:
+            cand_tp2 = round_to_tick(opp_cand[0] - spread_pts, tick_size, digits)
+            if cand_tp2 > tp1_price and (cand_tp2 - tp1_price) >= min_tp2_gap:
+                tp2_price = cand_tp2
+                break
 
         reward_tp1 = tp1_price - eff_entry
-        reward_tp2 = tp2_price - eff_entry
+        reward_tp2 = (tp2_price - eff_entry) if tp2_price is not None else 0.0
 
     else:  # SELL
         # Entry SELL dieksekusi pada Bid (entry_ref), namun penutupan SL/TP menggunakan Ask (+ spread)
@@ -353,25 +359,31 @@ def calculate_snr_risk_reward(
                 "reason": "Zona Support struktural berikutnya untuk Take Profit SELL tidak tersedia.",
             }
 
-        first_sup_high = opp_candidates[0][0]
+        min_rew_pts = min_rr * risk_pts
+        valid_opp = [c for c in opp_candidates if (eff_entry - round_to_tick(c[0] + spread_pts, tick_size, digits)) >= min_rew_pts - 1e-6]
+        chosen_opp = valid_opp if valid_opp else opp_candidates
+        first_sup_high = chosen_opp[0][0]
         tp1_price = round_to_tick(first_sup_high + spread_pts, tick_size, digits)
-        if len(opp_candidates) >= 2:
-            tp2_price = round_to_tick(opp_candidates[1][0] + spread_pts, tick_size, digits)
-        else:
-            tp2_price = tp1_price
+        min_tp2_gap = max(1.5, 0.5 * atr_val, 0.3 * risk_pts)
+        tp2_price = None
+        for opp_cand in chosen_opp[1:]:
+            cand_tp2 = round_to_tick(opp_cand[0] + spread_pts, tick_size, digits)
+            if 0 < cand_tp2 < tp1_price and (tp1_price - cand_tp2) >= min_tp2_gap:
+                tp2_price = cand_tp2
+                break
 
         reward_tp1 = eff_entry - tp1_price
-        reward_tp2 = eff_entry - tp2_price
+        reward_tp2 = (eff_entry - tp2_price) if tp2_price is not None else 0.0
 
     stops_level = spec.get("stops_level")
     min_stop = max(0.0, safe_float(stops_level, 0.0))
     exit_quote = eff_entry - spread_pts if dir_up == "BUY" else eff_entry + spread_pts
     stop_distance = exit_quote - sl_price if dir_up == "BUY" else sl_price - exit_quote
     target_distance = tp1_price - exit_quote if dir_up == "BUY" else exit_quote - tp1_price
-    if reward_tp1 <= 0 or tp1_price <= 0 or tp2_price <= 0 or stop_distance < min_stop or target_distance < min_stop:
+    if reward_tp1 <= 0 or tp1_price <= 0 or stop_distance < min_stop or target_distance < min_stop:
         reason = (
             "Target struktural tidak searah atau tidak valid setelah pembulatan."
-            if reward_tp1 <= 0 or tp1_price <= 0 or tp2_price <= 0
+            if reward_tp1 <= 0 or tp1_price <= 0
             else "Jarak SL atau TP kurang dari batas stop broker."
         )
         return {
@@ -387,7 +399,7 @@ def calculate_snr_risk_reward(
         }
 
     rr_tp1 = round(reward_tp1 / max(1e-6, risk_pts), 2)
-    rr_tp2 = round(reward_tp2 / max(1e-6, risk_pts), 2)
+    rr_tp2 = round(reward_tp2 / max(1e-6, risk_pts), 2) if (tp2_price is not None and reward_tp2 > 0) else None
 
     risk_ticks = risk_pts / tick_size
     reward_ticks_tp1 = reward_tp1 / tick_size
@@ -423,7 +435,7 @@ def calculate_snr_risk_reward(
         "risk_mt5_points": price_distance_to_mt5_points(risk_pts, point=point),
         "reward_tp1_points": round(reward_tp1, digits),
         "reward_tp1_mt5_points": price_distance_to_mt5_points(reward_tp1, point=point),
-        "reward_tp2_points": round(reward_tp2, digits),
+        "reward_tp2_points": round(reward_tp2, digits) if tp2_price is not None else None,
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
         "rr_display": f"1 : {rr_tp1:.2f}",

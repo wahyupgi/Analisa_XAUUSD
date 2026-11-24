@@ -341,6 +341,7 @@ def build_smc_zone_reason(
     h4_bias: Optional[str] = None,
     max_words: Optional[int] = None,
     max_keywords: int = 5,
+    h1_bias: Optional[str] = None,
 ) -> str:
     """Concise 2-5 keyword formation reason for an SMC zone using only detected metadata."""
     if not isinstance(zone, dict):
@@ -394,24 +395,38 @@ def build_smc_zone_reason(
 
     align_tag = ""
     h4_u = str(h4_bias or "").upper()
+    h1_u = str(h1_bias or "").upper()
     zt_u = str(zone.get("zone_type") or "").upper()
+    want_bias = "BULLISH" if zt_u == "DEMAND" else ("BEARISH" if zt_u == "SUPPLY" else "")
     htf_map = zone.get("htf_alignment") if isinstance(zone.get("htf_alignment"), dict) else {}
     h4_map_val = str(htf_map.get("H4") or "").upper()
-    if (
+    h1_map_val = str(htf_map.get("H1") or "").upper()
+    h4_al = bool(
+        h4_map_val == "ALIGNED"
+        or (want_bias and h4_u == want_bias)
+        or (zone.get("is_aligned") and not h4_map_val and h4_u not in ("BULLISH", "BEARISH"))
+    )
+    h4_ct = bool(
         zone.get("is_counter")
-        or h4_map_val == "COUNTER"
-        or (h4_u == "BEARISH" and zt_u == "DEMAND")
-        or (h4_u == "BULLISH" and zt_u == "SUPPLY")
-    ):
+        or h4_map_val in ("OPPOSED", "COUNTER")
+        or (want_bias and h4_u in ("BULLISH", "BEARISH") and h4_u != want_bias)
+    )
+    h1_al = bool(h1_map_val == "ALIGNED" or (want_bias and h1_u == want_bias))
+    h1_ct = bool(
+        h1_map_val in ("OPPOSED", "COUNTER")
+        or (want_bias and h1_u in ("BULLISH", "BEARISH") and h1_u != want_bias)
+    )
+    if h4_ct:
         align_tag = "Counter H4"
-    elif (
-        zone.get("is_aligned")
-        or h4_map_val == "ALIGNED"
-        or (h4_u == "BULLISH" and zt_u == "DEMAND")
-        or (h4_u == "BEARISH" and zt_u == "SUPPLY")
-        or _num(sb.get("htf_alignment") or sb.get("konteks_htf")) >= 6.0
-    ):
-        align_tag = "HTF Aligned"
+    elif h4_al:
+        if h1_al:
+            align_tag = "HTF Aligned (H4+H1)"
+        elif h1_ct:
+            align_tag = "H4 Aligned (vs H1)"
+        else:
+            align_tag = "H4 Aligned"
+    elif _num(sb.get("htf_alignment") or sb.get("konteks_htf")) >= 6.0:
+        align_tag = "HTF Aligned (H4+H1)" if _num(sb.get("htf_alignment") or sb.get("konteks_htf")) >= 9.0 else "H4 Aligned"
 
     merged_from = zone.get("merged_from") or ev.get("merged_from")
     if isinstance(merged_from, list) and len(merged_from) > 1 and len(keywords) < max_keywords - (1 if align_tag else 0):
@@ -475,12 +490,16 @@ def build_smc_invalidation_reason(zone: Dict[str, Any]) -> str:
     return ""
 
 
-def format_smc_invalid_why(zone: Dict[str, Any], h4_bias: Optional[str] = None) -> str:
+def format_smc_invalid_why(
+    zone: Dict[str, Any],
+    h4_bias: Optional[str] = None,
+    h1_bias: Optional[str] = None,
+) -> str:
     """One-line invalidation + formation origin distinction for an INVALID SMC zone."""
     if not isinstance(zone, dict):
         return ""
     inv_why = build_smc_invalidation_reason(zone)
-    origin = build_smc_zone_reason(zone, h4_bias=h4_bias) or str(zone.get("origin_reason") or "").strip()
+    origin = build_smc_zone_reason(zone, h4_bias=h4_bias, h1_bias=h1_bias) or str(zone.get("origin_reason") or "").strip()
     if inv_why and origin:
         return f"INVALID: {inv_why} | Origin: {origin}"
     if inv_why:
@@ -1294,6 +1313,85 @@ def format_scan_presentation(
         if main_z and _is_far_zone_disp(main_z):
             far_ref_z = far_ref_z or main_z
             main_z = None
+        smc_main_z = main_z
+        smc_far_ref_z = far_ref_z
+
+        snr_ctx_obj = (dec.get("snr_context") if isinstance(dec.get("snr_context"), dict) else None) or (scan.get("snr_context") if isinstance(scan.get("snr_context"), dict) else None) or {}
+        _snr_mb_c = (snr_ctx_obj.get("market_bias") or {}) if isinstance(snr_ctx_obj, dict) else {}
+        _snr_h4_c = str(_snr_mb_c.get("h4") or "").upper()
+        _snr_h1_c = str(_snr_mb_c.get("h1") or "").upper()
+        _snr_m30_c = str(_snr_mb_c.get("m30") or "").upper()
+        _eff_h4_snr_c = h4_bias if h4_bias in ("BULLISH", "BEARISH") else _snr_h4_c
+
+        best_tp_c = dec.get("best_trade_plan") if isinstance(dec.get("best_trade_plan"), dict) else None
+        if isinstance(best_tp_c, dict):
+            from modules.utils import refresh_trade_plan_live_state
+            best_tp_c = refresh_trade_plan_live_state(
+                best_tp_c,
+                live_price=price,
+                bid=bid_val,
+                ask=ask_val,
+                is_closed=(eff_mkt_c == "CLOSED"),
+                m5_eval_status=m5_bias_disp,
+                mt5_orders_snapshot=_ord_snap_pres,
+            )
+        _tp_st_c = str((best_tp_c or {}).get("status") or "").strip().upper()
+        _tp_src_c = str((best_tp_c or {}).get("source") or "").strip().upper()
+        _tp_zid_c = str((best_tp_c or {}).get("zone_id") or "").strip()
+        _tp_active_focus = bool(
+            best_tp_c
+            and _tp_zid_c
+            and _tp_st_c not in ("", "NO_ACTIVE_PLAN", "REJECTED", "INVALID", "SL_BREACHED", "EXPIRED", "MISSED")
+        )
+        selected_snr_main_z = None
+        if _tp_active_focus and _tp_src_c == "SNR":
+            _snr_search_pool = (
+                list(snr_ctx_obj.get("supports") or [])
+                + list(snr_ctx_obj.get("resistances") or [])
+                + [
+                    snr_ctx_obj.get("support"),
+                    snr_ctx_obj.get("resistance"),
+                    ((snr_ctx_obj.get("entry_validation") or {}).get("target_zone") if isinstance(snr_ctx_obj.get("entry_validation"), dict) else None),
+                    snr_ctx_obj.get("breakout_zone"),
+                    snr_ctx_obj.get("retest_zone"),
+                    snr_ctx_obj.get("rejection_zone"),
+                ]
+            )
+            matched_snr_tp = next(
+                (sz for sz in _snr_search_pool if isinstance(sz, dict) and str(sz.get("zone_id") or "").strip() == _tp_zid_c),
+                None,
+            )
+            if isinstance(matched_snr_tp, dict):
+                selected_snr_main_z = dict(matched_snr_tp)
+            else:
+                selected_snr_main_z = {
+                    "zone_id": _tp_zid_c,
+                    "timeframe": best_tp_c.get("timeframe") or "H1",
+                    "zone_type": best_tp_c.get("zone_type") or ("RESISTANCE" if best_tp_c.get("direction") == "SELL" else "SUPPORT"),
+                    "low": float(best_tp_c.get("zone_low") or 0.0),
+                    "high": float(best_tp_c.get("zone_high") or 0.0),
+                    "grade": best_tp_c.get("grade") or "-",
+                    "score": best_tp_c.get("score"),
+                    "structure_invalidation": float(best_tp_c.get("struct_inv") or 0.0),
+                    "setup_sl": float(best_tp_c.get("setup_sl") or 0.0),
+                    "setup_version": best_tp_c.get("setup_version"),
+                    "zone_relevance": best_tp_c.get("zone_status") or "ACTIVE",
+                }
+            selected_snr_main_z["source"] = "SNR"
+            selected_snr_main_z.setdefault("price_low", float(selected_snr_main_z.get("low") or 0.0))
+            selected_snr_main_z.setdefault("price_high", float(selected_snr_main_z.get("high") or 0.0))
+        elif _tp_active_focus and _tp_src_c == "SMC":
+            if not isinstance(main_z, dict) or str(main_z.get("zone_id") or "").strip() != _tp_zid_c:
+                matched_smc_tp = next(
+                    (
+                        cz for cz in ([raw_main_z, pz_c, nz_c] + list(all_radar))
+                        if isinstance(cz, dict) and str(cz.get("zone_id") or "").strip() == _tp_zid_c and not _is_far_zone_disp(cz)
+                    ),
+                    None,
+                )
+                if isinstance(matched_smc_tp, dict):
+                    main_z = matched_smc_tp
+                    smc_main_z = matched_smc_tp
 
         best_p_c = (early_setups or {}).get("best_setup")
         pending_ready_c = bool(
@@ -1323,7 +1421,7 @@ def format_scan_presentation(
                 htf_conflict=has_htf_conflict_fmt,
                 m30_conflict=has_m30_conflict_fmt,
                 h4_bias=h4_bias,
-                has_active_zone=bool(main_z),
+                has_active_zone=bool(main_z or selected_snr_main_z),
                 zone_touch=zt,
                 rr_failed=(rr_st == "FAIL" or ("rr" in (rr_desc or "").lower() and "min" in (rr_desc or "").lower())),
                 is_missed=bool(dec.get("is_missed") or (dec.get("m5") or {}).get("is_missed")),
@@ -1380,16 +1478,65 @@ def format_scan_presentation(
             ct_t = " COUNTER" if z_obj.get("is_counter") else ""
             return f"{zt_f} {zt_t} {z_lo:.2f}-{z_hi:.2f} | G:{z_grd}{z_sc} {z_fr} | Dist {d_txt}{inv_txt} | {rel_t}{ct_t}{zid_t}"
 
-        active_radar_line = _fmt_zone_1line(main_z)
-        shown_main_z = main_z if (isinstance(main_z, dict) and main_z.get("price_low")) else None
-        if active_radar_line == "NONE" and isinstance(far_ref_z, dict):
-            active_radar_line = f"NONE | FAR REF: {_fmt_zone_1line(far_ref_z)}"
-            if far_ref_z.get("price_low"):
-                shown_main_z = far_ref_z
-        main_why_c = build_smc_zone_reason(shown_main_z, h4_bias=h4_bias) if shown_main_z else ""
+        from modules.snr.formatter import build_snr_zone_reason
 
-        next_z = dec.get("next_radar_zone")
-        if not next_z and nz_c and (not main_z or nz_c.get("zone_id") != main_z.get("zone_id")):
+        def _fmt_snr_zone_1line(sz_obj: Optional[Dict[str, Any]]) -> str:
+            if not isinstance(sz_obj, dict):
+                return "NONE"
+            s_lo = float(sz_obj.get("low", sz_obj.get("price_low", 0.0)) or 0.0)
+            s_hi = float(sz_obj.get("high", sz_obj.get("price_high", s_lo)) or s_lo)
+            if s_lo <= 0:
+                return "NONE"
+            s_tf = str(sz_obj.get("timeframe") or "H1").strip().upper()
+            s_zt = str(sz_obj.get("zone_type") or "ZONE").strip().upper()
+            s_grd = str(sz_obj.get("grade") or "-")
+            s_sc = f"/{float(sz_obj['score']):.1f}" if sz_obj.get("score") is not None else ""
+            s_sinv = float(sz_obj.get("structure_invalidation") or sz_obj.get("invalidation_price") or (s_lo if s_zt == "SUPPORT" else s_hi))
+            from modules.utils import resolve_stored_setup_sl
+            s_sl = resolve_stored_setup_sl(
+                "SNR",
+                str(sz_obj.get("zone_id") or ""),
+                trade_plans=dec.get("trade_plans") if isinstance(dec.get("trade_plans"), list) else None,
+                best_trade_plan=best_tp_c,
+                timeframe=s_tf,
+                setup_version=sz_obj.get("setup_version") if isinstance(sz_obj.get("setup_version"), int) else None,
+            ) or float(sz_obj.get("setup_sl") or 0.0)
+            if price > 0 and s_hi >= s_lo:
+                d_val_s = 0.0 if s_lo <= price <= s_hi else min(abs(price - s_lo), abs(price - s_hi))
+                d_txt_s = "IN ZONE" if d_val_s <= 0 else format_price_distance(d_val_s, spec=_u_spec_pres)
+            else:
+                d_txt_s = "N/A"
+            inv_s_segs = []
+            if s_sinv > 0:
+                inv_s_segs.append(f"StructInv {s_sinv:.2f}")
+            if s_sl > 0 and abs(s_sl - s_sinv) >= 0.01:
+                inv_s_segs.append(f"SetupSL {s_sl:.2f}")
+            inv_s_txt = (" | " + " | ".join(inv_s_segs)) if inv_s_segs else ""
+            rel_s = str(sz_obj.get("zone_relevance") or sz_obj.get("lifecycle_status") or sz_obj.get("status") or "ACTIVE").upper()
+            zid_s = f" [ID:{sz_obj['zone_id']}]" if sz_obj.get("zone_id") else ""
+            return f"{s_tf} {s_zt} {s_lo:.2f}-{s_hi:.2f} | G:{s_grd}{s_sc} | Dist {d_txt_s}{inv_s_txt} | {rel_s} [SNR]{zid_s}"
+
+        smc_far_ref_line = ""
+        if isinstance(selected_snr_main_z, dict) and float(selected_snr_main_z.get("price_low") or 0.0) > 0:
+            active_radar_line = _fmt_snr_zone_1line(selected_snr_main_z)
+            shown_main_z = selected_snr_main_z
+            main_why_c = (
+                build_snr_zone_reason(selected_snr_main_z, h4_bias=_eff_h4_snr_c, h1_bias=_snr_h1_c)
+                or str((best_tp_c or {}).get("why") or "")
+            )
+            if isinstance(smc_far_ref_z, dict) and smc_far_ref_z.get("price_low"):
+                smc_far_ref_line = _fmt_zone_1line(smc_far_ref_z)
+        else:
+            active_radar_line = _fmt_zone_1line(main_z)
+            shown_main_z = main_z if (isinstance(main_z, dict) and main_z.get("price_low")) else None
+            if active_radar_line == "NONE" and isinstance(far_ref_z, dict):
+                active_radar_line = f"NONE | FAR REF: {_fmt_zone_1line(far_ref_z)}"
+                if far_ref_z.get("price_low"):
+                    shown_main_z = far_ref_z
+            main_why_c = build_smc_zone_reason(shown_main_z, h4_bias=h4_bias, h1_bias=h1_struct) if shown_main_z else ""
+
+        next_z = smc_main_z if isinstance(selected_snr_main_z, dict) else dec.get("next_radar_zone")
+        if not next_z and nz_c and (not shown_main_z or nz_c.get("zone_id") != shown_main_z.get("zone_id")):
             next_z = nz_c
 
         # Latest INVALID (prioritaskan invalidasi terbaru, relevan terhadap harga & direction, serta kualitas memadai)
@@ -1407,12 +1554,11 @@ def format_scan_presentation(
             invalid_line = format_invalid_zone_compact(iz0, current_price=price if price > 0 else None, unit_spec=_u_spec_pres, status_override=iz_t)
         else:
             invalid_line = "NONE"
-        inv_why_c = format_smc_invalid_why(iz0, h4_bias=h4_bias) if isinstance(iz0, dict) else ""
+        inv_why_c = format_smc_invalid_why(iz0, h4_bias=h4_bias, h1_bias=h1_struct) if isinstance(iz0, dict) else ""
 
         # SNR 1-line summary
-        snr_ctx_obj = (dec.get("snr_context") if isinstance(dec.get("snr_context"), dict) else None) or (scan.get("snr_context") if isinstance(scan.get("snr_context"), dict) else None) or {}
         confl_obj = dec.get("smc_snr_confluence") or scan.get("smc_snr_confluence")
-        _confl_zone = main_z or pz_c
+        _confl_zone = smc_main_z or pz_c
         if snr_ctx_obj and _confl_zone and (
             confl_obj is None
             or str(((confl_obj.get("smc_zone") or {}) if isinstance(confl_obj, dict) else {}).get("zone_id") or "")
@@ -1421,17 +1567,15 @@ def format_scan_presentation(
             confl_obj = evaluate_smc_snr_confluence(_confl_zone, snr_ctx_obj, price, htf_bias=h4_bias)
         sup_c = snr_ctx_obj.get("support") or ((snr_ctx_obj.get("supports") or [None])[0]) if isinstance(snr_ctx_obj, dict) else None
         res_c = snr_ctx_obj.get("resistance") or ((snr_ctx_obj.get("resistances") or [None])[0]) if isinstance(snr_ctx_obj, dict) else None
-        from modules.snr.formatter import build_snr_zone_reason
-        _eff_h4_snr_c = h4_bias if h4_bias in ("BULLISH", "BEARISH") else str((snr_ctx_obj.get("market_bias") or {}).get("h4") or "").upper()
         s1_why_c = ""
         r1_why_c = ""
         snr_parts = []
         if isinstance(sup_c, dict) and sup_c.get("low"):
             snr_parts.append(f"S1 {float(sup_c['low']):.2f}-{float(sup_c.get('high', sup_c['low'])):.2f}(G:{sup_c.get('grade', '-')})")
-            s1_why_c = build_snr_zone_reason(sup_c, h4_bias=_eff_h4_snr_c)
+            s1_why_c = build_snr_zone_reason(sup_c, h4_bias=_eff_h4_snr_c, h1_bias=_snr_h1_c)
         if isinstance(res_c, dict) and res_c.get("low"):
             snr_parts.append(f"R1 {float(res_c['low']):.2f}-{float(res_c.get('high', res_c['low'])):.2f}(G:{res_c.get('grade', '-')})")
-            r1_why_c = build_snr_zone_reason(res_c, h4_bias=_eff_h4_snr_c)
+            r1_why_c = build_snr_zone_reason(res_c, h4_bias=_eff_h4_snr_c, h1_bias=_snr_h1_c)
         if isinstance(confl_obj, dict) and confl_obj.get("available"):
             if confl_obj.get("is_aligned") and float(confl_obj.get("overlap_points") or 0.0) > 0:
                 snr_parts.append(f"CONFLUENCE ({format_price_distance(float(confl_obj['overlap_points']), spec=_u_spec_pres)})")
@@ -1459,12 +1603,21 @@ def format_scan_presentation(
             risk_line = f"AMAN | Pos:{pos_c} Pend:{ord_c} NoSL:{nosl_c} | Sync:{sync_c}"
 
         term_w_c = get_terminal_width(default=100, min_width=64, max_width=120)
+        _smc_m30_c = (
+            f"{m30_dir} ({m30_status})"
+            if (m30_dir and m30_status and str(m30_dir).upper() != str(m30_status).upper())
+            else str(m30_dir or m30_status)
+        )
+        _m30_snr_seg_c = (
+            f" | M30(SNR) {_snr_m30_c}"
+            if (_snr_m30_c and _snr_m30_c not in ("N/A", "UNKNOWN", "UNCONFIRMED", "NO_DATA", "DATA UNAVAILABLE"))
+            else ""
+        )
         out.extend(wrap_dashboard_field("MARKET       : ", f"{eff_mkt_c} | {px_part} | {snapshot_time}{snap_id_tag}", term_w_c, max_lines=None))
-        out.extend(wrap_dashboard_field("BIAS         : ", f"H4 {h4_bias} | H1(SMC Struct) {h1_struct}{conflict_tag} | M30 {m30_dir or m30_status} ({m30_status}) | M5 {m5_bias_disp}", term_w_c, max_lines=None))
-        out.extend(wrap_dashboard_field("DIRECTION    : ", str(dir_analysis), term_w_c, max_lines=None))
+        out.extend(wrap_dashboard_field("BIAS         : ", f"H4 {h4_bias} | H1(SMC Struct) {h1_struct}{conflict_tag} | M30(SMC) {_smc_m30_c}{_m30_snr_seg_c} | M5 {m5_bias_disp}", term_w_c, max_lines=None))
+        out.extend(wrap_dashboard_field("MARKET BIAS  : ", str(dir_analysis), term_w_c, max_lines=None))
         out.extend(wrap_dashboard_field("ENTRY STATUS : ", entry_status_line, term_w_c, max_lines=None))
 
-        best_tp_c = dec.get("best_trade_plan") if isinstance(dec.get("best_trade_plan"), dict) else None
         bp_same_zone = bool(
             pending_ready_c and not confirmed_ready_c and best_tp_c
             and str(best_tp_c.get("zone_id") or "") == str(best_p_c.get("zone_id") or "")
@@ -1493,11 +1646,13 @@ def format_scan_presentation(
         out.extend(wrap_dashboard_field("ACTIVE/RADAR : ", active_radar_line, term_w_c, max_lines=None))
         if main_why_c:
             out.extend(wrap_dashboard_field("  WHY        : ", main_why_c, term_w_c, max_lines=None))
-        if isinstance(next_z, dict) and next_z.get("zone_id") and (not main_z or next_z.get("zone_id") != main_z.get("zone_id")):
+        if isinstance(next_z, dict) and next_z.get("zone_id") and (not shown_main_z or next_z.get("zone_id") != shown_main_z.get("zone_id")):
             out.extend(wrap_dashboard_field("NEXT RADAR   : ", _fmt_zone_1line(next_z), term_w_c, max_lines=None))
-            next_why_c = build_smc_zone_reason(next_z, h4_bias=h4_bias)
+            next_why_c = build_smc_zone_reason(next_z, h4_bias=h4_bias, h1_bias=h1_struct)
             if next_why_c:
                 out.extend(wrap_dashboard_field("  WHY        : ", next_why_c, term_w_c, max_lines=None))
+        if smc_far_ref_line:
+            out.extend(wrap_dashboard_field("SMC FAR REF  : ", smc_far_ref_line, term_w_c, max_lines=None))
         out.extend(wrap_dashboard_field("INVALID      : ", invalid_line, term_w_c, max_lines=None))
         if inv_why_c:
             out.extend(wrap_dashboard_field("  WHY        : ", inv_why_c, term_w_c, max_lines=None))
@@ -1526,7 +1681,10 @@ def format_scan_presentation(
     else:
         m30_disp_d = f"{m30_status}"
     m30_disp_bias_d = f"{m30_dir} ({m30_status})" if (m30_dir and m30_dir in ("BULLISH", "BEARISH") and m30_status != m30_dir) else (m30_dir or m30_status)
-    out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1: {h1_struct}{conflict_tag} | M30: {m30_disp_bias_d} | M5: {m5_bias_disp}")
+    _snr_mb_det = ((dec.get("snr_context") or scan.get("snr_context") or {}).get("market_bias") or {}) if isinstance(dec.get("snr_context") or scan.get("snr_context"), dict) else {}
+    _snr_m30_det = str(_snr_mb_det.get("m30") or "").upper()
+    _m30_snr_det_seg = f" | M30(SNR): {_snr_m30_det}" if (_snr_m30_det and _snr_m30_det not in ("N/A", "UNKNOWN", "UNCONFIRMED", "NO_DATA", "DATA UNAVAILABLE")) else ""
+    out.append(f"- Multi-TF Bias    : H4: {h4_bias} | H1(SMC): {h1_struct}{conflict_tag} | M30(SMC): {m30_disp_bias_d}{_m30_snr_det_seg} | M5: {m5_bias_disp}")
     out.append(f"- H4 Bias          : {h4_str}")
     out.append(f"- H1 Structure     : {h1_struct}")
     out.append(f"- M30 Momentum     : {m30_disp_d}")

@@ -3845,6 +3845,8 @@ def evaluate_zone_hybrid_eligibility(
     bid: Optional[float] = None,
     ask: Optional[float] = None,
     market_status: Optional[str] = None,
+    opposing_zones: Optional[List[Any]] = None,
+    snr_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Integrasi Hybrid Entry Engine untuk setiap zona di seluruh kategori:
@@ -3972,6 +3974,7 @@ def evaluate_zone_hybrid_eligibility(
             z_obj, current_price, frames=frames, htf_bias=htf_bias,
             m30_status=m30_status, server_time=server_time, bid=bid, ask=ask,
             h1_structure=h1_struct, premarket=is_mkt_closed,
+            opposing_zones=opposing_zones, snr_context=snr_context,
         )
         if plan_res.get("valid"):
             pending_plan = plan_res
@@ -4103,6 +4106,7 @@ def prioritize_radar_zones(
     snapshot_time: Optional[str] = None,
     snapshot_id: Optional[str] = None,
     market_status: Optional[str] = None,
+    snr_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Sistem Seleksi & Evaluasi Multi-Zona RADAR dengan 4 Kategori Terpisah & Multi-Tier SMC:
@@ -4370,6 +4374,7 @@ def prioritize_radar_zones(
             m5_stages=(m5_stages if m5_stages and m5_stages.get("_zone_id") and m5_stages["_zone_id"] == zd.get("zone_id") else None),
             server_time=server_time, atr=atr_val,
             bid=bid, ask=ask, market_status=market_status,
+            opposing_zones=radar_zones, snr_context=snr_context,
         )
         # Jika zona tidak memenuhi kategori High/Medium/Low tetapi memenuhi kriteria pending independen,
         # tetapkan klasifikasi sebagai UNTIERED PENDING tanpa membatalkan status READY (dilarang untuk FAR_REFERENCE).
@@ -5916,6 +5921,13 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
     }
     out["diagnostics"] = diagnostics
 
+    out["snr_context"] = extract_snr_supporting_context(
+        frames,
+        current_price,
+        market_status=eff_mkt_status,
+        snapshot=snapshot if isinstance(snapshot, dict) else out.get("snapshot"),
+    )
+
     radar_prio = prioritize_radar_zones(
         radar_zones=radar_zones,
         current_price=snapshot_price,
@@ -5931,6 +5943,7 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
         snapshot_time=snapshot_time,
         snapshot_id=snapshot_id,
         market_status=eff_mkt_status,
+        snr_context=out["snr_context"],
     )
     radar_prio["atr_diagnostics"] = atr_diag
     out["radar_priority"] = radar_prio
@@ -6117,12 +6130,6 @@ def scan_xauusd_zones(frames: Optional[Dict[str, pd.DataFrame]] = None, current_
     for z in rejected[:3]:
         lines.append(f"  - {z.timeframe} {z.zone_type} {z.price_low:.2f}-{z.price_high:.2f}: {z.rejection_reason}")
     lines.append("=" * 70)
-    out["snr_context"] = extract_snr_supporting_context(
-        frames,
-        current_price,
-        market_status=eff_mkt_status,
-        snapshot=snapshot if isinstance(snapshot, dict) else out.get("snapshot"),
-    )
     # SMC + SNR Confluence Evaluation (Supporting Context Only)
     target_smc_c = (out.get("radar_priority") or {}).get("primary_directional_zone") or (active[0] if active else (radar_zones[0] if radar_zones else None))
     out["smc_snr_confluence"] = evaluate_smc_snr_confluence(
@@ -6424,8 +6431,8 @@ def _structural_targets(
     z_type_u = str(zone_type or "").upper()
     is_demand = (z_type_u == "DEMAND")
 
-    # 1. Swings dari M15, M30, H1, H4
-    for tf in ("M15", "M30", "H1", "H4"):
+    # 1. Swings dari M5, M15, M30, H1, H4
+    for tf in ("M5", "M15", "M30", "H1", "H4"):
         df = (frames or {}).get(tf)
         if df is None or len(df) < 2 * SWING_N + 1:
             continue
@@ -6441,32 +6448,44 @@ def _structural_targets(
     if opposing_zones:
         for oz in opposing_zones:
             oz_d = oz if isinstance(oz, dict) else (oz.to_dict() if hasattr(oz, "to_dict") else {})
-            if not oz_d or not oz_d.get("is_valid", True):
+            if not oz_d or not oz_d.get("is_valid", True) or oz_d.get("is_broken"):
+                continue
+            oz_st = str(oz_d.get("lifecycle_status") or oz_d.get("status") or "").upper()
+            if oz_st in ("INVALIDATED", "BROKEN", "EXPIRED", "MITIGATED", "REJECTED"):
                 continue
             oz_type = str(oz_d.get("zone_type") or "").upper()
-            oz_lo = float(oz_d.get("price_low") or 0.0)
-            oz_hi = float(oz_d.get("price_high") or 0.0)
-            if is_demand and oz_type == "SUPPLY" and oz_lo > entry:
+            oz_lo = float(oz_d.get("price_low") or oz_d.get("low") or 0.0)
+            oz_hi = float(oz_d.get("price_high") or oz_d.get("high") or 0.0)
+            if is_demand and oz_type in ("SUPPLY", "RESISTANCE") and oz_lo > entry:
                 levels.append(oz_lo)
-            elif (not is_demand) and oz_type == "DEMAND" and 0 < oz_hi < entry:
+            elif (not is_demand) and oz_type in ("DEMAND", "SUPPORT") and 0 < oz_hi < entry:
                 levels.append(oz_hi)
 
     # 3. Opposing SNR context (penghalang / support-resistance material)
     if isinstance(snr_context, dict):
         if is_demand:
             for r in (snr_context.get("resistances") or []):
-                if isinstance(r, dict):
+                if isinstance(r, dict) and not _is_snr_zone_broken_or_inactive(r, "BUY", snr_context=snr_context):
                     r_lo = float(r.get("low") or 0.0)
                     if r_lo > entry:
                         levels.append(r_lo)
         else:
             for s in (snr_context.get("supports") or []):
-                if isinstance(s, dict):
+                if isinstance(s, dict) and not _is_snr_zone_broken_or_inactive(s, "SELL", snr_context=snr_context):
                     s_hi = float(s.get("high") or 0.0)
                     if 0 < s_hi < entry:
                         levels.append(s_hi)
 
     levels = sorted(set(round(x, 2) for x in levels), reverse=(not is_demand))
+
+    # Filter target yang terlalu berdekatan agar TP2 hanya dibuat jika ada struktur/likuiditas bermakna
+    if len(levels) > 1:
+        min_tp_gap = max(1.5, 0.5 * float(atr)) if (atr is not None and isinstance(atr, (int, float)) and atr > 0) else 1.5
+        filtered_levels = [levels[0]]
+        for lvl in levels[1:]:
+            if abs(lvl - filtered_levels[-1]) >= min_tp_gap:
+                filtered_levels.append(lvl)
+        levels = filtered_levels
 
     # 4. Fallback jika tidak ada swing searah
     if not levels and atr is not None and isinstance(atr, (int, float)) and atr > 0:
@@ -6484,7 +6503,8 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
                  require_sweep: Optional[bool] = None, server_time: Any = None,
                  snr_context: Optional[Dict[str, Any]] = None,
                  bid: Optional[float] = None, ask: Optional[float] = None,
-                 market_status: Optional[str] = None) -> Dict[str, Any]:
+                 market_status: Optional[str] = None,
+                 opposing_zones: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Hasil terstruktur: status VALID/WAIT/INVALID, reasons, stages, plan.
     Urutan validasi ketat konsisten untuk semua grade zona:
       1. Validasi zona & integritas data candle close selesai
@@ -6827,15 +6847,29 @@ def _entry_check(zone: Zone, price: float, df_m5: Optional[pd.DataFrame], spread
         W.append(sl_msg_rej)
         return res
 
-    targets = _structural_targets(htf_frames or {}, zone.zone_type, entry)
+    targets = _structural_targets(
+        htf_frames or {},
+        zone.zone_type,
+        entry,
+        opposing_zones=opposing_zones,
+        snr_context=snr_context,
+    )
     if not targets:
         stages["risk_reward"] = {"status": "WAIT", "msg": "Tidak ada target likuiditas struktural H1/H4 searah transaksi"}
         W.append("Tidak ada target likuiditas struktural H1/H4 searah transaksi")
         return res
 
     buf = 0.3
-    tp1 = round(targets[0] - buf if demand else targets[0] + buf, 2)
-    tp2 = round(targets[1] - buf if demand else targets[1] + buf, 2) if len(targets) > 1 else tp1
+    min_reward_req = round(RR_MIN * risk, 2)
+    valid_targets = [
+        t for t in targets
+        if ((round(t - buf, 2) - entry) if demand else (entry - round(t + buf, 2))) >= min_reward_req - 1e-6
+    ]
+    chosen_targets = valid_targets if valid_targets else targets
+    tp1 = round(chosen_targets[0] - buf if demand else chosen_targets[0] + buf, 2)
+    tp2 = round(chosen_targets[1] - buf if demand else chosen_targets[1] + buf, 2) if len(chosen_targets) > 1 else 0.0
+    if tp2 > 0.0 and abs(tp2 - tp1) < max(1.5, 0.5 * float(atr5 or 0.0)):
+        tp2 = 0.0
     reward = round((tp1 - entry) if demand else (entry - tp1), 2)
     rr = round(reward / risk, 2) if risk > 0 else 0.0
     res["rr"] = rr
@@ -7383,19 +7417,28 @@ def plan_pending_order(
         res["rejection_reason"] = "NO_TARGET: Tidak ada target likuiditas struktural searah transaksi"
         return res
     buf = 0.3
+    min_reward_req = round(RR_MIN * risk_points, 2)
+    valid_targets = [
+        t for t in targets
+        if ((round(t - buf, 2) - entry) if demand else (entry - round(t + buf, 2))) >= min_reward_req - 1e-6
+    ]
+    chosen_targets = valid_targets if valid_targets else targets
+    min_tp2_gap = max(1.5, 0.5 * float(ref_atr_z or 0.0))
     if demand:
-        tp1 = round(targets[0] - buf, 2)
-        tp2 = round(targets[1] - buf, 2) if len(targets) > 1 else tp1
+        tp1 = round(chosen_targets[0] - buf, 2)
+        cand_tp2 = round(chosen_targets[1] - buf, 2) if len(chosen_targets) > 1 else 0.0
+        tp2 = cand_tp2 if (cand_tp2 > tp1 and (cand_tp2 - tp1) >= min_tp2_gap) else 0.0
         reward_tp1 = round(tp1 - entry, 2)
-        reward_tp2 = round(tp2 - entry, 2)
+        reward_tp2 = round(tp2 - entry, 2) if tp2 > 0.0 else 0.0
     else:
-        tp1 = round(targets[0] + buf, 2)
-        tp2 = round(targets[1] + buf, 2) if len(targets) > 1 else tp1
+        tp1 = round(chosen_targets[0] + buf, 2)
+        cand_tp2 = round(chosen_targets[1] + buf, 2) if len(chosen_targets) > 1 else 0.0
+        tp2 = cand_tp2 if (cand_tp2 > 0.0 and cand_tp2 < tp1 and (tp1 - cand_tp2) >= min_tp2_gap) else 0.0
         reward_tp1 = round(entry - tp1, 2)
-        reward_tp2 = round(entry - tp2, 2)
+        reward_tp2 = round(entry - tp2, 2) if tp2 > 0.0 else 0.0
 
     rr_tp1 = round(reward_tp1 / risk_points, 2) if risk_points > 0 else 0.0
-    rr_tp2 = round(reward_tp2 / risk_points, 2) if risk_points > 0 else 0.0
+    rr_tp2 = round(reward_tp2 / risk_points, 2) if (risk_points > 0 and tp2 > 0.0 and reward_tp2 > 0.0) else 0.0
     if rr_tp1 > 8.0:
         res["rr_justification"] = f"TP1 struktural {tp1:.2f} (R:R 1:{rr_tp1:.2f})"
 
@@ -7615,6 +7658,8 @@ def detect_early_setups(
     tracker = get_zone_tracker(auto_save=False)
     tracked_zones = tracker.tracked_zones if tracker else {}
 
+    all_scan_zones_early = list(scan.get("active_zones") or []) + list(scan.get("radar_zones") or [])
+    snr_ctx_early = scan.get("snr_context")
     for zd in cands:
         z_obj = _zone_from_dict(zd) if isinstance(zd, dict) else zd
         z_id = getattr(z_obj, "zone_id", "")
@@ -7630,6 +7675,7 @@ def detect_early_setups(
             z_obj, float(current_price), frames, h4_bias, m30_status, server_time,
             created_at=prev_created_at, target_time=prev_expires_at,
             bid=scan.get("bid"), ask=scan.get("ask"), h1_structure=h1_struct,
+            opposing_zones=all_scan_zones_early, snr_context=snr_ctx_early,
         )
         if plan.get("valid"):
             if not any(_zones_substantially_overlap(ep, plan) for ep in valid_plans):
@@ -8608,6 +8654,8 @@ def _provisional_zone_plans(dec, price, frames, h4_bias, m30_status, server_time
     """Run the existing pending-order planner once per displayed zone so every command shows the same levels."""
     plans: Dict[str, Dict[str, Any]] = {}
     r_prio = dec.get("radar_priority") or {}
+    snr_ctx_p = dec.get("snr_context")
+    opp_pool_p = list(r_prio.get("all_prioritized") or [])
     is_mkt_closed_p = (
         str(dec.get("market_status") or "").upper() == "CLOSED"
         or str(dec.get("snapshot_status") or "").upper() == "MARKET_CLOSED"
@@ -8630,6 +8678,7 @@ def _provisional_zone_plans(dec, price, frames, h4_bias, m30_status, server_time
             plan = plan_pending_order(
                 z_obj, float(price), frames, h4_bias, m30_status, server_time,
                 bid=bid, ask=ask, premarket=is_mkt_closed_p,
+                opposing_zones=opp_pool_p, snr_context=snr_ctx_p,
             )
             if str(zd.get("setup_eligibility") or "").upper().startswith("NOT_ELIGIBLE") or zd.get("risk_rejected") or str(zd.get("zone_relevance") or "").upper() == "FAR_REFERENCE":
                 plan["valid"] = False
@@ -8643,6 +8692,7 @@ def _provisional_zone_plans(dec, price, frames, h4_bias, m30_status, server_time
             if not plan.get("valid") and aligned_bias and plan.get("status") in ("CONFLICT", "WEAK"):
                 calc = plan_pending_order(
                     z_obj, float(price), frames, None, None, server_time, bid=bid, ask=ask, h1_structure=None,
+                    opposing_zones=opp_pool_p, snr_context=snr_ctx_p,
                 )
                 if calc.get("valid"):
                     calc["valid"] = False
@@ -8702,7 +8752,7 @@ def generate_smc_trade_plan(
     is_closed = mkt_st in ("CLOSED", "MARKET_CLOSED") or str(d_obj.get("snapshot_status") or "").upper() == "MARKET_CLOSED"
 
     try:
-        why_txt = build_smc_zone_reason(zd, h4_bias=h4_bias)
+        why_txt = build_smc_zone_reason(zd, h4_bias=h4_bias, h1_bias=h1_bias)
     except Exception:
         why_txt = ""
 
@@ -8713,6 +8763,7 @@ def generate_smc_trade_plan(
     z_life = str(zd.get("lifecycle_status") or zd.get("status") or "").upper()
     z_fr = str(zd.get("freshness") or "FRESH").upper()
     is_expired_z = bool(zd.get("is_expired") or z_life == "EXPIRED" or z_fr == "EXPIRED")
+    inv_rsn_smc = "ZONE_INVALID"
     is_invalid_z = bool(
         (not is_expired_z) and (
             zd.get("is_valid") is False
@@ -8722,9 +8773,21 @@ def generate_smc_trade_plan(
             or str(zd.get("grade") or "").upper() == "REJECTED"
         )
     )
+    if not is_invalid_z and isinstance(frames, dict):
+        try:
+            closed_inv_tp, _, _, _, _ = evaluate_smc_zone_closed_invalidation(zd, frames)
+            if closed_inv_tp:
+                is_invalid_z = True
+                inv_rsn_smc = "ZONE_STRUCTURALLY_INVALID"
+        except Exception:
+            pass
+    elif is_invalid_z and (zd.get("is_broken") is True or z_life in ("INVALIDATED", "BROKEN") or z_fr in ("INVALIDATED", "BROKEN")):
+        inv_rsn_smc = "ZONE_STRUCTURALLY_INVALID"
     is_far_z = bool(
-        str(zd.get("zone_relevance") or "").upper() == "FAR_REFERENCE"
-        or (price > 0 and is_far_reference_zone(zd, current_price=price))
+        (not is_invalid_z) and (
+            str(zd.get("zone_relevance") or "").upper() == "FAR_REFERENCE"
+            or (price > 0 and is_far_reference_zone(zd, current_price=price))
+        )
     )
 
     u_spec = extract_unit_spec_from_container(s_obj if s_obj else d_obj)
@@ -8836,12 +8899,19 @@ def generate_smc_trade_plan(
         if not targets:
             return {"ok": False, "reason": "NO_STRUCTURAL_TARGET"}
         tp_buf = 0.3
+        risk_v = abs(planned_e - round(setup_sl_v, digits))
+        min_rew_v = float(RR_MIN) * risk_v
+        valid_targets = [
+            t for t in targets
+            if ((round(t - tp_buf, digits) - planned_e) if demand else (planned_e - round(t + tp_buf, digits))) >= min_rew_v - 1e-6
+        ]
+        chosen_t = valid_targets if valid_targets else targets
         if demand:
-            tp1_v = round(targets[0] - tp_buf, digits)
-            tp2_v = round(targets[1] - tp_buf, digits) if len(targets) > 1 else 0.0
+            tp1_v = round(chosen_t[0] - tp_buf, digits)
+            tp2_v = round(chosen_t[1] - tp_buf, digits) if len(chosen_t) > 1 else 0.0
         else:
-            tp1_v = round(targets[0] + tp_buf, digits)
-            tp2_v = round(targets[1] + tp_buf, digits) if len(targets) > 1 else 0.0
+            tp1_v = round(chosen_t[0] + tp_buf, digits)
+            tp2_v = round(chosen_t[1] + tp_buf, digits) if len(chosen_t) > 1 else 0.0
         return {
             "ok": True,
             "setup_sl": round(setup_sl_v, digits),
@@ -8861,6 +8931,7 @@ def generate_smc_trade_plan(
     was_touched_smc = bool(int(zd.get("touch_count") or 0) > 0 or z_life in ("TOUCHED", "ZONE_TOUCHED"))
     touch_time_smc = None
     bars_since_touch_smc = None
+    sl_breached_hist_smc = False
     atr5_smc = 1.5
     m5_df_tp = frames.get("M5") if isinstance(frames, dict) else None
     if m5_df_tp is not None and not m5_df_tp.empty and lo > 0 and hi >= lo:
@@ -8869,7 +8940,7 @@ def generate_smc_trade_plan(
                 _a5 = float(m5_df_tp["ATR14"].iloc[-1])
                 if math.isfinite(_a5) and _a5 > 0:
                     atr5_smc = _a5
-            origin_dt = _resolve_smc_zone_origin_time(zd, frames)
+            origin_dt, _ = _resolve_smc_zone_origin_time(zd, work_df=m5_df_tp)
             post_m5 = m5_df_tp
             if origin_dt is not None:
                 try:
@@ -8881,6 +8952,8 @@ def generate_smc_trade_plan(
                     mask_post = t_ser > orig_ts
                     if mask_post.any():
                         post_m5 = m5_df_tp.loc[mask_post]
+                    else:
+                        post_m5 = m5_df_tp.iloc[0:0]
                 except Exception:
                     post_m5 = m5_df_tp.tail(24)
             else:
@@ -8899,6 +8972,28 @@ def generate_smc_trade_plan(
                         bars_since_touch_smc = max(0, (len(post_m5) - 1) - last_rel)
                     raw_t = post_m5["Time"].iloc[last_rel] if "Time" in post_m5.columns else last_label
                     touch_time_smc = format_wib_timestamp(raw_t, source_tz="MT5")
+                from modules.utils import get_frozen_trade_plan, resolve_stored_setup_sl
+                stored_sl_smc = resolve_stored_setup_sl("SMC", zid, timeframe=tf)
+                if stored_sl_smc > 0.0:
+                    post_sl_m5 = post_m5
+                    frz_smc = get_frozen_trade_plan("SMC", zid, timeframe=tf)
+                    cr_ts = float((frz_smc or {}).get("created_at_ts") or 0.0)
+                    if cr_ts > 0.0 and isinstance(post_m5.index, pd.DatetimeIndex):
+                        try:
+                            # Bandingkan terhadap timestamp UTC bila tersedia, namun hanya persempit jika bar tersedia
+                            cr_utc = pd.Timestamp(cr_ts, unit="s")
+                            if post_m5.index.tz is not None:
+                                cr_utc = cr_utc.tz_localize("UTC").tz_convert(post_m5.index.tz)
+                            cand_sl_df = post_m5.loc[post_m5.index >= cr_utc]
+                            if not cand_sl_df.empty:
+                                post_sl_m5 = cand_sl_df
+                        except Exception:
+                            pass
+                    if not post_sl_m5.empty:
+                        if demand and bool((post_sl_m5["Low"] <= stored_sl_smc).any()):
+                            sl_breached_hist_smc = True
+                        elif (not demand) and bool((post_sl_m5["High"] >= stored_sl_smc).any()):
+                            sl_breached_hist_smc = True
         except Exception:
             pass
 
@@ -8931,7 +9026,7 @@ def generate_smc_trade_plan(
         atr_value=atr_num,
         is_closed=is_closed,
         is_invalid_zone=is_invalid_z,
-        invalid_reason="ZONE_INVALID",
+        invalid_reason=inv_rsn_smc,
         is_expired_zone=is_expired_z,
         is_breakout_pending=is_bo_pending_z,
         is_far_zone=is_far_z,
@@ -8947,6 +9042,7 @@ def generate_smc_trade_plan(
         bars_since_touch=bars_since_touch_smc,
         max_bars_after_touch=2,
         mt5_orders_snapshot=mt5_snap_smc,
+        sl_breached_hist=sl_breached_hist_smc,
     )
 
 
@@ -8982,11 +9078,26 @@ def generate_smc_trade_plans(
             zd = item.to_dict() if hasattr(item, "to_dict") else (item if isinstance(item, dict) else None)
             if isinstance(zd, dict):
                 all_raw.append(zd)
-    for z_list in (s_obj.get("invalidated_zones") or [], s_obj.get("broken_zones") or [], s_obj.get("expired_zones") or []):
+    for z_list in (
+        s_obj.get("invalidated_zones") or [],
+        s_obj.get("broken_zones") or [],
+        s_obj.get("expired_zones") or [],
+        s_obj.get("rejected_zones") or [],
+    ):
         for item in z_list:
             zd = item.to_dict() if hasattr(item, "to_dict") else (item if isinstance(item, dict) else None)
             if isinstance(zd, dict) and is_tracked_trade_plan_zone("SMC", str(zd.get("zone_id") or "")):
                 all_raw.append(zd)
+    try:
+        trk_tp = d_obj.get("zone_tracker") or get_zone_tracker(auto_save=False)
+        if trk_tp is not None:
+            for z_dict_map in (getattr(trk_tp, "invalidated_zones", None), getattr(trk_tp, "tracked_zones", None)):
+                if isinstance(z_dict_map, dict):
+                    for trk_z in z_dict_map.values():
+                        if isinstance(trk_z, dict) and is_tracked_trade_plan_zone("SMC", str(trk_z.get("zone_id") or "")):
+                            all_raw.append(dict(trk_z))
+    except Exception:
+        pass
 
     seen_ids = set()
     unique_zones: List[Dict[str, Any]] = []
@@ -9211,6 +9322,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
                 snapshot_time=scan.get("snapshot_time"),
                 snapshot_id=scan.get("snapshot_id") or dec.get("snapshot_id"),
                 market_status=dec.get("market_status"),
+                snr_context=dec.get("snr_context") or scan.get("snr_context"),
             )
             dec["radar_priority"] = prio
             dec["multi_tier_zones"] = prio.get("multi_tier_zones", {})
@@ -9822,6 +9934,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
         _, _, target_zd = pool_c[0]
         target_zn = _zone_from_dict(target_zd)
         snr_c = dec.get("snr_context") or scan.get("snr_context")
+        opp_c = list(scan.get("active_zones") or []) + list(scan.get("radar_zones") or [])
         r_c = _entry_check(
             target_zn,
             float(price),
@@ -9834,6 +9947,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             bid=scan.get("bid"),
             ask=scan.get("ask"),
             market_status=eff_mkt_dec,
+            opposing_zones=opp_c,
         )
         for k_st, v_st in (r_c.get("stages") or {}).items():
             st[k_st] = v_st
@@ -10322,6 +10436,7 @@ def _decide(dec, frames, price, spread, news, server_time, live,
             frames,
             server_time=server_time,
             snr_context=pre_snr_ctx,
+            opposing_zones=(list(scan.get("active_zones") or []) + list(scan.get("radar_zones") or [])),
         )
         if r.get("risk_rejected"):
             zd["risk_rejected"] = True

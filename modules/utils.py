@@ -1511,6 +1511,10 @@ def evaluate_trade_plan_lifecycle(
     bars_since_touch: Optional[int] = None,
     max_bars_after_touch: Optional[int] = None,
     verified_mt5_fill: Optional[Dict[str, Any]] = None,
+    sl_breached_hist: bool = False,
+    htf_conflict: bool = False,
+    breakdown_state: Optional[str] = None,
+    breakdown_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluasi status lifecycle aktual & LIVE_ENTRY/Market RR tanpa menggeser PLANNED_ENTRY/SL/TP."""
     d = str(direction or "").strip().upper()
@@ -1605,23 +1609,54 @@ def evaluate_trade_plan_lifecycle(
         res_fill["setup_match"] = "CONFIRMED"
         return res_fill
 
-    # 1. STRUCTURALLY_INVALID (zona benar-benar invalid/broken closed candle)
+    # 1. Evaluasi breach SetupSL (live & histori tersedia) dan structural invalidation SEBELUM filter lain
+    live_sl_hit = bool(
+        sl_check_px > 0
+        and setup_sl > 0
+        and ((demand and sl_check_px <= setup_sl) or ((not demand) and sl_check_px >= setup_sl))
+    )
+    sl_breached = bool(live_sl_hit or sl_breached_hist)
+    if is_invalid_zone and sl_breached:
+        inv_r = invalid_reason or "ZONE_STRUCTURALLY_INVALID"
+        comb_r = inv_r if "SL_BREACHED" in inv_r.upper() else f"SL_BREACHED+{inv_r}"
+        return _base("INVALID", "STRUCTURALLY_INVALID", "SL_BREACHED", comb_r, "SETUP_SL_BREACHED_AND_ZONE_INVALID")
+
+    if sl_breached:
+        sl_r = "SL_BREACHED" if live_sl_hit else "SL_BREACHED_HIST"
+        z_st_sl = "BREAKOUT_PENDING" if (is_breakout_pending or exited_far_edge) else "ACTIVE"
+        return _base("SL_BREACHED", z_st_sl, "SL_BREACHED", sl_r, "SETUP_SL_BREACHED", is_suspended=False)
+
     if is_invalid_zone:
         inv_r = invalid_reason or "ZONE_STRUCTURALLY_INVALID"
         return _base("INVALID", "STRUCTURALLY_INVALID", "INVALID", inv_r, inv_r)
 
-    # 1b. SL_BREACHED (SetupSL ditembus live tick, meskipun zona belum tentu closed-candle broken)
-    if sl_check_px > 0 and setup_sl > 0:
-        if (demand and sl_check_px <= setup_sl) or ((not demand) and sl_check_px >= setup_sl):
-            z_st_sl = "BREAKOUT_PENDING" if (is_breakout_pending or exited_far_edge) else "ACTIVE"
-            return _base("SL_BREACHED", z_st_sl, "SL_BREACHED", "SL_BREACHED", "SETUP_SL_BREACHED", is_suspended=True)
+    brk_st_u = str(breakdown_state or "").strip().upper()
+    if brk_st_u in ("STRUCTURAL_INVALIDATION", "STRUCTURALLY_INVALID"):
+        brk_r = str(breakdown_reason or "STRUCTURAL_INVALIDATION (CLOSED_CANDLE)")
+        return _base("INVALID", "STRUCTURALLY_INVALID", "INVALID", brk_r, "STRUCTURAL_INVALIDATION_CLOSED_CANDLE")
+    if brk_st_u in ("CONFIRMED_BREAKDOWN", "CONFIRMED_BREAKOUT", "BREAKDOWN_CONFIRMED", "BREAKOUT_CONFIRMED", "BROKEN"):
+        brk_r = str(breakdown_reason or f"{brk_st_u} (CLOSED_CANDLE)")
+        return _base("INVALID", "ZONE_BROKEN", "INVALID", brk_r, f"{brk_st_u}_CLOSED_CANDLE")
 
     # 2. EXPIRED (aturan validitas existing habis; zona tetap ACTIVE bila tidak invalid)
     if is_expired:
         return _base("EXPIRED", "TOUCHED" if inside_zone_now else "ACTIVE", "EXPIRED", "SETUP_EXPIRED", "VALIDITY_WINDOW_EXPIRED")
 
-    # 3. CONFIRMED (market/confirmed entry tervalidasi -> READY executable)
-    if (not is_closed) and confirmed_entry and confirmed_entry > 0 and not is_breakout_pending and not exited_far_edge:
+    blocked_by_htf_or_m5 = bool(
+        htf_conflict
+        or (norm_m5_st in ("UNCONFIRMED", "CONFLICT", "CONFIRMED_BLOCKED_HTF"))
+    )
+
+    # 3. CONFIRMED (market/confirmed entry tervalidasi -> READY executable; diblokir oleh HTF_CONFLICT / M5 UNCONFIRMED)
+    if (
+        (not is_closed)
+        and (not blocked_by_htf_or_m5)
+        and confirmed_entry
+        and confirmed_entry > 0
+        and not is_breakout_pending
+        and not exited_far_edge
+        and brk_st_u not in ("POTENTIAL_BREAKDOWN", "POTENTIAL_BREAKOUT")
+    ):
         return _base(
             status="READY",
             zone_status="TOUCHED" if inside_zone_now else "ACTIVE",
@@ -1633,7 +1668,19 @@ def evaluate_trade_plan_lifecycle(
             touched_flag=True,
         )
 
-    # 4. SUSPENDED (harga menembus batas jauh zona namun belum closed-candle confirm & belum tembus SetupSL)
+    # 4. SUSPENDED (potential breakdown/breakout belum closed-candle confirm & belum tembus SetupSL)
+    if brk_st_u in ("POTENTIAL_BREAKDOWN", "POTENTIAL_BREAKOUT"):
+        brk_z_st = "POTENTIAL_BREAKDOWN" if "BREAKDOWN" in brk_st_u else "POTENTIAL_BREAKOUT"
+        brk_r = str(breakdown_reason or f"{brk_z_st} (AWAIT_CLOSED_CANDLE)")
+        return _base(
+            status="SUSPENDED",
+            zone_status=brk_z_st,
+            setup_status="SUSPENDED",
+            reason=brk_r,
+            transition_reason=f"{brk_z_st}_AWAIT_CLOSED_CANDLE",
+            is_suspended=True,
+        )
+
     if is_breakout_pending or exited_far_edge:
         return _base(
             status="SUSPENDED",
@@ -1693,8 +1740,8 @@ def evaluate_trade_plan_lifecycle(
             touched_flag=True,
         )
 
-    # 7. PENDING_LIMIT READY
-    if (not is_closed) and early_pending_ready:
+    # 7. PENDING_LIMIT READY (diblokir oleh HTF_CONFLICT dan M5 UNCONFIRMED; tetap tampil sebagai CONDITIONAL)
+    if (not is_closed) and (not blocked_by_htf_or_m5) and early_pending_ready:
         return _base(
             status="READY",
             zone_status="ACTIVE",
@@ -1705,15 +1752,85 @@ def evaluate_trade_plan_lifecycle(
             touched_flag=False,
         )
 
+    eff_cond_reason = cond_reason or "WAIT_CONFIRM"
+    if htf_conflict and "HTF_CONFLICT" not in eff_cond_reason.upper():
+        eff_cond_reason = "HTF_CONFLICT_CONDITIONAL"
+    elif norm_m5_st == "UNCONFIRMED" and "UNCONFIRMED" not in eff_cond_reason.upper():
+        eff_cond_reason = "M5_UNCONFIRMED_CONDITIONAL"
+
     # 8. CONDITIONAL (pending limit valid secara numerik, belum disentuh, menunggu kondisi/konfirmasi)
     return _base(
         status="CONDITIONAL",
         zone_status="ACTIVE",
         setup_status="CONDITIONAL",
-        reason=cond_reason or "WAIT_CONFIRM",
+        reason=eff_cond_reason,
         transition_reason="AWAITING_TOUCH_AND_CONFIRM",
         touched_flag=False,
     )
+
+
+def _evaluate_plan_revalidation_from_ctx(
+    plan: Optional[Dict[str, Any]],
+    revalidation_ctx: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Revalidasi locked plan terhadap status breakdown/invalidasi closed candle di SNR/SMC."""
+    out = {"breakdown_state": None, "breakdown_reason": None, "is_invalid_zone": False, "invalid_reason": ""}
+    if not isinstance(plan, dict) or not isinstance(revalidation_ctx, dict):
+        return out
+    zid = str(plan.get("zone_id") or "").strip()
+    p_dir = str(plan.get("direction") or "").strip().upper()
+    if not zid:
+        return out
+
+    pool: List[Dict[str, Any]] = []
+    snr_zones = revalidation_ctx.get("snr_zones") if isinstance(revalidation_ctx.get("snr_zones"), dict) else {}
+    for k in ("all_zones", "active_supports", "active_resistances", "broken_zones", "invalidated_zones"):
+        for z in (snr_zones.get(k) or []):
+            if isinstance(z, dict):
+                pool.append(z)
+    for z in (revalidation_ctx.get("scan_zones") or []):
+        if isinstance(z, dict):
+            pool.append(z)
+
+    matched_z = next((z for z in pool if str(z.get("zone_id") or "").strip() == zid), None)
+    if isinstance(matched_z, dict):
+        life = str(matched_z.get("lifecycle_status") or matched_z.get("status") or "").strip().upper()
+        zt = str(matched_z.get("zone_type") or "").strip().upper()
+        is_sup = zt in ("SUPPORT", "DEMAND") or (not zt and p_dir == "BUY")
+        if matched_z.get("is_invalidated") or matched_z.get("closed_invalidated") or life == "INVALIDATED":
+            out["breakdown_state"] = "STRUCTURAL_INVALIDATION"
+            out["breakdown_reason"] = "STRUCTURAL_INVALIDATION (CLOSED_CANDLE)"
+            out["is_invalid_zone"] = True
+            out["invalid_reason"] = out["breakdown_reason"]
+            return out
+        if matched_z.get("is_broken") or life in ("BROKEN", "BREAKDOWN_CONFIRMED", "BREAKOUT_CONFIRMED"):
+            brk_lbl = "CONFIRMED_BREAKDOWN" if is_sup else "CONFIRMED_BREAKOUT"
+            out["breakdown_state"] = brk_lbl
+            out["breakdown_reason"] = f"{brk_lbl} (CLOSED_CANDLE)"
+            return out
+        if matched_z.get("unconfirmed_break") or life in ("BREAKDOWN_PENDING", "BREAKOUT_PENDING"):
+            pend_lbl = "POTENTIAL_BREAKDOWN" if is_sup else "POTENTIAL_BREAKOUT"
+            out["breakdown_state"] = pend_lbl
+            out["breakdown_reason"] = f"{pend_lbl} (AWAIT_CLOSED_CANDLE)"
+            return out
+
+    # Cek price_action SNR untuk breakdown/breakout yang baru terjadi pada zona dengan ID sama
+    snr_pa = revalidation_ctx.get("snr_price_action") if isinstance(revalidation_ctx.get("snr_price_action"), dict) else {}
+    bo_zid = str(snr_pa.get("breakout_zone_id") or "").strip()
+    if bo_zid and bo_zid == zid:
+        bo_st = str(snr_pa.get("breakout_state") or "").strip().upper()
+        bo_dir = str(snr_pa.get("breakout_dir") or "").strip().upper()
+        if bo_st == "VALID_BREAKOUT":
+            brk_lbl = "CONFIRMED_BREAKDOWN" if (bo_dir == "BEARISH" or p_dir == "BUY") else "CONFIRMED_BREAKOUT"
+            out["breakdown_state"] = brk_lbl
+            out["breakdown_reason"] = f"{brk_lbl} (CLOSED_CANDLE)"
+            return out
+        if snr_pa.get("potential_breakdown") or bo_st in ("POTENTIAL_BREAKOUT", "POTENTIAL_BREAKDOWN", "BREAKDOWN_PENDING", "BREAKOUT_PENDING"):
+            pend_lbl = "POTENTIAL_BREAKDOWN" if (bo_dir == "BEARISH" or p_dir == "BUY") else "POTENTIAL_BREAKOUT"
+            out["breakdown_state"] = pend_lbl
+            out["breakdown_reason"] = f"{pend_lbl} (AWAIT_CLOSED_CANDLE)"
+            return out
+    return out
 
 
 def refresh_trade_plan_live_state(
@@ -1724,6 +1841,9 @@ def refresh_trade_plan_live_state(
     is_closed: bool = False,
     m5_eval_status: Optional[str] = None,
     mt5_orders_snapshot: Optional[Dict[str, Any]] = None,
+    htf_conflict: bool = False,
+    revalidation_ctx: Optional[Dict[str, Any]] = None,
+    h4_bias: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Perbarui LIVE PRICE, LIVE ENTRY, Market RR, dan status lifecycle pada live tick tanpa menggeser level plan beku."""
     if not isinstance(plan, dict) or not plan:
@@ -1794,6 +1914,9 @@ def refresh_trade_plan_live_state(
             "executed_wib": out.get("mt5_fill_time_wib") or "",
         }
 
+    reval = _evaluate_plan_revalidation_from_ctx(out, revalidation_ctx)
+    eff_inv_zone = bool(st_cur == "INVALID" or str(out.get("zone_status") or "").upper() == "STRUCTURALLY_INVALID" or reval.get("is_invalid_zone"))
+    eff_inv_rsn = str(reval.get("invalid_reason") or (out.get("reason") or "") if eff_inv_zone else "")
     lc = evaluate_trade_plan_lifecycle(
         direction=d_up,
         lo=lo,
@@ -1808,8 +1931,8 @@ def refresh_trade_plan_live_state(
         ask=ask,
         digits=digits,
         is_closed=is_closed,
-        is_invalid_zone=(st_cur == "INVALID" or str(out.get("zone_status") or "").upper() == "STRUCTURALLY_INVALID"),
-        invalid_reason=(str(out.get("reason") or "") if st_cur == "INVALID" else ""),
+        is_invalid_zone=eff_inv_zone,
+        invalid_reason=eff_inv_rsn,
         is_expired=(st_cur == "EXPIRED" or str(out.get("setup_status") or "").upper() == "EXPIRED"),
         is_breakout_pending=bo_pend,
         confirmed_entry=conf_e,
@@ -1821,7 +1944,14 @@ def refresh_trade_plan_live_state(
         m5_eval_at_touch=m5_at_touch,
         missed_move_threshold=float(out.get("missed_move_threshold") or (cached.get("missed_move_threshold") if isinstance(cached, dict) else 0.0) or 0.0),
         verified_mt5_fill=mt5_fill,
+        htf_conflict=htf_conflict,
+        breakdown_state=reval.get("breakdown_state"),
+        breakdown_reason=reval.get("breakdown_reason"),
     )
+    eff_h4 = str(h4_bias or out.get("h4_bias") or "").strip().upper()
+    if eff_h4 in ("BULLISH", "BEARISH"):
+        out["h4_bias"] = eff_h4
+        out["is_counter_trend"] = bool((d_up == "BUY" and eff_h4 == "BEARISH") or (d_up == "SELL" and eff_h4 == "BULLISH"))
     if lc["status"] in ("INVALID", "SL_BREACHED", "EXPIRED", "MISSED") or lc["setup_status"] in ("SL_BREACHED", "EXPIRED", "MISSED") or lc["zone_status"] == "STRUCTURALLY_INVALID":
         _record_invalidated_setup_version(
             src, tf, zid, cur_ver,
@@ -1914,6 +2044,7 @@ def build_shared_trade_plan(
     bars_since_touch: Optional[int] = None,
     max_bars_after_touch: Optional[int] = None,
     mt5_orders_snapshot: Optional[Dict[str, Any]] = None,
+    sl_breached_hist: bool = False,
 ) -> Dict[str, Any]:
     """
     Trade Plan Generator bersama untuk SMC dan SNR.
@@ -1936,8 +2067,24 @@ def build_shared_trade_plan(
     cur_ver = int(setup_version) if (isinstance(setup_version, int) and setup_version > 0) else (int(cached.get("setup_version", 1)) if isinstance(cached, dict) else 1)
 
     def _rej(reason_code: str, status_override: str = "REJECTED", s_inv_v: float = 0.0) -> Dict[str, Any]:
-        z_st_r = "STRUCTURALLY_INVALID" if (is_invalid_zone or status_override == "INVALID") else ("BREAKOUT_PENDING" if is_breakout_pending else "ACTIVE")
-        s_st_r = "EXPIRED" if status_override == "EXPIRED" else ("SL_BREACHED" if status_override == "SL_BREACHED" else "REJECTED")
+        if is_invalid_zone or status_override == "INVALID":
+            z_st_r = "STRUCTURALLY_INVALID"
+        elif reason_code == "FAR_ZONE":
+            z_st_r = "FAR_REFERENCE"
+        elif is_breakout_pending:
+            z_st_r = "BREAKOUT_PENDING"
+        else:
+            z_st_r = "ACTIVE"
+        if status_override == "EXPIRED":
+            s_st_r = "EXPIRED"
+        elif status_override == "SL_BREACHED":
+            s_st_r = "SL_BREACHED"
+        elif status_override == "INVALID":
+            s_st_r = "INVALID"
+        elif reason_code == "FAR_ZONE":
+            s_st_r = "FAR_ZONE"
+        else:
+            s_st_r = "REJECTED"
         return {
             "source": src,
             "zone_id": zid,
@@ -1985,17 +2132,24 @@ def build_shared_trade_plan(
         return _rej("DATA_INCOMPLETE")
 
     s_inv = float(struct_inv) if (isinstance(struct_inv, (int, float)) and struct_inv > 0) else (lo if demand else hi)
-    if is_far_zone:
-        return _rej("FAR_ZONE", s_inv_v=s_inv)
 
-    # Jika sudah ada plan beku dan zona menjadi INVALID/EXPIRED, pertahankan level beku + ubah status (jangan geser entry)
-    if (is_invalid_zone or is_expired_zone) and not isinstance(cached, dict):
-        if is_expired_zone:
-            return _rej("SETUP_EXPIRED", status_override="EXPIRED", s_inv_v=s_inv)
-        return _rej(invalid_reason or "ZONE_INVALID", status_override="INVALID", s_inv_v=s_inv)
-
-    if not is_closed and max_spread > 0.0 and spread > max_spread and not isinstance(cached, dict):
-        return _rej(f"SPREAD_HIGH ({spread:.2f}>{max_spread:g})", s_inv_v=s_inv)
+    # Prioritas 1: Cek lock invalidasi permanen & breach/structural invalidation SEBELUM distance filter (FAR_ZONE)
+    if not isinstance(cached, dict):
+        inv_pre = _get_invalidated_setup_version(src, tf, zid, cur_ver)
+        if inv_pre is not None:
+            return _rej(inv_pre["reason"], status_override=inv_pre["status"], s_inv_v=s_inv)
+        if is_invalid_zone or is_expired_zone:
+            if is_expired_zone:
+                _record_invalidated_setup_version(src, tf, zid, cur_ver, status="EXPIRED", setup_status="EXPIRED", zone_status="ACTIVE", reason="SETUP_EXPIRED")
+                return _rej("SETUP_EXPIRED", status_override="EXPIRED", s_inv_v=s_inv)
+            inv_code = invalid_reason or "ZONE_INVALID"
+            _record_invalidated_setup_version(src, tf, zid, cur_ver, status="INVALID", setup_status="INVALID", zone_status="STRUCTURALLY_INVALID", reason=inv_code)
+            return _rej(inv_code, status_override="INVALID", s_inv_v=s_inv)
+        # FAR_ZONE hanya filter jarak sementara (tidak memicu invalidasi permanen)
+        if is_far_zone:
+            return _rej("FAR_ZONE", s_inv_v=s_inv)
+        if not is_closed and max_spread > 0.0 and spread > max_spread:
+            return _rej(f"SPREAD_HIGH ({spread:.2f}>{max_spread:g})", s_inv_v=s_inv)
 
     # PLANNED_ENTRY deterministik dari proximal edge zona (bukan midpoint, bukan live tick)
     det_planned_entry = round(hi, digits) if demand else round(lo, digits)
@@ -2016,16 +2170,26 @@ def build_shared_trade_plan(
         cached_ver = int(cached.get("setup_version", 1))
         same_ver = (setup_version is None or int(setup_version) == cached_ver)
         cached_invalid = (_get_invalidated_setup_version(src, tf, zid, cached_ver) is not None)
+        c_sl_val = float(cached.get("setup_sl") or 0.0)
+        c_sl_px = (float(bid) if (isinstance(bid, (int, float)) and bid > 0) else lp) if demand else (float(ask) if (isinstance(ask, (int, float)) and ask > 0) else lp)
+        cached_sl_hit = bool(
+            sl_breached_hist
+            or (c_sl_val > 0.0 and c_sl_px > 0.0 and ((demand and c_sl_px <= c_sl_val) or ((not demand) and c_sl_px >= c_sl_val)))
+        )
         atr_ref = float(cached.get("atr_ref") or 0.0)
         atr_shift = bool(
             (not cached_invalid)
+            and (not cached_sl_hit)
+            and (not is_invalid_zone)
+            and (not is_expired_zone)
+            and (not is_far_zone)
             and atr_ref > 0.0 and atr_now > 0.0
             and abs(atr_now - atr_ref) / atr_ref >= _TRADE_PLAN_ATR_RECALC_RATIO
         )
         if same_struct and same_ver and not atr_shift:
             use_cached = True
-        elif cached_invalid and same_struct and (setup_version is None or int(setup_version) <= cached_ver):
-            # Setup invalid pada ID + version yang sama tidak boleh auto-bump versi / aktif kembali
+        elif (cached_invalid or cached_sl_hit or is_invalid_zone or is_expired_zone or is_far_zone) and (setup_version is None or int(setup_version) <= cached_ver):
+            # Setup terminal/breached/far pada ID + version yang sama tidak boleh auto-bump versi / aktif kembali
             use_cached = True
         elif not is_invalid_zone and not is_expired_zone:
             cur_ver = int(setup_version) if (isinstance(setup_version, int) and setup_version > cached_ver) else (cached_ver + 1)
@@ -2058,6 +2222,25 @@ def build_shared_trade_plan(
         eff_was_touched_in = bool(cached.get("was_touched", False) or was_touched)
         eff_touch_time_in = cached.get("touch_time") or touch_time
         eff_m5_at_touch_in = cached.get("m5_eval_at_touch")
+        if callable(compute_levels_fn) and not is_invalid_zone and not is_expired_zone and not is_far_zone:
+            try:
+                fresh_lvls = compute_levels_fn(planned_entry)
+                if isinstance(fresh_lvls, dict) and fresh_lvls.get("ok"):
+                    new_tp1 = round(float(fresh_lvls.get("tp1") or 0.0), digits)
+                    new_tp2 = round(float(fresh_lvls.get("tp2") or 0.0), digits)
+                    if new_tp1 > 0.0 and ((demand and planned_entry < new_tp1 < tp1 - 0.05) or ((not demand) and planned_entry > new_tp1 > tp1 + 0.05)):
+                        n_rr1, _ = _compute_rr_pair(d, planned_entry, setup_sl, new_tp1, tp1)
+                        if n_rr1 >= min_rr - 1e-9:
+                            cand_tp2 = new_tp2 if (new_tp2 > 0.0 and ((demand and new_tp1 < new_tp2 <= tp1) or ((not demand) and new_tp1 > new_tp2 >= tp1))) else tp1
+                            n_rr1, n_rr2 = _compute_rr_pair(d, planned_entry, setup_sl, new_tp1, cand_tp2)
+                            tp1, tp2, rr1, rr2 = new_tp1, (cand_tp2 if n_rr2 > 0 else 0.0), n_rr1, n_rr2
+                            cached["tp1"] = tp1
+                            cached["tp2"] = tp2
+                            cached["rr1"] = rr1
+                            cached["rr2"] = rr2
+                            _save_trade_plan_state()
+            except Exception:
+                pass
     else:
         planned_entry = det_planned_entry
         setup_sl = 0.0
@@ -2222,6 +2405,7 @@ def build_shared_trade_plan(
             bars_since_touch=bars_since_touch,
             max_bars_after_touch=max_bars_after_touch,
             verified_mt5_fill=mt5_fill,
+            sl_breached_hist=sl_breached_hist,
         )
         if lc["status"] in ("INVALID", "SL_BREACHED", "EXPIRED", "MISSED") or lc["setup_status"] in ("SL_BREACHED", "EXPIRED", "MISSED") or lc["zone_status"] == "STRUCTURALLY_INVALID":
             _record_invalidated_setup_version(
@@ -2231,6 +2415,15 @@ def build_shared_trade_plan(
                 zone_status=lc["zone_status"],
                 reason=lc["reason"],
             )
+        elif is_far_zone and lc["status"] != "FILLED":
+            # Filter jarak sementara (FAR_ZONE): JANGAN catat ke _INVALIDATED_SETUP_VERSIONS agar tetap dibedakan dari invalidasi permanen
+            lc["status"] = "REJECTED"
+            lc["zone_status"] = "FAR_REFERENCE"
+            lc["setup_status"] = "FAR_ZONE"
+            lc["reason"] = "FAR_ZONE"
+            lc["transition_reason"] = "DISTANCE_FILTER_FAR_ZONE"
+            lc["is_executable"] = False
+            lc["is_suspended"] = False
     if cache_k and cache_k in _FROZEN_TRADE_PLANS:
         if lc.get("was_touched"):
             _FROZEN_TRADE_PLANS[cache_k]["was_touched"] = True
@@ -2386,35 +2579,177 @@ def select_best_trade_plan(plans, direction=None, allow_rejected: bool = True):
     return min(best_by_id.values(), key=lambda pair: pair[0])[1]
 
 
+def _reconcile_archived_far_zone_plan(
+    prev: Optional[Dict[str, Any]],
+    live_price: float = 0.0,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """
+    Rekonsiliasi arsip PREVIOUS PLAN yang sebelumnya tercatat REJECTED (FAR_ZONE):
+    - Pulihkan level beku (planned_entry, setup_sl, struct_inv, tp1, tp2, rr1) bila tersedia.
+    - Evaluasi breach SetupSL & structural invalidation terlebih dahulu dari harga terbaru / state zona.
+    - Jika terbukti breached/invalid, ubah status ke INVALID/SL_BREACHED dan kunci permanen (Zone ID + version).
+    - Jika benar-benar hanya di luar jarak pada sisi valid, beri label eksplisit DISTANCE_FILTER (FAR_ZONE).
+    """
+    if not isinstance(prev, dict) or not prev:
+        return prev, False
+    p_rsn = str(prev.get("reason") or "").strip().upper()
+    p_arch = str(prev.get("archive_reason") or "").strip().upper()
+    if " | " in str(prev.get("reason") or "") or " | " in str(prev.get("archive_reason") or ""):
+        out_fix = dict(prev)
+        if " | " in str(out_fix.get("reason") or ""):
+            out_fix["reason"] = str(out_fix["reason"]).replace(" | ", "+")
+        if " | " in str(out_fix.get("archive_reason") or ""):
+            out_fix["archive_reason"] = str(out_fix["archive_reason"]).replace(" | ", "+")
+        prev = out_fix
+        if p_rsn != "FAR_ZONE" and "FAR_ZONE" not in p_arch:
+            return prev, True
+    if p_rsn != "FAR_ZONE" and "FAR_ZONE" not in p_arch:
+        return prev, False
+
+    p_src = str(prev.get("source") or "SMC").strip().upper()
+    p_zid = str(prev.get("zone_id") or "").strip()
+    p_ver = int(prev.get("setup_version") or 1)
+    p_dir = str(prev.get("direction") or "").strip().upper()
+    demand = (p_dir == "BUY")
+    changed = False
+    out = dict(prev)
+
+    # Temukan timeframe & frozen record bila ada
+    p_tf = str(out.get("timeframe") or "").strip().upper()
+    frozen = get_frozen_trade_plan(p_src, p_zid, timeframe=p_tf or None, setup_version=p_ver)
+    if not p_tf and p_zid:
+        m_tf = re.search(r"^(?:ZONE|SNR)_([A-Z0-9+]+)_", p_zid.upper())
+        if m_tf:
+            p_tf = m_tf.group(1)
+        else:
+            suffix = f":{p_zid}"
+            prefix = f"{p_src}:"
+            for fk in _FROZEN_TRADE_PLANS:
+                if fk.startswith(prefix) and fk.endswith(suffix):
+                    parts = fk.split(":")
+                    if len(parts) >= 3:
+                        p_tf = parts[1].upper()
+                        break
+    if p_tf and not out.get("timeframe"):
+        out["timeframe"] = p_tf
+        changed = True
+
+    if isinstance(frozen, dict):
+        for k_f in ("planned_entry", "setup_sl", "struct_inv", "tp1", "tp2", "rr1"):
+            if float(out.get(k_f) or 0.0) <= 0.0 and float(frozen.get(k_f) or 0.0) > 0.0:
+                out[k_f] = float(frozen[k_f])
+                changed = True
+
+    sl_v = float(out.get("setup_sl") or 0.0)
+    sinv_v = float(out.get("struct_inv") or 0.0)
+    lp = float(live_price) if (isinstance(live_price, (int, float)) and math.isfinite(live_price) and live_price > 0) else 0.0
+    sl_px = (float(bid) if (isinstance(bid, (int, float)) and bid > 0) else lp) if demand else (float(ask) if (isinstance(ask, (int, float)) and ask > 0) else lp)
+
+    sl_hit = bool(sl_v > 0.0 and sl_px > 0.0 and ((demand and sl_px <= sl_v) or ((not demand) and sl_px >= sl_v)))
+    struct_broken = False
+    path = _get_trade_plan_state_path()
+    if p_zid and path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                st_raw = json.load(f)
+            if isinstance(st_raw, dict):
+                if p_src == "SMC":
+                    inv_smc = (st_raw.get("invalidated_smc_zones") or {}).get(p_zid)
+                    trk_smc = (st_raw.get("tracked_zones") or {}).get(p_zid)
+                    if isinstance(inv_smc, dict) and (inv_smc.get("is_broken") or str(inv_smc.get("status") or "").upper() in ("INVALIDATED", "BROKEN")):
+                        struct_broken = True
+                    elif isinstance(trk_smc, dict) and str(trk_smc.get("status") or "").upper() in ("INVALIDATED", "BROKEN"):
+                        struct_broken = True
+                    elif sinv_v > 0.0 and lp > 0.0 and ((demand and lp < sinv_v) or ((not demand) and lp > sinv_v)) and sl_hit:
+                        # Harga sudah jauh melampaui StructInv & SetupSL secara bersamaan
+                        struct_broken = True
+                elif p_src == "SNR":
+                    for snr_rec in (st_raw.get("snr_lifecycle_zones") or {}).values():
+                        if isinstance(snr_rec, dict):
+                            bo_i = snr_rec.get("breakout_info") if isinstance(snr_rec.get("breakout_info"), dict) else {}
+                            if str(bo_i.get("zone_id") or "") == p_zid and str(snr_rec.get("lifecycle_status") or "").upper() in ("INVALIDATED", "BROKEN"):
+                                struct_broken = True
+                                break
+        except Exception:
+            pass
+
+    if sl_hit and struct_broken:
+        new_st, new_s_st, new_z_st = "INVALID", "SL_BREACHED", "STRUCTURALLY_INVALID"
+        new_rsn = "SL_BREACHED+ZONE_STRUCTURALLY_INVALID"
+        new_arch = f"{new_st} ({new_rsn})"
+    elif sl_hit:
+        new_st, new_s_st, new_z_st = "SL_BREACHED", "SL_BREACHED", "ACTIVE"
+        new_rsn = "SL_BREACHED"
+        new_arch = "SL_BREACHED"
+    elif struct_broken:
+        new_st, new_s_st, new_z_st = "INVALID", "INVALID", "STRUCTURALLY_INVALID"
+        new_rsn = "ZONE_STRUCTURALLY_INVALID"
+        new_arch = f"{new_st} ({new_rsn})"
+    else:
+        if out.get("archive_reason") == "REJECTED (FAR_ZONE)":
+            out["archive_reason"] = "DISTANCE_FILTER (FAR_ZONE)"
+            changed = True
+        return out, changed
+
+    if out.get("status") != new_st or out.get("reason") != new_rsn or out.get("archive_reason") != new_arch:
+        out["status"] = new_st
+        out["reason"] = new_rsn
+        out["archive_reason"] = new_arch
+        changed = True
+    if p_tf and p_zid:
+        _record_invalidated_setup_version(
+            p_src, p_tf, p_zid, p_ver,
+            status=new_st,
+            setup_status=new_s_st,
+            zone_status=new_z_st,
+            reason=new_rsn,
+        )
+    return out, changed
+
+
 def _archive_trade_plan(scope_key: str, plan: Dict[str, Any], archive_reason: str) -> Dict[str, Any]:
     """Arsipkan plan lama sebagai PREVIOUS PLAN dengan alasan & timestamp WIB tanpa menggeser level."""
     prev_existing = _PREVIOUS_TRADE_PLANS.get(scope_key)
     p_src = str(plan.get("source") or "").strip().upper()
     p_zid = str(plan.get("zone_id") or "").strip()
+    p_tf = str(plan.get("timeframe") or "").strip().upper()
     p_ver = int(plan.get("setup_version") or 1)
     p_st = str(plan.get("status") or "").strip().upper()
+    p_rsn = str(plan.get("reason") or "").strip()
+    eff_arch_rsn = "DISTANCE_FILTER (FAR_ZONE)" if (p_st == "REJECTED" and p_rsn.upper() == "FAR_ZONE") else str(archive_reason or p_st).strip()
     if (
         isinstance(prev_existing, dict)
         and str(prev_existing.get("source") or "").strip().upper() == p_src
         and str(prev_existing.get("zone_id") or "").strip() == p_zid
         and int(prev_existing.get("setup_version") or 1) == p_ver
         and str(prev_existing.get("status") or "").strip().upper() == p_st
+        and str(prev_existing.get("archive_reason") or "").strip() == eff_arch_rsn
     ):
         return prev_existing
+    frozen_fb = get_frozen_trade_plan(p_src, p_zid, timeframe=p_tf or None, setup_version=p_ver) if p_zid else None
+    pe_v = float(plan.get("planned_entry") or plan.get("entry") or (frozen_fb.get("planned_entry") if isinstance(frozen_fb, dict) else 0.0) or 0.0)
+    sl_v = float(plan.get("setup_sl") or plan.get("sl") or (frozen_fb.get("setup_sl") if isinstance(frozen_fb, dict) else 0.0) or 0.0)
+    sinv_v = float(plan.get("struct_inv") or (frozen_fb.get("struct_inv") if isinstance(frozen_fb, dict) else 0.0) or 0.0)
+    tp1_v = float(plan.get("tp1") or (frozen_fb.get("tp1") if isinstance(frozen_fb, dict) else 0.0) or 0.0)
+    tp2_v = float(plan.get("tp2") or (frozen_fb.get("tp2") if isinstance(frozen_fb, dict) else 0.0) or 0.0)
+    rr1_v = float(plan.get("planned_rr1") or plan.get("rr1") or (frozen_fb.get("rr1") if isinstance(frozen_fb, dict) else 0.0) or 0.0)
     archived = {
         "source": p_src,
+        "timeframe": p_tf,
         "zone_id": p_zid,
         "setup_version": p_ver,
         "direction": str(plan.get("direction") or "N/A").strip().upper(),
-        "planned_entry": float(plan.get("planned_entry") or plan.get("entry") or 0.0),
-        "setup_sl": float(plan.get("setup_sl") or plan.get("sl") or 0.0),
-        "struct_inv": float(plan.get("struct_inv") or 0.0),
-        "tp1": float(plan.get("tp1") or 0.0),
-        "tp2": float(plan.get("tp2") or 0.0),
-        "rr1": float(plan.get("planned_rr1") or plan.get("rr1") or 0.0),
+        "planned_entry": pe_v,
+        "setup_sl": sl_v,
+        "struct_inv": sinv_v,
+        "tp1": tp1_v,
+        "tp2": tp2_v,
+        "rr1": rr1_v,
         "status": p_st,
-        "reason": str(plan.get("reason") or "").strip(),
-        "archive_reason": str(archive_reason or p_st).strip(),
+        "reason": p_rsn,
+        "archive_reason": eff_arch_rsn,
         "archived_at": format_wib_timestamp(default_now=True),
     }
     _PREVIOUS_TRADE_PLANS[scope_key] = archived
@@ -2430,6 +2765,10 @@ def resolve_trade_plan_focus(
     ask: Optional[float] = None,
     is_closed: bool = False,
     mt5_orders_snapshot: Optional[Dict[str, Any]] = None,
+    htf_conflict: bool = False,
+    m5_eval_status: Optional[str] = None,
+    revalidation_ctx: Optional[Dict[str, Any]] = None,
+    h4_bias: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Selector fokus Trade Plan bersama untuk SMC, SNR, dan UNIFIED (`scan`, `scan snr`, `pantau`).
@@ -2440,6 +2779,23 @@ def resolve_trade_plan_focus(
     """
     scope_k = str(scope or "UNIFIED").strip().upper()
     _load_trade_plan_state_once()
+    if isinstance(_PREVIOUS_TRADE_PLANS.get(scope_k), dict):
+        rec_prev, rec_chg = _reconcile_archived_far_zone_plan(
+            _PREVIOUS_TRADE_PLANS.get(scope_k), live_price=live_price, bid=bid, ask=ask,
+        )
+        if rec_chg and isinstance(rec_prev, dict):
+            _PREVIOUS_TRADE_PLANS[scope_k] = rec_prev
+            if isinstance(_ACTIVE_TRADE_PLAN_FOCUS.get(scope_k), dict):
+                _ACTIVE_TRADE_PLAN_FOCUS[scope_k]["previous_plan"] = rec_prev
+            _save_trade_plan_state()
+    elif isinstance((_ACTIVE_TRADE_PLAN_FOCUS.get(scope_k) or {}).get("previous_plan"), dict):
+        rec_prev, rec_chg = _reconcile_archived_far_zone_plan(
+            _ACTIVE_TRADE_PLAN_FOCUS[scope_k]["previous_plan"], live_price=live_price, bid=bid, ask=ask,
+        )
+        if rec_chg and isinstance(rec_prev, dict):
+            _PREVIOUS_TRADE_PLANS[scope_k] = rec_prev
+            _ACTIVE_TRADE_PLAN_FOCUS[scope_k]["previous_plan"] = rec_prev
+            _save_trade_plan_state()
     norm_dir = _norm_direction_for_invalid(direction)
     valid_plans = [p for p in (plans or []) if isinstance(p, dict) and str(p.get("status") or "").strip().upper() != "NO_ACTIVE_PLAN"]
 
@@ -2490,26 +2846,32 @@ def resolve_trade_plan_focus(
         ch_src = str(chosen_plan.get("source") or "").strip().upper()
         if ch_src not in ("SMC", "SNR"):
             return
+        ch_dir = str(chosen_plan.get("direction") or norm_dir or "").strip().upper()
+        mode_sfx = " (LOCKED)" if held_focus else ""
         other_src = "SNR" if ch_src == "SMC" else "SMC"
         other_plans = [p for p in valid_plans if str(p.get("source") or "").strip().upper() == other_src]
         if not other_plans:
-            chosen_plan["plan_selection_summary"] = f"{ch_src} | {other_src}: NONE"
+            chosen_plan["plan_selection_summary"] = f"{ch_src}{mode_sfx} | {other_src}: NONE"
             return
         other_best = select_best_trade_plan(other_plans, direction=norm_dir, allow_rejected=True)
         if not isinstance(other_best, dict):
-            chosen_plan["plan_selection_summary"] = f"{ch_src} | {other_src}: NONE"
+            chosen_plan["plan_selection_summary"] = f"{ch_src}{mode_sfx} | {other_src}: NONE"
             return
         o_st = str(other_best.get("status") or "REJECTED").strip().upper()
         o_rsn = str(other_best.get("reason") or "").strip()
+        o_dir = str(other_best.get("direction") or "").strip().upper()
         if o_st == "REJECTED":
             blk = o_rsn if (o_rsn and o_rsn.upper() not in ("UNQUALIFIED", "PLAN_INVALID")) else "FILTER_REJECTED"
-            chosen_plan["plan_selection_summary"] = f"{ch_src} | {other_src} BLOCKED: {blk}"
+            chosen_plan["plan_selection_summary"] = f"{ch_src}{mode_sfx} | {other_src} BLOCKED: {blk}"
         elif o_st in _TERMINAL_PLAN_STATUSES or o_st in _SUSPENDED_FOCUS_STATUSES:
             blk = "SUSPENDED" if o_st in _SUSPENDED_FOCUS_STATUSES else o_st
-            chosen_plan["plan_selection_summary"] = f"{ch_src} | {other_src} BLOCKED: {blk}"
+            chosen_plan["plan_selection_summary"] = f"{ch_src}{mode_sfx} | {other_src} BLOCKED: {blk}"
+        elif o_rsn.upper() == "COUNTER_HTF" or (ch_dir in ("BUY", "SELL") and o_dir in ("BUY", "SELL") and o_dir != ch_dir):
+            chosen_plan["plan_selection_summary"] = f"{ch_src}{mode_sfx} | {other_src} BLOCKED: COUNTER_HTF"
         else:
             mode_tag = "LOCKED" if held_focus else "PRIORITY"
-            chosen_plan["plan_selection_summary"] = f"{ch_src} ({mode_tag}) | {other_src}: {o_st}"
+            o_sfx = f" ({o_rsn})" if (o_st == "CONDITIONAL" and o_rsn and o_rsn.upper() != o_st) else ""
+            chosen_plan["plan_selection_summary"] = f"{ch_src} ({mode_tag}) | {other_src}: {o_st}{o_sfx}"
 
     prev_focus = _ACTIVE_TRADE_PLAN_FOCUS.get(scope_k)
     if isinstance(prev_focus, dict):
@@ -2525,8 +2887,37 @@ def resolve_trade_plan_focus(
                 bid=bid,
                 ask=ask,
                 is_closed=is_closed,
+                m5_eval_status=m5_eval_status,
                 mt5_orders_snapshot=mt5_orders_snapshot,
+                htf_conflict=htf_conflict,
+                revalidation_ctx=revalidation_ctx,
+                h4_bias=h4_bias,
             )
+        elif isinstance(updated_focus, dict):
+            if (
+                htf_conflict
+                or m5_eval_status
+                or revalidation_ctx is not None
+                or h4_bias
+                or (isinstance(mt5_orders_snapshot, dict) and not updated_focus.get("existing_position_info") and not updated_focus.get("mt5_fill_ticket"))
+            ):
+                updated_focus = refresh_trade_plan_live_state(
+                    updated_focus,
+                    live_price=live_price,
+                    bid=bid,
+                    ask=ask,
+                    is_closed=is_closed,
+                    m5_eval_status=m5_eval_status,
+                    mt5_orders_snapshot=mt5_orders_snapshot,
+                    htf_conflict=htf_conflict,
+                    revalidation_ctx=revalidation_ctx,
+                    h4_bias=h4_bias,
+                )
+            elif mt5_orders_snapshot is None and isinstance(prev_focus.get("existing_position_info"), dict) and not updated_focus.get("existing_position_info"):
+                updated_focus = dict(updated_focus)
+                updated_focus["existing_position_info"] = dict(prev_focus["existing_position_info"])
+                updated_focus["mt5_status"] = prev_focus.get("mt5_status") or "OPEN"
+                updated_focus["setup_match"] = prev_focus.get("setup_match") or "UNRELATED"
         cur_st = str((updated_focus or {}).get("status") or "").strip().upper()
         cur_rsn = str((updated_focus or {}).get("reason") or "").strip()
 
@@ -2571,7 +2962,7 @@ def resolve_trade_plan_focus(
             # Pertahankan fokus lama (JANGAN pernah ganti karena tick/skor selama masih layak)
             held = dict(updated_focus)
             if isinstance(_PREVIOUS_TRADE_PLANS.get(scope_k), dict):
-                held.setdefault("previous_plan", _PREVIOUS_TRADE_PLANS[scope_k])
+                held["previous_plan"] = _PREVIOUS_TRADE_PLANS[scope_k]
             # Pertahankan notice switch hanya bila belum pernah ditampilkan (one-shot across same-cycle calls)
             prev_sw_id = str(prev_focus.get("plan_switch_id") or "").strip()
             if prev_sw_id and prev_sw_id not in _EMITTED_PLAN_SWITCHES and prev_focus.get("plan_switch_notice"):
@@ -2623,7 +3014,18 @@ def resolve_trade_plan_focus(
     # Belum ada fokus aktif sebelumnya: pilih kandidat aktif terbaik (bukan REJECTED)
     initial_best = select_best_trade_plan(active_pool, direction=norm_dir, allow_rejected=False) if active_pool else None
     if isinstance(initial_best, dict):
-        chosen = dict(initial_best)
+        chosen = refresh_trade_plan_live_state(
+            dict(initial_best),
+            live_price=live_price,
+            bid=bid,
+            ask=ask,
+            is_closed=is_closed,
+            m5_eval_status=m5_eval_status,
+            mt5_orders_snapshot=mt5_orders_snapshot,
+            htf_conflict=htf_conflict,
+            revalidation_ctx=revalidation_ctx,
+            h4_bias=h4_bias,
+        ) or dict(initial_best)
         if isinstance(_PREVIOUS_TRADE_PLANS.get(scope_k), dict):
             chosen.setdefault("previous_plan", _PREVIOUS_TRADE_PLANS[scope_k])
         _attach_selection_summary(chosen, held_focus=False)
@@ -2681,6 +3083,9 @@ def _format_previous_plan_compact(prev: Optional[Dict[str, Any]], include_source
     if not isinstance(prev, dict) or not prev:
         return ""
     p_dir = str(prev.get("direction") or "N/A").strip().upper()
+    h4_prev = str(prev.get("h4_bias") or "").strip().upper()
+    is_ct_prev = bool(prev.get("is_counter_trend") or (p_dir == "BUY" and h4_prev == "BEARISH") or (p_dir == "SELL" and h4_prev == "BULLISH"))
+    p_dir_disp = f"{p_dir} (COUNTER-TREND)" if (is_ct_prev and p_dir in ("BUY", "SELL")) else p_dir
     pe = float(prev.get("planned_entry") or 0.0)
     sl = float(prev.get("setup_sl") or 0.0)
     tp1 = float(prev.get("tp1") or 0.0)
@@ -2694,7 +3099,7 @@ def _format_previous_plan_compact(prev: Optional[Dict[str, Any]], include_source
     id_part = f" [ID:{zid}]" if zid else ""
     lvl_part = f"PLAN ENTRY {pe:.2f} | SetupSL {sl:.2f} | TP1 {tp1:.2f} | " if (pe > 0 and sl > 0 and tp1 > 0) else ""
     ts_part = f" @ {ts_short}" if ts_short else ""
-    return f"{p_dir} | {lvl_part}{arch_rsn}{ts_part}{src_part} [v{ver}]{id_part}".strip()
+    return f"{p_dir_disp} | {lvl_part}{arch_rsn}{ts_part}{src_part} [v{ver}]{id_part}".strip()
 
 
 def format_trade_plan_compact(plan, include_source=False, broker_tag=None) -> str:
@@ -2721,6 +3126,9 @@ def format_trade_plan_compact(plan, include_source=False, broker_tag=None) -> st
         return f"REJECTED (DIAG) | {rsn_txt} | {lp_str}{src_part}{ver_part}{id_part}".strip()
 
     p_dir = str(plan.get("direction") or "N/A").strip().upper()
+    h4_b = str(plan.get("h4_bias") or "").strip().upper()
+    is_ct = bool(plan.get("is_counter_trend") or (p_dir == "BUY" and h4_b == "BEARISH") or (p_dir == "SELL" and h4_b == "BULLISH"))
+    p_dir_disp = f"{p_dir} (COUNTER-TREND)" if (is_ct and p_dir in ("BUY", "SELL")) else p_dir
     planned_entry = float(plan.get("planned_entry") or plan.get("entry") or 0.0)
     live_entry = float(plan.get("live_entry") or 0.0)
     setup_sl = float(plan.get("setup_sl") or plan.get("sl") or 0.0)
@@ -2789,7 +3197,7 @@ def format_trade_plan_compact(plan, include_source=False, broker_tag=None) -> st
         ex_t_sfx = f" {ex_t}" if ex_t else ""
         ex_part = f" | EXISTING POSITION #{ex_tkt}{ex_t_sfx} | SETUP MATCH: {ex_m}" if ex_tkt else f" | EXISTING POSITION | SETUP MATCH: {ex_m}"
     return (
-        f"{p_dir} | PLAN ENTRY {planned_entry:.2f} | {live_part} | {sl_part} | "
+        f"{p_dir_disp} | PLAN ENTRY {planned_entry:.2f} | {live_part} | {sl_part} | "
         f"TP1 {tp1:.2f} | {tp2_part} | {rr_part}{qual_part} | {st_part}{brk_part}{ex_part}{src_part}{ver_part}{id_part}"
     ).strip()
 

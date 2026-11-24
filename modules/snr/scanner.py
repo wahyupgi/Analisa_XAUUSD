@@ -283,7 +283,7 @@ def generate_snr_trade_plan(
     price = safe_float(current_price, 0.0)
     mb = market_bias if isinstance(market_bias, dict) else {}
     h4 = str(mb.get("h4") or "").upper()
-    why_txt = build_snr_zone_reason(z, h4_bias=h4)
+    why_txt = build_snr_zone_reason(z, h4_bias=h4, h1_bias=mb.get("h1"))
 
     spec = symbol_spec if isinstance(symbol_spec, dict) else {}
     digits = int(spec.get("digits", 2))
@@ -318,9 +318,11 @@ def generate_snr_trade_plan(
         )
     )
     is_far_z = bool(
-        str(z.get("zone_relevance") or "").upper() in ("FAR_REFERENCE", "INVALID")
-        or z.get("is_far_reference")
-        or z.get("is_distant_historical")
+        (not is_invalid_z) and (
+            str(z.get("zone_relevance") or "").upper() == "FAR_REFERENCE"
+            or z.get("is_far_reference")
+            or z.get("is_distant_historical")
+        )
     )
 
     risk_cfg = (cfg or {}).get("risk", {}) if isinstance(cfg, dict) else {}
@@ -406,6 +408,7 @@ def generate_snr_trade_plan(
     was_touched_snr = False
     touch_time_snr = None
     bars_since_touch_snr = None
+    sl_breached_hist_snr = False
     if clean_m5_tp is not None and not clean_m5_tp.empty and lo > 0 and hi >= lo:
         try:
             start_i = max(0, int(zone_confirmation_start(z, clean_m5_tp)))
@@ -420,6 +423,28 @@ def generate_snr_trade_plan(
                     bars_since_touch_snr = max(0, (len(clean_m5_tp) - 1) - last_hit_abs)
                     raw_ts = post_m5["Time"].iloc[last_hit_rel] if "Time" in post_m5.columns else post_m5.index[last_hit_rel]
                     touch_time_snr = format_wib_timestamp(raw_ts, source_tz="MT5")
+                from modules.utils import get_frozen_trade_plan, resolve_stored_setup_sl
+                stored_sl_snr = resolve_stored_setup_sl("SNR", zid, timeframe=tf)
+                if stored_sl_snr > 0.0:
+                    post_sl_snr = post_m5
+                    frz_snr = get_frozen_trade_plan("SNR", zid, timeframe=tf)
+                    cr_ts_s = float((frz_snr or {}).get("created_at_ts") or 0.0)
+                    if cr_ts_s > 0.0 and "Time" in post_m5.columns:
+                        try:
+                            t_ser_s = pd.to_datetime(post_m5["Time"], errors="coerce")
+                            cr_dt_s = pd.Timestamp(cr_ts_s, unit="s")
+                            if getattr(t_ser_s.dt, "tz", None) is not None:
+                                cr_dt_s = cr_dt_s.tz_localize("UTC").tz_convert(t_ser_s.dt.tz)
+                            m_after = t_ser_s >= cr_dt_s
+                            if m_after.any():
+                                post_sl_snr = post_m5.loc[m_after]
+                        except Exception:
+                            pass
+                    if not post_sl_snr.empty:
+                        if direction == "BUY" and bool((post_sl_snr["Low"] <= stored_sl_snr).any()):
+                            sl_breached_hist_snr = True
+                        elif direction == "SELL" and bool((post_sl_snr["High"] >= stored_sl_snr).any()):
+                            sl_breached_hist_snr = True
         except Exception:
             pass
     if not was_touched_snr:
@@ -479,6 +504,7 @@ def generate_snr_trade_plan(
         bars_since_touch=bars_since_touch_snr,
         max_bars_after_touch=4,
         mt5_orders_snapshot=mt5_orders_snapshot,
+        sl_breached_hist=sl_breached_hist_snr,
     )
 
 
@@ -509,7 +535,7 @@ def generate_snr_trade_plans(
     for z_c in (list(rk.get("active_supports") or []) + list(rk.get("active_resistances") or [])):
         if isinstance(z_c, dict):
             raw_cands.append(z_c)
-    for z_c in (list(rk.get("all_zones") or []) + list(rk.get("invalidated_zones") or [])):
+    for z_c in (list(rk.get("all_zones") or []) + list(rk.get("invalidated_zones") or []) + list(rk.get("broken_zones") or [])):
         if not isinstance(z_c, dict):
             continue
         z_lc = str(z_c.get("lifecycle_status") or z_c.get("status") or "").upper()

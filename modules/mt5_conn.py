@@ -1020,7 +1020,7 @@ def format_tracked_position_compact(pos_info, digits=2):
         raw_match = "UNKNOWN"
 
     parts = [f"#{tkt} {arah} {px_part}".strip(), st_time_part]
-    if pos_info.get("is_existing_position") or raw_match in ("UNRELATED", "UNKNOWN"):
+    if pos_info.get("is_existing_position") or raw_match in ("INFERRED", "UNRELATED", "UNKNOWN"):
         parts.append("EXISTING")
     parts.append(f"MATCH:{raw_match}")
     return " | ".join(parts)

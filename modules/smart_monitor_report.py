@@ -3007,6 +3007,7 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         include_source=True,
         broker_tag=(str(_ps.get("status") or "") if _pend_same_dash else None),
         skip_why_for_zone_id=(shown_active_z_dash.get("zone_id") if isinstance(shown_active_z_dash, dict) else None),
+        h4_bias=h4,
     ) if best_tp_dash else []
     body_lines = [
         dash_div,
@@ -3279,6 +3280,7 @@ def format_smart_monitor_report(cycle_result):
         include_source=True,
         broker_tag=(str(pending_s.get("status") or "") if _pend_same_rep else None),
         skip_why_for_zone_id=(shown_active_z_rep.get("zone_id") if isinstance(shown_active_z_rep, dict) else None),
+        h4_bias=h4,
     ) if best_tp_rep else []
     lines = [
         div_rep,

@@ -3078,12 +3078,12 @@ def resolve_trade_plan_focus(
     }
 
 
-def _format_previous_plan_compact(prev: Optional[Dict[str, Any]], include_source: bool = False) -> str:
+def _format_previous_plan_compact(prev: Optional[Dict[str, Any]], include_source: bool = False, h4_bias: Optional[str] = None) -> str:
     """Format 1 baris ringkas untuk PREVIOUS PLAN yang diarsipkan beserta alasan & timestamp."""
     if not isinstance(prev, dict) or not prev:
         return ""
     p_dir = str(prev.get("direction") or "N/A").strip().upper()
-    h4_prev = str(prev.get("h4_bias") or "").strip().upper()
+    h4_prev = str(h4_bias or prev.get("h4_bias") or "").strip().upper()
     is_ct_prev = bool(prev.get("is_counter_trend") or (p_dir == "BUY" and h4_prev == "BEARISH") or (p_dir == "SELL" and h4_prev == "BULLISH"))
     p_dir_disp = f"{p_dir} (COUNTER-TREND)" if (is_ct_prev and p_dir in ("BUY", "SELL")) else p_dir
     pe = float(prev.get("planned_entry") or 0.0)
@@ -3191,11 +3191,12 @@ def format_trade_plan_compact(plan, include_source=False, broker_tag=None) -> st
     ex_pos = plan.get("existing_position_info") if isinstance(plan.get("existing_position_info"), dict) else None
     ex_part = ""
     if ex_pos and st != "FILLED":
-        ex_tkt = ex_pos.get("ticket")
         ex_m = str(ex_pos.get("setup_match") or "UNKNOWN").upper()
-        ex_t = str(ex_pos.get("position_opened_wib_short") or "").strip()
-        ex_t_sfx = f" {ex_t}" if ex_t else ""
-        ex_part = f" | EXISTING POSITION #{ex_tkt}{ex_t_sfx} | SETUP MATCH: {ex_m}" if ex_tkt else f" | EXISTING POSITION | SETUP MATCH: {ex_m}"
+        if ex_m in ("CONFIRMED", "INFERRED"):
+            ex_tkt = ex_pos.get("ticket")
+            ex_t = str(ex_pos.get("position_opened_wib_short") or "").strip()
+            ex_t_sfx = f" {ex_t}" if ex_t else ""
+            ex_part = f" | EXISTING POSITION #{ex_tkt}{ex_t_sfx} | MATCH:{ex_m}" if ex_tkt else f" | EXISTING POSITION | MATCH:{ex_m}"
     return (
         f"{p_dir_disp} | PLAN ENTRY {planned_entry:.2f} | {live_part} | {sl_part} | "
         f"TP1 {tp1:.2f} | {tp2_part} | {rr_part}{qual_part} | {st_part}{brk_part}{ex_part}{src_part}{ver_part}{id_part}"
@@ -3210,6 +3211,7 @@ def format_trade_plan_lines(
     include_source=False,
     broker_tag=None,
     skip_why_for_zone_id=None,
+    h4_bias=None,
 ):
     """Susun baris PLAN SWITCH (one-shot) + TRADE PLAN + WHY PLAN + PREV PLAN / DIAG PLAN ter-wrap rapi tanpa truncation `...`."""
     if not isinstance(plan, dict) or not plan:
@@ -3245,7 +3247,7 @@ def format_trade_plan_lines(
             lines.extend(wrap_dashboard_field(why_prefix, why_txt, width, max_lines=None))
     prev_plan = plan.get("previous_plan") if isinstance(plan.get("previous_plan"), dict) else None
     if prev_plan:
-        prev_txt = _format_previous_plan_compact(prev_plan, include_source=include_source)
+        prev_txt = _format_previous_plan_compact(prev_plan, include_source=include_source, h4_bias=h4_bias or plan.get("h4_bias"))
         if prev_txt:
             prev_prefix = "   PREV PLAN : " if prefix.startswith(" ") else "PREV PLAN    : "
             lines.extend(wrap_dashboard_field(prev_prefix, prev_txt, width, max_lines=None))

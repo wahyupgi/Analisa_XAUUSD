@@ -34,6 +34,7 @@ import modules.state_manager as SM
 import modules.snr as _m_snr
 import modules.unified_monitor as _m_unified
 import modules.us_news_radar as _m_news
+import modules.execution_monitor as _m_auto
 from modules.terminal_ui import print_terminal
 
 # Expose every function, variable, and helper (including _catat_error, _tutup_mt5, etc.)
@@ -66,12 +67,25 @@ def format_command_menu_help():
         "- scan all detail  : Scan Gabungan SMC + SNR Detail (1 Shared Snapshot)",
         "",
         "MONITORING:",
-        "- pantau           : Unified Monitor (SMC + SNR + Account)",
+        "- pantau           : Unified Monitor (SMC + SNR + Account + Auto Exec)",
         "- pantau detail    : Unified Monitor detail",
         "- pantau smc       : Monitor SMC saja",
         "- pantau smc detail: Monitor SMC detail",
         "- pantau snr       : Monitor SNR saja",
         "- pantau snr detail: Monitor SNR detail",
+        "",
+        "AUTO TRADING:",
+        "- auto status      : Status lengkap Adaptive Auto Trading & evaluasi zona",
+        "- auto real        : Otorisasi & aktifkan FULL_AUTO pada akun REAL (konfirmasi eksplisit)",
+        "- auto demo        : Aktifkan FULL_AUTO pada akun DEMO",
+        "- auto dryrun      : Simulasi eksekusi dengan harga live tanpa kirim order MT5",
+        "- auto semi        : Mode SEMI_AUTO (persetujuan 'auto approve' / 'auto reject')",
+        "- auto on / off    : Aktifkan / matikan auto trading & batalkan pending scanner",
+        "- auto positions   : Lihat posisi aktif MT5 (Scanner vs Manual)",
+        "- auto orders      : Lihat pending order MT5 (Scanner vs Manual)",
+        "- auto risk        : Audit eksposur akun, daily loss, & risk budget",
+        "- auto journal     : Statistik & log jurnal eksekusi otomatis",
+        "- auto emergency   : Hentikan eksekusi darurat & batalkan pending scanner",
         "",
         "OTHER:",
         "- zona             : Cek status zona supply & demand SMC aktif",
@@ -125,6 +139,10 @@ def parse_cli_command(cmd_str):
             "method": mon_parsed["mode"].upper(),
             "detailed": bool(mon_parsed["detailed"]),
         }
+
+    if tokens[0] == "auto":
+        sub = tokens[1] if len(tokens) > 1 else "status"
+        return {"action": "AUTO", "method": sub.upper(), "detailed": False}
 
     if raw in ("help", "bantuan", "menu", "?", "panduan"):
         return {"action": "HELP", "method": "NONE", "detailed": False}
@@ -217,6 +235,14 @@ def execute_cli_command(cmd_str, snapshot=None, max_cycles=1, smc_runner=None, s
             "news": cycle_res.get("news"),
             "news_alerts": cycle_res.get("news_alerts") or [],
             "output": output,
+        }
+
+    if act == "AUTO":
+        res_auto = _m_auto.handle_auto_cli_command(cmd_str, input_fn=None)
+        return {
+            "parsed": parsed,
+            "auto_result": res_auto,
+            "output": res_auto.get("output", ""),
         }
 
     if act == "HELP":
@@ -351,6 +377,15 @@ def main():
         except Exception:
             pass
 
+    # Rekonsiliasi startup Auto Execution State & nyalakan background real-time monitor (aman: default SCANNER_ONLY / OFF)
+    try:
+        _auto_mon_main = _m_auto.get_auto_execution_monitor()
+        if mt5_ok:
+            _auto_mon_main.reconcile_now()
+        _auto_mon_main.start_background()
+    except Exception as _e_amon:
+        _catat_error("startup_auto_monitor", _e_amon)
+
     riwayat_chat = []
 
     while True:
@@ -366,6 +401,14 @@ def main():
         if cmd in ("exit", "keluar", "quit", "q"):
             print_terminal("Selesai. Semoga trading Anda lancar!")
             break
+
+        if cmd == "auto" or cmd.startswith("auto "):
+            try:
+                res_auto_cli = _m_auto.handle_auto_cli_command(tanya, input_fn=input)
+                print_terminal("\n" + str(res_auto_cli.get("output") or ""))
+            except Exception as e_auto_cli:
+                print_terminal(f"\n[ERROR AUTO COMMAND]: {e_auto_cli}")
+            continue
 
         if cmd in ("sinyal", "status", "status sinyal", "signal", "setup"):
             state_aktif = muat_state_sinyal()
@@ -834,4 +877,8 @@ if __name__ == "__main__":
     try:
         main()
     finally:
+        try:
+            _m_auto.get_auto_execution_monitor().stop_background(timeout=2.0)
+        except Exception:
+            pass
         _tutup_mt5()

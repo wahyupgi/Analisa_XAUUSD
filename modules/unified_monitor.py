@@ -4003,6 +4003,29 @@ class UnifiedMonitor:
             shared_snap,
             is_live_poll=(not self._async_ticker_active and (snapshot is None or tick_only)),
         )
+        # Integrasi Adaptive Auto Execution Engine (terisolasi; tidak pernah mengirim order bila AUTO_TRADING=False)
+        try:
+            from modules.execution_monitor import format_adaptive_execution_panel, get_auto_execution_monitor
+            _auto_mon = get_auto_execution_monitor()
+            _smc_blk = cycle_result.get("smc") or {}
+            _snr_blk = cycle_result.get("snr") or {}
+            _smc_sc = _smc_blk.get("scan_result") if isinstance(_smc_blk, dict) else None
+            _smc_dc = _smc_blk.get("decision") if isinstance(_smc_blk, dict) else None
+            if isinstance(_smc_sc, dict):
+                _auto_cyc = _auto_mon.run_once(
+                    snapshot=shared_snap,
+                    scan_result=_smc_sc,
+                    decision=_smc_dc,
+                    snr_result=_snr_blk if isinstance(_snr_blk, dict) else None,
+                )
+                cycle_result["auto_execution"] = _auto_cyc
+                cycle_result["auto_execution_panel"] = format_adaptive_execution_panel(_auto_cyc, state_mgr=_auto_mon.state_mgr)
+        except Exception as _auto_exc:
+            from modules.utils import _catat_error
+            _catat_error("unified_monitor_auto_exec", _auto_exc)
+            cycle_result["auto_execution"] = None
+            cycle_result["auto_execution_panel"] = ""
+
         cycle_result["state_changed"] = state_changed
         cycle_result["material_alerts"] = material_alerts
         cycle_result["inline_alerts"] = inline_alerts

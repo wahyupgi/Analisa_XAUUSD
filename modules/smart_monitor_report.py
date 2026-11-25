@@ -3030,6 +3030,22 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         compact_news = news_sum.replace("NEWS RISK : ", "").replace(" | NEXT EVENT : ", " | ")
         body_lines.extend(wrap_dashboard_field(" US NEWS     : ", compact_news, term_w, max_lines=None))
 
+    auto_exec_d = (cycle_result or {}).get("auto_execution") if isinstance(cycle_result, dict) else None
+    if isinstance(auto_exec_d, dict):
+        ae_mode = f"{'ON' if auto_exec_d.get('auto_trading') else 'OFF'} ({auto_exec_d.get('trading_mode', 'SCANNER_ONLY')})"
+        ae_ev = auto_exec_d.get("best_evaluation") or {}
+        if ae_ev:
+            ae_line = (
+                f"{ae_mode} | Mode={str(ae_ev.get('entry_mode', 'ADAPTIVE')).replace('_ENTRY', '')} | "
+                f"Qual={ae_ev.get('zone_quality', '-')} | Lot={float(ae_ev.get('final_lot') or 0.0):.2f}/{float(ae_ev.get('target_lot') or 0.0):.2f} | "
+                f"Decision={ae_ev.get('decision', '-')} | Exec={ae_ev.get('execution_status', '-')}"
+            )
+            if ae_ev.get("decision") != "ENTRY_READY" and ae_ev.get("reason_code") and ae_ev.get("reason_code") != "OK":
+                ae_line += f" [{ae_ev.get('reason_code')}]"
+        else:
+            ae_line = f"{ae_mode} | Decision={auto_exec_d.get('decision', 'WAIT')} [{auto_exec_d.get('reason_code', 'NO_SETUP')}]"
+        body_lines.extend(wrap_dashboard_field(" AUTO EXEC   : ", ae_line, term_w, max_lines=None))
+
     ev_list = []
     _seen_ev_norm = set()
     for e_raw in (recent_events or []):
@@ -3308,6 +3324,21 @@ def format_smart_monitor_report(cycle_result):
     news_summary = str((cycle_result or {}).get("news_summary") or "").strip() if isinstance(cycle_result, dict) else ""
     if news_summary:
         lines.extend(wrap_dashboard_field("US NEWS      : ", news_summary.replace('NEWS RISK : ', '').replace(' | NEXT EVENT : ', ' | '), term_w_rep, max_lines=None))
+    auto_exec_r = (cycle_result or {}).get("auto_execution") if isinstance(cycle_result, dict) else None
+    if isinstance(auto_exec_r, dict):
+        ae_m_r = f"{'ON' if auto_exec_r.get('auto_trading') else 'OFF'} ({auto_exec_r.get('trading_mode', 'SCANNER_ONLY')})"
+        ae_ev_r = auto_exec_r.get("best_evaluation") or {}
+        if ae_ev_r:
+            ae_ln_r = (
+                f"{ae_m_r} | {str(ae_ev_r.get('entry_mode', 'ADAPTIVE')).replace('_ENTRY', '')} | "
+                f"Lot {float(ae_ev_r.get('final_lot') or 0.0):.2f}/{float(ae_ev_r.get('target_lot') or 0.0):.2f} | "
+                f"{ae_ev_r.get('decision', '-')} ({ae_ev_r.get('execution_status', '-')})"
+            )
+            if ae_ev_r.get("decision") != "ENTRY_READY" and ae_ev_r.get("reason_code") and ae_ev_r.get("reason_code") != "OK":
+                ae_ln_r += f" [{ae_ev_r.get('reason_code')}]"
+        else:
+            ae_ln_r = f"{ae_m_r} | {auto_exec_r.get('decision', 'WAIT')} [{auto_exec_r.get('reason_code', 'NO_SETUP')}]"
+        lines.extend(wrap_dashboard_field("AUTO EXEC    : ", ae_ln_r, term_w_rep, max_lines=None))
     lines.append(div_rep)
     return "\n".join(lines)
 
@@ -3479,6 +3510,9 @@ def format_smart_monitor_detail(cycle_result):
                 lines.append(f"  - [{ga.get('topic', 'Gold')} | {g_sent}] {g_hl} ({ga.get('publisher', 'N/A')})")
         for na in news_al_det:
             lines.append(na)
+    auto_panel_det = str((cycle_result or {}).get("auto_execution_panel") or "").strip() if isinstance(cycle_result, dict) else ""
+    if auto_panel_det:
+        lines.extend(["", auto_panel_det])
     smc_detail = (data["smc"].get("formatted_section") or "").strip()
     snr_detail = (data["snr"].get("formatted_section") or "").strip()
     if smc_detail:

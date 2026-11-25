@@ -257,7 +257,7 @@ def calculate_snr_risk_reward(
         chosen_opp = valid_opp if valid_opp else opp_candidates
         first_res_low = chosen_opp[0][0]
         tp1_price = round_to_tick(first_res_low - spread_pts, tick_size, digits)
-        min_tp2_gap = max(1.5, 0.5 * atr_val, 0.3 * risk_pts)
+        min_tp2_gap = max(1.5, 0.5 * ref_atr, 0.3 * risk_pts)
         tp2_price = None
         for opp_cand in chosen_opp[1:]:
             cand_tp2 = round_to_tick(opp_cand[0] - spread_pts, tick_size, digits)
@@ -364,7 +364,7 @@ def calculate_snr_risk_reward(
         chosen_opp = valid_opp if valid_opp else opp_candidates
         first_sup_high = chosen_opp[0][0]
         tp1_price = round_to_tick(first_sup_high + spread_pts, tick_size, digits)
-        min_tp2_gap = max(1.5, 0.5 * atr_val, 0.3 * risk_pts)
+        min_tp2_gap = max(1.5, 0.5 * ref_atr, 0.3 * risk_pts)
         tp2_price = None
         for opp_cand in chosen_opp[1:]:
             cand_tp2 = round_to_tick(opp_cand[0] + spread_pts, tick_size, digits)

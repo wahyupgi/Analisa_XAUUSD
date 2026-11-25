@@ -726,8 +726,14 @@ def validate_trade_candidate(
     if not dir_ok:
         return _build_result(STATE_BLOCKED, dir_code, dir_msg, val_chk="BLOCKED")
 
-    # Evaluasi konflik SMC vs SNR secara struktural (hanya blokir jika barrier opposing SNR memangkas clean RR < MIN_RR)
-    if isinstance(snr_ctx, dict) and planned_entry > 0 and sl_px > 0 and tp1_px > 0:
+    # Evaluasi konflik SMC vs SNR secara struktural (hanya blokir pada mode STRUCTURAL; pada FIXED_RR 1:1 kita mengunci target ketat 1:1)
+    if (
+        isinstance(snr_ctx, dict)
+        and planned_entry > 0
+        and sl_px > 0
+        and tp1_px > 0
+        and not (str(conf.get("TP1_MODE", "FIXED_RR")).upper() in ("FIXED_RR", "FIXED", "1:1") and bool(conf.get("FORCE_FIXED_TP1", True)))
+    ):
         barrier = evaluate_snr_opposing_barrier(
             direction, planned_entry, sl_px, tp1=tp1_px, current_price=live_price, snr_context=snr_ctx
         )

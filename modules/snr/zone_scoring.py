@@ -342,6 +342,21 @@ def score_zone(
 
     grade = assign_snr_grade(total_score, config=cfg)
 
+    # -------------------------------------------------------------------------
+    # KUNCI SKOR ZONA (Score Lock):
+    # Jika zona aktif sudah memiliki initial_score (mis. Grade B >= 70 saat di radar)
+    # dan zona belum BROKEN / INVALIDATED, kunci skor dasarnya agar tidak terdegradasi
+    # semata-mata karena fluktuasi momentum / noise candle live saat harga mendekat.
+    # -------------------------------------------------------------------------
+    prev_locked_score = safe_float(zone.get("initial_score") or zone.get("locked_score") or zone.get("score"), 0.0)
+    if prev_locked_score >= 70.0 and touch_status not in ("BROKEN", "INVALIDATED") and zone.get("lifecycle_status") not in ("BROKEN", "INVALIDATED"):
+        if total_score < prev_locked_score:
+            total_score = prev_locked_score
+            grade = assign_snr_grade(total_score, config=cfg)
+    elif prev_locked_score <= 0.0 and total_score >= 70.0:
+        zone["initial_score"] = total_score
+
+
     breakdown = {
         "swing_structural_strength": {
             "score": comp_swing,

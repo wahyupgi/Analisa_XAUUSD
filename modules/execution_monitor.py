@@ -68,7 +68,8 @@ class AutoExecutionMonitor:
             self.mt5 = _mt5_mod
         else:
             self.mt5 = mt5_api
-        self.cfg = cfg or get_auto_trading_config()
+        self._custom_cfg_provided: bool = cfg is not None
+        self.cfg = dict(cfg) if cfg is not None else get_auto_trading_config()
         self.symbol = str(symbol or self.cfg.get("SYMBOL") or SYMBOL)
         self.state_mgr = state_mgr or get_execution_state_manager()
         self.journal = journal or get_execution_journal()
@@ -222,6 +223,8 @@ class AutoExecutionMonitor:
         5. Jika ENTRY_READY & auto_trading aktif -> eksekusi sesuai mode trading!
         """
         with self._cycle_lock:
+            if not getattr(self, "_custom_cfg_provided", False):
+                self.cfg.update(get_auto_trading_config())
             mode_info = self.state_mgr.get_mode_info()
             trading_mode = str(mode_info.get("trading_mode") or "SCANNER_ONLY").upper()
             auto_enabled = bool(mode_info.get("auto_trading", False))
@@ -431,6 +434,7 @@ class AutoExecutionMonitor:
                     )
 
                 # Catat missed entry ke jurnal bila harga meninggalkan zona
+                log_blocked_pref = bool(self.cfg.get("JOURNAL_LOG_BLOCKED_EVENTS", False))
                 if best_eval.get("reason_code") == REASON_PRICE_LEFT_ENTRY_RANGE:
                     self.journal.record_execution_event(
                         event_type="MISSED_ENTRY",
@@ -438,7 +442,7 @@ class AutoExecutionMonitor:
                         trading_mode=trading_mode,
                         decision_reason=REASON_PRICE_LEFT_ENTRY_RANGE,
                     )
-                elif best_eval.get("state") == STATE_BLOCKED and best_eval.get("reason_code") not in (REASON_MARKET_CLOSED, "DUPLICATE_SETUP"):
+                elif log_blocked_pref and best_eval.get("state") == STATE_BLOCKED and best_eval.get("reason_code") not in (REASON_MARKET_CLOSED, "DUPLICATE_SETUP"):
                     self.journal.record_execution_event(
                         event_type="BLOCKED",
                         validation_result=best_eval,
@@ -664,6 +668,8 @@ def handle_auto_cli_command(
     - auto emergency (serta auto emergency close)
     """
     mon = monitor or get_auto_execution_monitor()
+    if not getattr(mon, "_custom_cfg_provided", False):
+        mon.cfg.update(get_auto_trading_config())
     sm = mon.state_mgr
     conf = mon.cfg
     tokens = str(raw_cmd or "").strip().split()

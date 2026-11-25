@@ -1635,6 +1635,10 @@ def run_snr_scan(
         mom_tf = momentum_by_tf.get(tf)
         for z in validated_zones_by_tf.get(tf, []):
             c_info = zone_conf_map.get(z.get("zone_id"))
+            lifecycle_k = _snr_lifecycle_key(z)
+            saved_life = lifecycle_state.get(lifecycle_k) or {}
+            if "initial_score" in saved_life and "initial_score" not in z:
+                z["initial_score"] = saved_life["initial_score"]
             sz = score_zone(
                 z,
                 confluence_info=c_info,
@@ -1644,6 +1648,9 @@ def run_snr_scan(
                 momentum_info=mom_tf,
                 config=cfg,
             )
+            # Simpan locked initial_score ke state lifecycle jika zona berkualitas >= 70
+            if float(sz.get("score") or 0.0) >= 70.0 and lifecycle_k in lifecycle_state:
+                lifecycle_state[lifecycle_k]["initial_score"] = float(sz["score"])
             tf_scored.append(sz)
             if tf in SNR_STRUCTURAL_TIMEFRAMES:
                 structural_scored_zones.append(sz)

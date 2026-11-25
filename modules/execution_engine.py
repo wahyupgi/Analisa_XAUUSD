@@ -505,6 +505,17 @@ class MT5ExecutionEngine:
 
         sl_px = normalize_price_to_tick(float(plan.get("sl") or 0.0), sym_info, symbol=symbol)
         tp_px = normalize_price_to_tick(float(plan.get("tp") or plan.get("tp1") or 0.0), sym_info, symbol=symbol)
+        if (
+            str(conf.get("TP1_MODE", "FIXED_RR")).upper() in ("FIXED_RR", "FIXED", "1:1")
+            and bool(conf.get("FORCE_FIXED_TP1", True))
+            and sl_px > 0.0
+            and exec_price > 0.0
+        ):
+            live_risk_dist = abs(exec_price - sl_px)
+            if live_risk_dist > 0.0:
+                target_rr_exec = float(conf.get("TP1_RR", 1.0))
+                raw_tp_1to1 = (exec_price + (target_rr_exec * live_risk_dist)) if direction == "BUY" else (exec_price - (target_rr_exec * live_risk_dist))
+                tp_px = normalize_price_to_tick(raw_tp_1to1, sym_info, symbol=symbol)
         inval_px = float(plan.get("invalidation_price") or zone_dict.get("invalidation_price") or 0.0)
 
         # Revalidasi status zona & structural invalidation tepat sebelum order_send (Section 6)
@@ -741,6 +752,20 @@ class MT5ExecutionEngine:
                         if (direction == "BUY" and exec_price > z_hi_r + max_ch_r) or (direction == "SELL" and exec_price < z_lo_r - max_ch_r):
                             break
                     request["price"] = float(exec_price)
+                    if (
+                        str(conf.get("TP1_MODE", "FIXED_RR")).upper() in ("FIXED_RR", "FIXED", "1:1")
+                        and bool(conf.get("FORCE_FIXED_TP1", True))
+                        and sl_px > 0.0
+                    ):
+                        r_dist = abs(exec_price - sl_px)
+                        if r_dist > 0.0:
+                            t_rr_r = float(conf.get("TP1_RR", 1.0))
+                            tp_px = normalize_price_to_tick(
+                                (exec_price + t_rr_r * r_dist) if direction == "BUY" else (exec_price - t_rr_r * r_dist),
+                                sym_info,
+                                symbol=symbol,
+                            )
+                            request["tp"] = float(tp_px)
 
             send_res = None
             send_exc = None

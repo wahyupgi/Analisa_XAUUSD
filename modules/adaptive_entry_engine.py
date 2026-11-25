@@ -604,21 +604,27 @@ def compute_setup_sl_tp_levels(
     risk_dist = abs(entry_price - sl) if sl > 0 else 3.0
     tp1_mode = str(conf.get("TP1_MODE", "FIXED_RR")).upper()
     target_tp1_rr = float(conf.get("TP1_RR", 1.0))
+    force_fixed = bool(conf.get("FORCE_FIXED_TP1", True))
     tp1 = 0.0
     tp2 = 0.0
 
-    # Jika ada existing plan dengan TP1 eksplisit (misalnya dari decision_engine atau test case),
-    # hormati plan tersebut jika mode bukan paksa override, atau jika existing_plan berasal dari pengujian.
-    if isinstance(existing_plan, dict) and (float(existing_plan.get("tp1") or existing_plan.get("tp") or 0.0) > 0):
+    # Jika FORCE_FIXED_TP1 aktif pada mode FIXED_RR (1:1), selalu hitung TP1 = 1:1 sama persis dengan jarak SL struktural!
+    if tp1_mode in ("FIXED_RR", "FIXED", "1:1") and risk_dist > 0 and force_fixed:
+        tp1 = round(
+            entry_price + (target_tp1_rr * risk_dist)
+            if demand
+            else entry_price - (target_tp1_rr * risk_dist),
+            2,
+        )
+        if isinstance(existing_plan, dict):
+            p_tp2 = float(existing_plan.get("tp2") or 0.0)
+            if (demand and p_tp2 > tp1) or ((not demand) and 0 < p_tp2 < tp1):
+                tp2 = p_tp2
+    elif isinstance(existing_plan, dict) and (float(existing_plan.get("tp1") or existing_plan.get("tp") or 0.0) > 0):
         p_tp1 = float(existing_plan.get("tp1") or existing_plan.get("tp") or 0.0)
         p_tp2 = float(existing_plan.get("tp2") or 0.0)
         if (demand and p_tp1 > entry_price) or ((not demand) and 0 < p_tp1 < entry_price):
-            # Jika user meminta mode FIXED_RR (1:1) dan existing plan memiliki RR berbeda atau TP belum 1:1,
-            # terapkan 1:1 jika existing plan tidak secara eksplisit di-lock oleh skenario test khusus
-            if tp1_mode in ("FIXED_RR", "FIXED", "1:1") and risk_dist > 0 and conf.get("FORCE_FIXED_TP1", False):
-                tp1 = round(entry_price + (target_tp1_rr * risk_dist) if demand else entry_price - (target_tp1_rr * risk_dist), 2)
-            else:
-                tp1 = p_tp1
+            tp1 = p_tp1
             tp2 = p_tp2
 
     if tp1 <= 0.0 and tp1_mode in ("FIXED_RR", "FIXED", "1:1") and risk_dist > 0:
@@ -788,8 +794,64 @@ def evaluate_entry_paths_for_zone(
         is_fresh_zone = str(zone.freshness or "FRESH").upper() == "FRESH" and int(zone.touch_count or 0) == 0
         ep_min_score = float(conf.get("EARLY_PENDING_MIN_SCORE", 75.0))
         score_ok_ep = float(getattr(zone, "score", 0.0) or 0.0) >= ep_min_score
-        if pending_plan.get("valid") and is_fresh_zone and score_ok_ep:
+        tp1_mode_ep = str(conf.get("TP1_MODE", "FIXED_RR")).upper()
+        force_fixed_ep = bool(conf.get("FORCE_FIXED_TP1", True))
+        target_rr_ep = float(conf.get("TP1_RR", 1.0))
+        max_sl_ep = float(conf.get("SL_JARAK_MAKS", 35.0))
+
+        # Jika plan_pending_order hanya gagal karena SL_JARAK_MAKS legacy (20 USD) atau NO_TARGET/RR_TOO_LOW,
+        # namun mode FIXED_RR (1:1) aktif dan jarak SL struktural masih <= max_sl_ep (mis. 35 USD), tetap izinkan EARLY_PENDING 1:1!
+        ep_plan_valid = bool(pending_plan.get("valid"))
+        if (not ep_plan_valid) and is_fresh_zone and score_ok_ep and tp1_mode_ep in ("FIXED_RR", "FIXED", "1:1") and force_fixed_ep:
+            rej_ep_str = str(pending_plan.get("rejection_reason") or "")
+            recoverable_ep = any(
+                k in rej_ep_str
+                for k in ("melebihi batas toleransi maksimal", "NO_TARGET", "RR_TOO_LOW")
+            )
+            if recoverable_ep:
+                lim_cand = round(float(zone.price_high if demand else zone.price_low), 2)
+                ref_m_ep = float(ask if (demand and ask and ask > 0) else (bid if ((not demand) and bid and bid > 0) else current_price))
+                limit_side_ok = (demand and lim_cand < ref_m_ep) or ((not demand) and lim_cand > ref_m_ep)
+                sl_cand_ep = float(pending_plan.get("sl") or 0.0)
+                if sl_cand_ep <= 0.0:
+                    sl_cand_ep = compute_structural_sl(zone, frames, spread=float(spread or 0.0))
+                risk_ep_dist = round((lim_cand - sl_cand_ep) if demand else (sl_cand_ep - lim_cand), 2)
+                if limit_side_ok and sl_cand_ep > 0.0 and 0.5 < risk_ep_dist <= max_sl_ep:
+                    tp1_cand_ep = round(
+                        lim_cand + (target_rr_ep * risk_ep_dist) if demand else lim_cand - (target_rr_ep * risk_ep_dist),
+                        2,
+                    )
+                    pending_plan = dict(pending_plan)
+                    pending_plan.update({
+                        "valid": True,
+                        "status": "VALID",
+                        "early_pending_status": "READY",
+                        "entry_price": lim_cand,
+                        "sl": sl_cand_ep,
+                        "tp1": tp1_cand_ep,
+                        "risk": risk_ep_dist,
+                        "risk_points": risk_ep_dist,
+                        "reward": round(abs(tp1_cand_ep - lim_cand), 2),
+                        "rr": target_rr_ep,
+                        "rr_tp1": target_rr_ep,
+                        "rejection_reason": "",
+                    })
+                    ep_plan_valid = True
+
+        if ep_plan_valid and is_fresh_zone and score_ok_ep:
             limit_entry = float(pending_plan.get("entry_price") or (zone.price_high if demand else zone.price_low))
+            ep_sl = float(pending_plan.get("sl") or 0.0)
+            ep_tp1 = float(pending_plan.get("tp1") or 0.0)
+            ep_tp2 = float(pending_plan.get("tp2") or 0.0)
+            if tp1_mode_ep in ("FIXED_RR", "FIXED", "1:1") and force_fixed_ep and ep_sl > 0.0:
+                ep_risk = abs(limit_entry - ep_sl)
+                if ep_risk > 0:
+                    ep_tp1 = round(
+                        limit_entry + (target_rr_ep * ep_risk) if demand else limit_entry - (target_rr_ep * ep_risk),
+                        2,
+                    )
+                    if not ((demand and ep_tp2 > ep_tp1) or ((not demand) and 0 < ep_tp2 < ep_tp1)):
+                        ep_tp2 = 0.0
             return {
                 "entry_mode": "EARLY_PENDING",
                 "order_kind": "LIMIT",
@@ -799,12 +861,12 @@ def evaluate_entry_paths_for_zone(
                 "triggers": triggers,
                 "trigger_passed": True,
                 "reason_code": REASON_OK,
-                "reason_text": "Zona fresh memenuhi syarat EARLY_PENDING",
+                "reason_text": "Zona fresh memenuhi syarat EARLY_PENDING (1:1 SL/TP)" if force_fixed_ep else "Zona fresh memenuhi syarat EARLY_PENDING",
                 "pending_plan": pending_plan,
                 "levels": {
-                    "sl": float(pending_plan.get("sl") or 0.0),
-                    "tp1": float(pending_plan.get("tp1") or 0.0),
-                    "tp2": float(pending_plan.get("tp2") or 0.0),
+                    "sl": round(ep_sl, 2),
+                    "tp1": round(ep_tp1, 2),
+                    "tp2": round(ep_tp2, 2),
                     "entry_price": limit_entry,
                     "invalidation_price": float(zone.invalidation_price or 0.0),
                 },

@@ -509,6 +509,17 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
             "EARLY_PENDING_MAX_LOT": 0.01,
             "LTF_MAX_LOT": 0.02,
             "HTF_STRONG_MAX_LOT": 0.05,
+            "MIN_RR": 1.5,
+            "TP1_RR": 1.5,
+            "TP1_MODE": "STRUCTURAL",
+            "FORCE_FIXED_TP1": False,
+            "RISK_EARLY_PENDING_PERCENT": 0.25,
+            "RISK_ADAPTIVE_PERCENT": 0.50,
+            "RISK_CONFIRMED_PERCENT": 0.50,
+            "MAX_RISK_PER_TRADE_PERCENT": 1.0,
+            "MAX_TOTAL_EXPOSURE_PERCENT": 1.0,
+            "MAX_DAILY_LOSS_PERCENT": 2.0,
+            "SL_JARAK_MAKS": 20.0,
         })
         self.news_ok = {"blackout": False, "status": "READY", "age_seconds": 10.0}
         self.df_m5_rej = _build_m5_df_with_bearish_rejection()
@@ -1205,6 +1216,73 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         self.assertEqual(cfg_live["MAX_LOT"], 0.01)
         z94 = _make_supply_zone(score=94.0, grade="A+", timeframe="H4+H1")
         self.assertEqual(select_target_lot(z94, "ADAPTIVE_ENTRY", strong_zone_validated=True, cfg=cfg_live), 0.01)
+
+    def test_live_1to1_structural_sl_tp_and_wide_zone_execution_not_blocked(self):
+        cfg_live = get_auto_trading_config()
+        self.assertTrue(cfg_live["FORCE_FIXED_TP1"])
+        self.assertEqual(cfg_live["TP1_RR"], 1.0)
+        self.assertEqual(cfg_live["MIN_RR"], 1.0)
+
+        # Akun Real IDC 18.280.000 IDC seperti milik user, dengan zona H4/H1 lebar (jarak SL 26.34 USD > 20 USD lama)
+        mt5, sm, jrn, eng = self._new_env(equity_idc=18_280_000.0, bid=3520.0, ask=3520.2)
+        eng.cfg = cfg_live
+        wide_zone = Zone(
+            zone_id="SNR_H4_SUP_WIDE_3502",
+            symbol="XAUUSDc",
+            timeframe="H4",
+            zone_type="DEMAND",
+            price_low=3502.66,
+            price_high=3521.00,
+            midpoint=3511.83,
+            score=82.0,
+            grade="A",
+            origin_bos={"tipe": "SNR_STRUCTURE", "arah": "bull", "origin_valid": True},
+            fvg_confirmation=None,
+            displacement_strength=1.8,
+            freshness="FRESH",
+            touch_count=0,
+            liquidity_sweep_status="CONFIRMED_SWEEP_LOW",
+            invalidation_price=3502.66,
+            is_valid=True,
+            rejection_reason="",
+            sl_recommended=3493.86,   # Jarak SL dari Ask 3520.20 = 26.34 USD!
+            tp1_recommended=3580.00,  # TP struktural lama jauh (tidak 1:1), harus di-override jadi 1:1!
+        )
+        # Buat M5 bullish rejection di dalam zona
+        idx = pd.date_range("2026-11-24 10:00:00", periods=40, freq="5min")
+        base = np.linspace(3535.0, 3521.5, 40)
+        df_bull = pd.DataFrame({
+            "Open": base + 0.3, "High": base + 1.0, "Low": base - 0.8, "Close": base - 0.1, "Volume": 400
+        }, index=idx)
+        # Bar closed terakhir (-2) membuat bullish pinbar rejection kuat di dalam zona
+        df_bull.iloc[-2, df_bull.columns.get_loc("Open")] = 3520.2
+        df_bull.iloc[-2, df_bull.columns.get_loc("Low")] = 3517.0
+        df_bull.iloc[-2, df_bull.columns.get_loc("High")] = 3520.9
+        df_bull.iloc[-2, df_bull.columns.get_loc("Close")] = 3520.7
+        df_bull = tambah_indikator(df_bull)
+
+        snap, scan, dec = _make_snapshot_and_scan(
+            wide_zone, df_bull, bid=3520.0, ask=3520.2, h4_bias="BULLISH", h1_bias="BULLISH", m30_status="CONFIRMED"
+        )
+        dec["plan"]["sl"] = 3493.86
+        dec["plan"]["tp1"] = 3580.00
+
+        val = validate_trade_candidate(
+            wide_zone, mt5, sm, snapshot=snap, scan_result=scan, decision=dec,
+            news_override=self.news_ok, cfg=cfg_live,
+        )
+        self.assertEqual(val["state"], STATE_ENTRY_READY, msg=f"Harus ENTRY_READY, bukan {val.get('reason_code')}: {val.get('reason_text')}")
+        self.assertEqual(val["final_lot"], 0.01)
+        self.assertAlmostEqual(val["actual_rr"], 1.0, places=2)
+
+        ex = eng.execute_validated_setup(val, trading_mode="FULL_AUTO")
+        self.assertTrue(ex["executed"])
+        pos = mt5.positions[0]
+        # Pastikan SL struktural tetap di luar zona (3493.86) dan TP1 = Entry + (Entry - SL) = 1:1 presisi!
+        sl_dist = round(pos.price_open - pos.sl, 2)
+        tp_dist = round(pos.tp - pos.price_open, 2)
+        self.assertAlmostEqual(sl_dist, 26.34, places=2)
+        self.assertAlmostEqual(tp_dist, sl_dist, places=2)
 
 
 if __name__ == "__main__":

@@ -3632,6 +3632,11 @@ class UnifiedMonitor:
         active_zone_id = str(active_zone.get("zone_id") or "NONE")
         active_zone_lo = round(safe_float(active_zone.get("price_low", active_zone.get("low")), 0.0), 2)
         active_zone_hi = round(safe_float(active_zone.get("price_high", active_zone.get("high")), 0.0), 2)
+        active_zone_type = str(active_zone.get("zone_type") or active_zone.get("type") or "").upper()
+        active_zone_dir = (
+            "BUY" if active_zone_type in ("DEMAND", "SUPPORT")
+            else ("SELL" if active_zone_type in ("SUPPLY", "RESISTANCE") else str(smart_view.get("direction") or "").upper())
+        )
         active_is_smc = (mode_norm == "unified" and active_zone_src == "SMC" and active_zone_lo > 0)
 
         raw_non_hist_alerts = (
@@ -3789,7 +3794,7 @@ class UnifiedMonitor:
             smart_view.get("confirmed") if mode_norm == "unified" else None,
             smc_zone_id if mode_norm == "smc" else None,
             snr_zone_id if (mode_norm == "snr" or not active_is_smc) else None,
-            (active_zone_src, active_zone_id, smart_view.get("direction"), active_zone_lo, active_zone_hi) if mode_norm == "unified" else None,
+            (active_zone_src, active_zone_id, active_zone_dir, active_zone_lo, active_zone_hi) if mode_norm == "unified" else None,
             smc_res.get("status") if smc_res else None,
             snr_res.get("status") if snr_res else None,
             smart_view.get("monitor_state") if mode_norm == "unified" else None,
@@ -3874,7 +3879,7 @@ class UnifiedMonitor:
         ]
 
         # 1. Pergantian setup / fokus zona (jangan buat event entry baru dari data historis saat market CLOSED)
-        setup_state = (active_zone_src, active_zone_id, smart_view.get("direction"), active_zone_lo, active_zone_hi)
+        setup_state = (active_zone_src, active_zone_id, active_zone_dir, active_zone_lo, active_zone_hi)
         if not is_closed_ev:
             if self.cycle_count > 1 and active_zone_id != "NONE":
                 prev_setup = self._event_state_dedup.get(("FOCUS", "SETUP_FOCUS"))
@@ -3883,7 +3888,7 @@ class UnifiedMonitor:
                         "FOCUS",
                         "SETUP_FOCUS",
                         setup_state,
-                        f"FOCUS -> {active_zone_src} {smart_view.get('direction', '')} {active_zone_lo:.2f}-{active_zone_hi:.2f}",
+                        f"FOCUS -> {active_zone_src} {active_zone_dir} {active_zone_lo:.2f}-{active_zone_hi:.2f}",
                     )
             elif active_zone_id != "NONE":
                 self._event_state_dedup[("FOCUS", "SETUP_FOCUS")] = setup_state

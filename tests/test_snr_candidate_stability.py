@@ -2,6 +2,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from modules.config import read_shared_zone_state, update_shared_zone_state
 from modules.snr.entry_validator import _is_live_active_snr_zone, select_live_snr_focus
@@ -115,6 +116,97 @@ class SnrCandidateTests(unittest.TestCase):
         ranked_only_c_and_r1 = rank_zones([far_c_sup, m30_res_a], current_price=3562.80, h1_atr=6.0)
         sel = select_live_snr_focus(ranked_only_c_and_r1, {"h4": "BEARISH", "overall_bias": "BEARISH"}, 3562.80)
         self.assertEqual(sel["focus_zone"]["zone_id"], "SNR_M30_RES_3600_3607")
+
+    def test_counter_trend_snr_trade_plan_focus_syncs_direction(self):
+        from modules.smart_monitor_report import _smart_monitor_context
+
+        locked_plan = {
+            "plan_id": "TP_SNR_BUY_3551",
+            "source": "SNR",
+            "zone_id": "SNR_M30_SUP_3551",
+            "timeframe": "M30",
+            "zone_type": "SUPPORT",
+            "direction": "BUY",
+            "status": "CONDITIONAL",
+            "entry_price": 3556.42,
+            "setup_sl": 3546.67,
+            "struct_inv": 3551.17,
+            "tp1": 3573.30,
+            "tp2": 3597.12,
+            "rr_tp1": 1.73,
+            "zone_low": 3551.17,
+            "zone_high": 3558.17,
+            "grade": "B",
+            "score": 74.0,
+            "is_counter_trend": True,
+        }
+        cycle = {
+            "snapshot": {
+                "bid": 3573.90,
+                "ask": 3574.08,
+                "price": 3573.99,
+                "data_ok": True,
+                "data_freshness": "FRESH",
+                "snapshot_status": "OK",
+                "market_status": "OPEN",
+            },
+            "smc": {
+                "status": "OK",
+                "scan_result": {
+                    "current_price": 3573.99,
+                    "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "M30": "BEARISH"},
+                    "radar_zones": [],
+                },
+                "decision": {
+                    "status": "WAIT",
+                    "direction": "SELL",
+                    "current_price": 3573.99,
+                    "snapshot_price": 3573.99,
+                },
+                "summary": {"direction": "SELL", "h4_bias": "BEARISH", "h1_bias": "BEARISH", "m30_bias": "BEARISH"},
+            },
+            "snr": {
+                "status": "OK",
+                "scan_result": {
+                    "market_bias": {"h4": "BEARISH", "h1": "SIDEWAYS", "m30": "BEARISH", "overall_bias": "BEARISH"},
+                    "ranked_zones": {
+                        "active_supports": [
+                            {
+                                "zone_id": "SNR_M30_SUP_3551",
+                                "timeframe": "M30",
+                                "zone_type": "SUPPORT",
+                                "low": 3551.17,
+                                "high": 3558.17,
+                                "grade": "B",
+                                "score": 74.0,
+                                "lifecycle_status": "ACTIVE",
+                            }
+                        ],
+                        "active_resistances": [
+                            {
+                                "zone_id": "SNR_M30_RES_3600",
+                                "timeframe": "M30",
+                                "zone_type": "RESISTANCE",
+                                "low": 3600.32,
+                                "high": 3607.32,
+                                "grade": "A",
+                                "score": 82.0,
+                                "lifecycle_status": "ACTIVE",
+                            }
+                        ],
+                    },
+                    "trade_plans": [locked_plan],
+                },
+                "decision": {"signal": "WAIT"},
+            },
+        }
+        with patch("modules.smart_monitor_report.resolve_trade_plan_focus", return_value=locked_plan):
+            ctx = _smart_monitor_context(cycle)
+        self.assertEqual(ctx["zone"]["zone_id"], "SNR_M30_SUP_3551")
+        self.assertEqual(ctx["zone"]["zone_type"], "SUPPORT")
+        self.assertEqual(ctx["direction"], "BUY")
+        self.assertEqual(ctx["active_setup"]["direction"], "BUY")
+        self.assertTrue(str(ctx["active_setup"]["setup_id"]).startswith("SNR_M30_SUP_3551:BUY:"))
 
 
 if __name__ == "__main__":

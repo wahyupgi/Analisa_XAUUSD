@@ -2238,9 +2238,41 @@ def _smart_monitor_context(cycle_result):
                     lo, hi = _s_lo_m, _s_hi_m
                     distance = 0.0 if (price > 0 and lo <= price <= hi) else (min(abs(price - lo), abs(price - hi)) if price > 0 else None)
                     zone_type = zone["zone_type"]
+                    _tp_dir_m = str(best_trade_plan_mon.get("direction") or "").strip().upper()
+                    direction = (
+                        "BUY" if zone_type in ("DEMAND", "SUPPORT")
+                        else ("SELL" if zone_type in ("SUPPLY", "RESISTANCE") else (_tp_dir_m if _tp_dir_m in ("BUY", "SELL") else direction))
+                    )
                     z_id = _tp_m_zid
+                    lifecycle = zone["status"]
+                    active_setup.update({
+                        "setup_id": f"{z_id}:{direction}:{setup_type}",
+                        "zone_id": z_id,
+                        "direction": direction,
+                        "zone_range": (lo, hi),
+                        "timeframe": str(zone.get("timeframe") or "N/A"),
+                        "grade": str(zone.get("grade") or "N/A"),
+                        "score": safe_float(zone.get("score")) if zone.get("score") is not None else None,
+                        "lifecycle_status": lifecycle,
+                    })
+                    touch_status, touch_display = _calc_zone_touch(zone, price, {}, None, lifecycle)
+                    if monitor_state not in ("CONFIRMED", "INVALIDATED", "EXPIRED"):
+                        if price > 0 and lo <= price <= hi:
+                            monitor_state = "AWAITING_CONFIRMATION"
+                        elif distance is not None and distance <= float(ZONE_APPROACH_DISTANCE_POINTS):
+                            monitor_state = "APPROACHING"
+                        else:
+                            monitor_state = "IDLE"
                     if far_reference_zone is None and isinstance(decision.get("far_reference_zone"), dict):
                         far_reference_zone = dict(decision["far_reference_zone"])
+
+    if lo > 0 and hi >= lo and zone_type in ("DEMAND", "SUPPORT", "SUPPLY", "RESISTANCE"):
+        _active_z_dir = "BUY" if zone_type in ("DEMAND", "SUPPORT") else "SELL"
+        if direction != _active_z_dir:
+            direction = _active_z_dir
+            active_setup["direction"] = direction
+            if z_id != "N/A":
+                active_setup["setup_id"] = f"{z_id}:{direction}:{setup_type}"
 
     return {
         "snapshot": snapshot,

@@ -19,7 +19,13 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
-from modules.config import SYMBOL, get_auto_trading_config
+from modules.config import (
+    SYMBOL,
+    compute_fixed_tp_price,
+    get_auto_trading_config,
+    resolve_real_lot_001_fixed_tp_distance,
+    should_use_real_lot_001_fixed_tp,
+)
 from modules.dynamic_lot_manager import is_broker_volume_valid
 from modules.execution_state import (
     ExecutionStateManager,
@@ -506,7 +512,14 @@ class MT5ExecutionEngine:
 
         sl_px = normalize_price_to_tick(float(plan.get("sl") or 0.0), sym_info, symbol=symbol)
         tp_px = normalize_price_to_tick(float(plan.get("tp") or plan.get("tp1") or 0.0), sym_info, symbol=symbol)
-        if (
+        use_real_001_tp = should_use_real_lot_001_fixed_tp(
+            acc_check.get("account_mode"), mode_u, lot, cfg=conf
+        )
+        if use_real_001_tp and exec_price > 0.0:
+            fixed_tp_dist = resolve_real_lot_001_fixed_tp_distance(conf)
+            raw_tp_fixed = compute_fixed_tp_price(exec_price, direction, fixed_tp_dist, digits=4)
+            tp_px = normalize_price_to_tick(raw_tp_fixed, sym_info, symbol=symbol)
+        elif (
             str(conf.get("TP1_MODE", "FIXED_RR")).upper() in ("FIXED_RR", "FIXED", "1:1")
             and bool(conf.get("FORCE_FIXED_TP1", True))
             and sl_px > 0.0
@@ -579,31 +592,55 @@ class MT5ExecutionEngine:
             }
 
         # Cek duplikat order/posisi scanner berdasarkan Zone ID, Magic Number, dan Ticket MT5 tepat sebelum kirim
+        is_scale_in = bool(validation_result.get("is_scale_in"))
         with MT5_IPC_LOCK:
             cur_pos = list(self.mt5.positions_get(symbol=symbol) or ())
             cur_ord = list(self.mt5.orders_get(symbol=symbol) or ())
         comment = encode_order_comment(setup_id, entry_mode)
         if sm is not None and zone_id:
+            s1_active_seen = 0
             for s_rec in sm.get_all_setups().values():
-                if str(s_rec.get("zone_id") or "") == zone_id and s_rec.get("state") in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE):
-                    if sm is not None:
-                        sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text=f"Zone ID {zone_id} sudah memiliki order/posisi aktif", zone_id=zone_id)
+                if str(s_rec.get("zone_id") or "") != zone_id:
+                    continue
+                s_st = str(s_rec.get("state") or "").upper()
+                if is_scale_in:
+                    if s_st == STATE_ORDER_PLACED or (
+                        (s_rec.get("is_scale_in") or str(s_rec.get("setup_id") or "") == setup_id)
+                        and s_st in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE, STATE_COMPLETED)
+                    ):
+                        sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text=f"Stage-2 Scale-In untuk {zone_id} sudah dieksekusi atau pending Stage-1 belum terisi", zone_id=zone_id, extra={"is_scale_in": True})
+                        return {
+                            "executed": False, "simulated": False, "state": STATE_BLOCKED,
+                            "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
+                            "reason_text": f"Stage-2 Scale-In untuk {zone_id} sudah dieksekusi atau pending Stage-1 belum terisi", "setup_id": setup_id,
+                        }
+                    if s_st == STATE_POSITION_ACTIVE and not s_rec.get("is_scale_in"):
+                        s1_active_seen += 1
+                        if s1_active_seen > 1:
+                            sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text=f"Zone ID {zone_id} sudah memiliki lebih dari 1 posisi aktif", zone_id=zone_id, extra={"is_scale_in": True})
+                            return {
+                                "executed": False, "simulated": False, "state": STATE_BLOCKED,
+                                "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
+                                "reason_text": f"Zone ID {zone_id} sudah memiliki lebih dari 1 posisi aktif", "setup_id": setup_id,
+                            }
+                elif s_st in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE):
+                    sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text=f"Zone ID {zone_id} sudah memiliki order/posisi aktif", zone_id=zone_id)
                     return {
                         "executed": False, "simulated": False, "state": STATE_BLOCKED,
                         "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
                         "reason_text": f"Zone ID {zone_id} sudah memiliki order/posisi aktif", "setup_id": setup_id,
                     }
-        for p in cur_pos:
-            if is_scanner_owned_item(p, magic) and (
-                str(getattr(p, "comment", "")) == comment
-                or len([x for x in cur_pos if is_scanner_owned_item(x, magic)]) >= int(conf.get("MAX_ACTIVE_POSITIONS", 1))
-            ):
+        max_pos_pre = int(conf.get("MAX_ACTIVE_POSITIONS", 1))
+        eff_max_pos_pre = (max(2, max_pos_pre) if (is_scale_in and max_pos_pre > 0) else max_pos_pre)
+        scanner_pos_now = [x for x in cur_pos if is_scanner_owned_item(x, magic)]
+        for p in scanner_pos_now:
+            if str(getattr(p, "comment", "")) == comment or (eff_max_pos_pre > 0 and len(scanner_pos_now) >= eff_max_pos_pre):
                 if sm is not None:
-                    sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text="Posisi scanner sudah aktif di MT5", zone_id=zone_id)
+                    sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text="Posisi scanner sudah mencapai batas aktif di MT5", zone_id=zone_id)
                 return {
                     "executed": False, "simulated": False, "state": STATE_BLOCKED,
                     "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
-                    "reason_text": "Posisi scanner sudah aktif di MT5", "setup_id": setup_id,
+                    "reason_text": "Posisi scanner sudah mencapai batas aktif di MT5", "setup_id": setup_id,
                 }
         if not is_market:
             scanner_ords = [o for o in cur_ord if is_scanner_owned_item(o, magic)]
@@ -767,7 +804,31 @@ class MT5ExecutionEngine:
                         if (direction == "BUY" and exec_price > z_hi_r + max_ch_r) or (direction == "SELL" and exec_price < z_lo_r - max_ch_r):
                             break
                     request["price"] = float(exec_price)
-                    if (
+                    if use_real_001_tp:
+                        fixed_tp_dist_r = resolve_real_lot_001_fixed_tp_distance(conf)
+                        tp_px = normalize_price_to_tick(
+                            compute_fixed_tp_price(exec_price, direction, fixed_tp_dist_r, digits=4),
+                            sym_info,
+                            symbol=symbol,
+                        )
+                        retry_recheck = validate_sl_tp_and_rr(
+                            direction=direction,
+                            entry_price=exec_price,
+                            sl_price=sl_px,
+                            tp1_price=tp_px,
+                            structural_invalidation=inval_px,
+                            sym_info=sym_info,
+                            bid=r_bid,
+                            ask=r_ask,
+                            is_market_order=True,
+                            symbol=symbol,
+                            cfg=conf,
+                        )
+                        if not retry_recheck.get("valid"):
+                            break
+                        sl_tp_recheck = retry_recheck
+                        request["tp"] = float(tp_px)
+                    elif (
                         str(conf.get("TP1_MODE", "FIXED_RR")).upper() in ("FIXED_RR", "FIXED", "1:1")
                         and bool(conf.get("FORCE_FIXED_TP1", True))
                         and sl_px > 0.0
@@ -830,6 +891,7 @@ class MT5ExecutionEngine:
                         zone_timeframe=str(zone_dict.get("timeframe") or ""),
                         trigger_name=str((validation_result.get("triggers") or {}).get("primary_trigger") or ""),
                         bos_time=str(zone_dict.get("bos_candle_time") or ""),
+                        extra={"is_scale_in": True} if is_scale_in else None,
                     )
                     if final_st == STATE_POSITION_ACTIVE:
                         sm.record_trade_opened(setup_id, r_tkt)
@@ -978,6 +1040,7 @@ class MT5ExecutionEngine:
                     "planned_sl": float(sl_px),
                     "planned_tp": float(tp_px),
                     "initial_lot": float(actual_vol if actual_vol > 0 else lot),
+                    **({"is_scale_in": True} if is_scale_in else {}),
                 },
             )
             if is_market:

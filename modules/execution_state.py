@@ -87,6 +87,7 @@ VALID_ENTRY_MODES = frozenset({
 REASON_OK = "OK"
 REASON_WAIT_TRIGGER = "WAIT_TRIGGER"
 REASON_WAIT_ZONE_TOUCH = "WAIT_ZONE_TOUCH"
+REASON_GRADE_A_WAIT_CONFIRM = "GRADE_A_WAIT_CONFIRM"
 REASON_WAIT_USER_APPROVAL = "WAIT_USER_APPROVAL"
 REASON_SCANNER_ONLY_MODE = "SCANNER_ONLY_MODE"
 REASON_AUTO_TRADING_OFF = "AUTO_TRADING_OFF"
@@ -468,7 +469,74 @@ class ExecutionStateManager:
         with self._lock:
             self._inflight_setups.discard(sid)
 
-    def is_setup_duplicate_or_locked(self, setup_id: str, zone_id: str = "", zone_bos_time: str = "") -> Tuple[bool, str]:
+    def find_stage1_for_scale_in(
+        self,
+        zone_id: str,
+        direction: str,
+        symbol: str = SYMBOL,
+        max_scout_lot: float = 0.01,
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """
+        Cek apakah suatu zona (80+ / 90+) sedang memiliki posisi Stage-1 (Scout Limit <= max_scout_lot)
+        yang SUDAH terisi (POSITION_ACTIVE) dan BELUM pernah mengeksekusi Stage-2 Scale-In:
+        Mengembalikan (stage1_record, stage2_blocked_or_done).
+        - Jika masih ada pending order belum terisi (ORDER_PLACED / EXECUTING) -> (None, True).
+        - Jika Stage-2 sudah pernah jalan / selesai / stopped out -> (None, True).
+        - Jika zona tercatat stopped_out_Zones -> (None, True).
+        """
+        zid = str(zone_id or "").strip()
+        dir_u = str(direction or "").strip().upper()
+        if not zid:
+            return None, True
+
+        stage2_sid = make_setup_id(f"{zid}::SCALE_IN", dir_u, symbol=symbol)
+        with self._lock:
+            if stage2_sid in self._inflight_setups:
+                return None, True
+            exec_ids = set(self.state.get("executed_setup_ids") or [])
+            if stage2_sid in exec_ids:
+                return None, True
+            if zid in (self.state.get("stopped_out_Zones") or {}):
+                return None, True
+
+            setups = self.state.get("setups") or {}
+            s2_rec = setups.get(stage2_sid)
+            if isinstance(s2_rec, dict):
+                s2_st = str(s2_rec.get("state") or "").upper()
+                if s2_st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE, STATE_COMPLETED) or s2_rec.get("stopped_out"):
+                    return None, True
+
+            stage1_candidate: Optional[Dict[str, Any]] = None
+            for rec in setups.values():
+                if not isinstance(rec, dict):
+                    continue
+                if str(rec.get("zone_id") or "") != zid:
+                    continue
+                st = str(rec.get("state") or "").upper()
+                if st in (STATE_ORDER_PLACED, STATE_EXECUTING):
+                    # Pending order Stage-1 belum terjemput -> jangan jalan Stage-2 dulu!
+                    return None, True
+                if rec.get("stopped_out"):
+                    return None, True
+                if rec.get("is_scale_in") and st in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE, STATE_COMPLETED):
+                    return None, True
+                if st == STATE_POSITION_ACTIVE and not rec.get("is_scale_in"):
+                    r_dir = str(rec.get("direction") or "").upper()
+                    if dir_u and r_dir and r_dir != dir_u:
+                        continue
+                    r_lot = float(rec.get("initial_lot") or rec.get("final_lot") or rec.get("actual_lot") or 0.0)
+                    if 0.0 < r_lot <= (float(max_scout_lot) + 1e-6):
+                        stage1_candidate = dict(rec)
+
+            return stage1_candidate, (stage1_candidate is None)
+
+    def is_setup_duplicate_or_locked(
+        self,
+        setup_id: str,
+        zone_id: str = "",
+        zone_bos_time: str = "",
+        allow_scale_in_stage2: bool = False,
+    ) -> Tuple[bool, str]:
         sid = str(setup_id or "").strip()
         zid = str(zone_id or "").strip()
         with self._lock:
@@ -486,13 +554,26 @@ class ExecutionStateManager:
                     return True, REASON_STOPPED_OUT_SETUP
             # Cek juga apakah zona yang sama sedang memiliki order/posisi aktif di setup record lain
             if zid:
+                active_non_scale_cnt = 0
                 for other_sid, other_rec in setups.items():
                     if not isinstance(other_rec, dict):
                         continue
                     if str(other_rec.get("zone_id") or "") == zid:
                         o_st = str(other_rec.get("state") or "").upper()
-                        if o_st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE):
-                            return True, REASON_DUPLICATE_SETUP
+                        if allow_scale_in_stage2:
+                            if o_st in (STATE_EXECUTING, STATE_ORDER_PLACED):
+                                return True, REASON_DUPLICATE_SETUP
+                            if other_rec.get("is_scale_in") and o_st in (
+                                STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE, STATE_COMPLETED
+                            ):
+                                return True, REASON_DUPLICATE_SETUP
+                            if o_st == STATE_POSITION_ACTIVE and not other_rec.get("is_scale_in"):
+                                active_non_scale_cnt += 1
+                                if active_non_scale_cnt > 1:
+                                    return True, REASON_DUPLICATE_SETUP
+                        else:
+                            if o_st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE):
+                                return True, REASON_DUPLICATE_SETUP
                 stopped_map = self.state.get("stopped_out_Zones") or {}
                 if zid in stopped_map:
                     prev_stop = stopped_map[zid] or {}

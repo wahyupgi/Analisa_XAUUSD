@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from modules.config import SYMBOL, get_auto_trading_config
+from modules.config import SYMBOL, get_auto_trading_config, is_grade_a_wait_confirm_zone
 from modules.execution_state import (
     REASON_INSUFFICIENT_MARGIN,
     REASON_INVALID_VOLUME,
@@ -141,7 +141,7 @@ def classify_zone_quality_label(zone: Any, strong_zone_validated: bool = False, 
         return "LOW_QUALITY"
     if score >= str_s and strong_zone_validated:
         return "STRONG"
-    if score >= med_s:
+    if score >= med_s or is_grade_a_wait_confirm_zone(zone, cfg=conf):
         return "MEDIUM"
     return "STANDARD"
 
@@ -195,7 +195,7 @@ def select_target_lot(
 
     if score >= strong_score and has_htf_sd and strong_zone_validated and not is_ltf_only_zone(zone):
         target = min(lot_str, htf_max)
-    elif score >= med_score:
+    elif score >= med_score or is_grade_a_wait_confirm_zone(zone, cfg=conf):
         target = lot_med
     else:
         target = lot_std
@@ -206,7 +206,9 @@ def select_target_lot(
     if loose:
         # LOOSE MODE: grade di bawah B (C/D/dst) selalu 0.01 lot
         grade_u = str(_z_attr(zone, "grade", "") or "").strip().upper()
-        if not grade_u or grade_u[0] not in ("A", "B"):
+        if (grade_u and grade_u[0] not in ("A", "B")) or (
+            not grade_u and score < min_score and not is_grade_a_wait_confirm_zone(zone, cfg=conf)
+        ):
             target = min(target, float(conf.get("LOOSE_LOT", 0.01)))
 
     return round(min(target, max_lot), 2)

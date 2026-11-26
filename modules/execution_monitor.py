@@ -460,6 +460,7 @@ class AutoExecutionMonitor:
                         zone_quality=str(ev_item.get("zone_quality") or ""),
                         zone_timeframe=str((ev_item.get("zone") or {}).get("timeframe") or ""),
                         trigger_name=str((ev_item.get("triggers") or {}).get("primary_trigger") or ""),
+                        extra={"is_scale_in": True} if ev_item.get("is_scale_in") else None,
                     )
 
             def _apply_exec_outcome(ev_item: Dict[str, Any], out_res: Dict[str, Any]) -> None:
@@ -783,6 +784,22 @@ def handle_auto_cli_command(
             f"Equity            : {acc.get('equity', 0.0):,.2f} {cur}",
             f"Free Margin       : {acc.get('free_margin', 0.0):,.2f} {cur}",
             f"Maximum Lot       : {conf.get('MAX_LOT', 0.05):.2f} lot",
+            *(
+                [
+                    f"Lot 0.01 TP Rule  : Fixed {float(conf.get('REAL_LOT_001_FIXED_TP_PIPS', 110.0)):g} pips "
+                    f"({float(conf.get('REAL_LOT_001_FIXED_TP_PIPS', 110.0)) * 0.10:.2f} USD) | Min RR 1:{float(conf.get('MIN_RR', 1.5)):.2f}"
+                ]
+                if conf.get("REAL_LOT_001_FIXED_TP_ENABLED", True)
+                else []
+            ),
+            *(
+                [
+                    f"80+ 2-Stage Entry : Stage-1 Limit {conf.get('EARLY_PENDING_MAX_LOT', 0.01):.2f} -> "
+                    f"Stage-2 Confirm M5 (+{conf.get('LOT_MEDIUM', 0.02):.2f} / +{conf.get('LOT_STRONG', 0.03):.2f} lot)"
+                ]
+                if conf.get("SCALE_IN_80PLUS_ENABLED", True)
+                else []
+            ),
             f"Risk per Trade    : Adaptive {conf.get('RISK_ADAPTIVE_PERCENT', 0.50):.2f}% | Early Pending {conf.get('RISK_EARLY_PENDING_PERCENT', 0.25):.2f}% (Abs Max {conf.get('MAX_RISK_PER_TRADE_PERCENT', 1.0):.2f}%)",
             f"Daily Loss Limit  : {conf.get('MAX_DAILY_LOSS_PERCENT', 2.0):.2f}%",
             f"Maximum Exposure  : {conf.get('MAX_TOTAL_EXPOSURE_PERCENT', 1.0):.2f}%",

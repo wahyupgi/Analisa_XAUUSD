@@ -527,6 +527,9 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
             "SL_JARAK_MAKS": 20.0,
             "CONFLICT_MIDZONE_LIMIT_ENABLED": False,
             "PARTIAL_CLOSE_ENABLED": False,
+            "GRADE_A_WAIT_CONFIRMATION_ENABLED": False,
+            "AUTO_CANCEL_GRADE_A_PENDING_LIMIT": False,
+            "SCALE_IN_80PLUS_ENABLED": False,
         })
         self.news_ok = {"blackout": False, "status": "READY", "age_seconds": 10.0}
         self.df_m5_rej = _build_m5_df_with_bearish_rejection()
@@ -598,7 +601,8 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
     # -------------------------------------------------------------------------
     def test_05_h4_h1_conflict_blocks_early_pending(self):
         mt5, sm, _, _ = self._new_env(bid=3630.0, ask=3630.2)
-        df_untouched = self.df_m5_rej.iloc[:-5].copy()
+        df_untouched = self.df_m5_rej.iloc[:-15].copy()
+        df_untouched.attrs["is_closed"] = True
         zone = _make_supply_zone(score=92.0, timeframe="H4+H1", lo=3643.0, hi=3647.0)
         snap, scan, dec = _make_snapshot_and_scan(
             zone, df_untouched, bid=3630.0, ask=3630.2,
@@ -1141,7 +1145,8 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
 
     def test_audit_early_pending_requires_grade_a_75_and_confirmed_requires_sweep(self):
         mt5, sm, _, _ = self._new_env(bid=3630.0, ask=3630.2)
-        df_untouched = self.df_m5_rej.iloc[:-5].copy()
+        df_untouched = self.df_m5_rej.iloc[:-15].copy()
+        df_untouched.attrs["is_closed"] = True
         # Score 72 (< 75) -> EARLY_PENDING tidak aktif (tunggu sentuhan zona)
         z72 = _make_supply_zone(score=72.0, grade="B", timeframe="H1", lo=3643.0, hi=3647.0)
         snap, scan, dec = _make_snapshot_and_scan(z72, df_untouched, bid=3630.0, ask=3630.2)
@@ -1350,6 +1355,7 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
             "TP1_RR": 1.0,
             "TP1_MODE": "FIXED_RR",
             "FORCE_FIXED_TP1": True,
+            "REAL_LOT_001_FIXED_TP_ENABLED": False,
         }
         mt5, sm, jrn, eng = self._new_env(equity_idc=18_280_000.0, bid=3602.31, ask=3602.51)
         mon = AutoExecutionMonitor(mt5_api=mt5, state_mgr=sm, journal=jrn, symbol="XAUUSDc", cfg=cfg_mz, connect_fn=lambda: True)
@@ -1738,6 +1744,459 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         self.assertEqual(len(r_after["protection_updates"]), 1)
         self.assertAlmostEqual(mt5.positions[0].sl, 3529.70, places=2)
         self.assertAlmostEqual(mt5.positions[0].volume, 0.01, places=2)
+
+    def test_real_lot_001_fixed_110_pips_tp_and_min_rr_enforcement(self):
+        """
+        Verifikasi aturan Auto Real (`FULL_AUTO` pada akun `REAL`) untuk `final_lot == 0.01`:
+        1. Jika SL <= 5.50 USD pada MIN_RR/LOOSE_RR = 2.0 (mis. SL 5.00 USD -> RR = 11.00 / 5.00 = 2.20 >= 2.0),
+           setup ENTRY_READY & tereksekusi dengan TP tepat 110 pips (11.00 USD) dari harga entry.
+        2. Jika SL > 5.50 USD pada MIN_RR/LOOSE_RR = 2.0 (mis. SL 6.00 USD -> RR = 11.00 / 6.00 = 1.83 < 2.0),
+           setup otomatis BLOCKED (`RR_BELOW_MINIMUM`).
+        3. Untuk lot >= 0.02 pada akun REAL, atau untuk akun DEMO / mode DRY_RUN pada lot 0.01,
+           aturan TP 110 pips TIDAK menimpa TP standar.
+        """
+        cfg_110 = dict(self.cfg)
+        cfg_110.update({
+            "AUTO_LOOSE_MODE": True,
+            "LOOSE_LOT": 0.01,
+            "MIN_RR": 2.0,
+            "TP1_RR": 2.0,
+            "TP1_MODE": "FIXED_RR",
+            "FORCE_FIXED_TP1": True,
+            "REAL_LOT_001_FIXED_TP_ENABLED": True,
+            "REAL_LOT_001_FIXED_TP_PIPS": 110.0,
+            "RISK_ADAPTIVE_PERCENT": 2.5,
+            "MAX_RISK_PER_TRADE_PERCENT": 2.5,
+            "MAX_TOTAL_EXPOSURE_PERCENT": 5.0,
+        })
+
+        # 1) REAL + FULL_AUTO + lot 0.01 + SL jarak 5.00 USD (SELL @ 3644.00, SL 3649.00) -> TP = 3633.00 (110 pips), RR = 2.20 >= 2.0!
+        mt5_ok, sm_ok, _, eng_ok = self._new_env(equity_idc=30_000_000.0, bid=3644.00, ask=3644.20)
+        eng_ok.cfg = cfg_110
+        z_001_ok = _make_supply_zone(score=74.0, grade="B", timeframe="H1", lo=3643.00, hi=3647.00)
+        snap_ok, scan_ok, dec_ok = _make_snapshot_and_scan(z_001_ok, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        dec_ok["plan"]["sl"] = 3649.00  # jarak SL = 5.00 USD -> RR 11/5 = 2.20
+
+        val_ok = validate_trade_candidate(
+            z_001_ok, mt5_ok, sm_ok, snapshot=snap_ok, scan_result=scan_ok, decision=dec_ok,
+            news_override=self.news_ok, cfg=cfg_110,
+        )
+        self.assertEqual(val_ok["state"], STATE_ENTRY_READY, msg=val_ok.get("reason_text"))
+        self.assertAlmostEqual(val_ok["final_lot"], 0.01, places=2)
+        self.assertAlmostEqual(val_ok["trade_plan"]["tp"], 3633.00, places=2)  # 3644.00 - 11.00
+        self.assertAlmostEqual(val_ok["actual_rr"], 2.20, places=2)
+
+        ex_ok = eng_ok.execute_validated_setup(val_ok, trading_mode="FULL_AUTO")
+        self.assertTrue(ex_ok["executed"])
+        self.assertAlmostEqual(mt5_ok.positions[0].tp, 3633.00, places=2)
+        self.assertAlmostEqual(mt5_ok.positions[0].volume, 0.01, places=2)
+
+        # 2) REAL + FULL_AUTO + lot 0.01 + SL jarak 6.00 USD (SELL @ 3644.00, SL 3650.00) -> RR = 11.00 / 6.00 = 1.83 < MIN_RR 2.0 -> BLOCK!
+        mt5_blk, sm_blk, _, _ = self._new_env(equity_idc=30_000_000.0, bid=3644.00, ask=3644.20)
+        z_001_blk = _make_supply_zone(score=74.0, grade="B", timeframe="H1", lo=3643.00, hi=3647.00)
+        z_001_blk.zone_id = "ZONE_BLK_RR_183"
+        snap_blk, scan_blk, dec_blk = _make_snapshot_and_scan(z_001_blk, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        dec_blk["plan"]["sl"] = 3650.00  # jarak SL = 6.00 USD -> RR 1.83 < 2.0
+
+        val_blk = validate_trade_candidate(
+            z_001_blk, mt5_blk, sm_blk, snapshot=snap_blk, scan_result=scan_blk, decision=dec_blk,
+            news_override=self.news_ok, cfg=cfg_110,
+        )
+        self.assertEqual(val_blk["state"], STATE_BLOCKED)
+        self.assertEqual(val_blk["reason_code"], REASON_RR_BELOW_MINIMUM)
+
+        # 3) REAL + FULL_AUTO + lot 0.02 (score 85 Grade A) -> TIDAK dikunci 110 pips, tetap ikut TP1_RR=2.0 (6.00 * 2.0 = 12.00 -> TP 3632.00)!
+        mt5_002, sm_002, _, eng_002 = self._new_env(equity_idc=50_000_000.0, bid=3644.00, ask=3644.20)
+        eng_002.cfg = cfg_110
+        z_002 = _make_supply_zone(score=85.0, grade="A", timeframe="H1", lo=3643.00, hi=3647.00)
+        z_002.zone_id = "ZONE_LOT_002_STD_TP"
+        snap_2, scan_2, dec_2 = _make_snapshot_and_scan(z_002, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        dec_2["plan"]["sl"] = 3650.00  # jarak SL = 6.00 USD -> TP 2R = 3632.00
+
+        val_002 = validate_trade_candidate(
+            z_002, mt5_002, sm_002, snapshot=snap_2, scan_result=scan_2, decision=dec_2,
+            news_override=self.news_ok, cfg=cfg_110,
+        )
+        self.assertEqual(val_002["state"], STATE_ENTRY_READY)
+        self.assertAlmostEqual(val_002["final_lot"], 0.02, places=2)
+        self.assertAlmostEqual(val_002["trade_plan"]["tp"], 3632.00, places=2)
+
+        # 4) Mode DRY_RUN (meskipun akun REAL & lot 0.01) -> TIDAK dikunci 110 pips (tetap ikut TP1_RR=2.0 -> TP 3632.00)!
+        mt5_dry, sm_dry, _, _ = self._new_env(equity_idc=30_000_000.0, bid=3644.00, ask=3644.20)
+        sm_dry.set_trading_mode("DRY_RUN", auto_trading=True)
+        z_dry = _make_supply_zone(score=74.0, grade="B", timeframe="H1", lo=3643.00, hi=3647.00)
+        z_dry.zone_id = "ZONE_DRY_001_STD_TP"
+        snap_d, scan_d, dec_d = _make_snapshot_and_scan(z_dry, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        dec_d["plan"]["sl"] = 3650.00
+        val_dry = validate_trade_candidate(
+            z_dry, mt5_dry, sm_dry, snapshot=snap_d, scan_result=scan_d, decision=dec_d,
+            trading_mode="DRY_RUN", news_override=self.news_ok, cfg=cfg_110,
+        )
+        self.assertEqual(val_dry["state"], STATE_ENTRY_READY)
+        self.assertAlmostEqual(val_dry["final_lot"], 0.01, places=2)
+        self.assertAlmostEqual(val_dry["trade_plan"]["tp"], 3632.00, places=2)
+
+    def test_grade_a_wait_confirmation_no_limit_002_003_lot_and_auto_cancel_pending(self):
+        """
+        Verifikasi aturan Zona Grade A / A+ / 80+ & 90+:
+        1. Pending limit 0.01 yang terlanjur aktif di zona Grade A otomatis dibatalkan (GRADE_A_WAIT_CONFIRM),
+           sedangkan pending limit di zona Grade B (mis. SNR G:B 77.7) dan order manual user tetap utuh.
+        2. Zona Grade A (SMC 76.5 maupun SNR 86.1) dan Strong HTF 94+ TIDAK dipasang Order Limit saat jauh
+           (termasuk saat HTF_CONFLICT + CONFLICT_MIDZONE_LIMIT_ENABLED=True).
+        3. Saat harga masuk zona Grade A TANPA konfirmasi M5 (meskipun AUTO_LOOSE_MODE=True), robot TIDAK
+           eksekusi buta — tetap WAIT_TRIGGER menunggu candle M5 close terkonfirmasi.
+        4. Begitu konfirmasi M5 close valid muncul:
+           - Grade A (75-89) dieksekusi Market 0.02 lot.
+           - Strong HTF 90+ (tervalidasi) dieksekusi Market 0.03 lot.
+        """
+        cfg_ga = dict(self.cfg)
+        cfg_ga.update({
+            "AUTO_LOOSE_MODE": True,
+            "LOOSE_LOT": 0.01,
+            "LOT_STANDARD": 0.01,
+            "LOT_MEDIUM": 0.02,
+            "LOT_STRONG": 0.03,
+            "HTF_STRONG_MAX_LOT": 0.03,
+            "MAX_LOT": 0.03,
+            "MIN_RR": 2.0,
+            "TP1_RR": 2.0,
+            "TP1_MODE": "FIXED_RR",
+            "FORCE_FIXED_TP1": True,
+            "CONFLICT_MIDZONE_LIMIT_ENABLED": True,
+            "GRADE_A_WAIT_CONFIRMATION_ENABLED": True,
+            "GRADE_A_MIN_SCORE": 75.0,
+            "AUTO_CANCEL_GRADE_A_PENDING_LIMIT": True,
+            "REAL_LOT_001_FIXED_TP_ENABLED": True,
+            "REAL_LOT_001_FIXED_TP_PIPS": 110.0,
+            "RISK_EARLY_PENDING_PERCENT": 2.5,
+            "RISK_ADAPTIVE_PERCENT": 2.5,
+            "MAX_RISK_PER_TRADE_PERCENT": 2.5,
+            "MAX_TOTAL_EXPOSURE_PERCENT": 10.0,
+            "MAX_ACTIVE_POSITIONS": 5,
+            "SNR_ZONE_MIN_STABLE_SECONDS": 0.0,
+        })
+
+        # 1) Auto-cancel pending limit 0.01 di R1 Grade A (86.1), pertahankan S1 SNR Grade B (77.7) & manual user!
+        mt5, sm, jrn, eng = self._new_env(equity_idc=30_000_000.0, bid=3572.00, ask=3572.20)
+        eng.cfg = cfg_ga
+        ord_mgr = PendingOrderManager(eng, sm, cfg=cfg_ga)
+
+        # Pasang 3 pending order: (a) R1 Grade A 86.1, (b) S1 SNR Grade B 77.7, (c) Manual user
+        r_ga = mt5.order_send({
+            "action": mt5.TRADE_ACTION_PENDING, "symbol": "XAUUSDc", "volume": 0.01,
+            "type": mt5.ORDER_TYPE_SELL_LIMIT, "price": 3602.07, "sl": 3608.52, "tp": 3589.17,
+            "magic": SCANNER_MAGIC_NUMBER, "comment": "SMC_EP_R1_GA",
+        })
+        sm.update_setup_state(
+            f"ADOPTED_ORD_{r_ga.order}", STATE_ORDER_PLACED,
+            zone_id="SNR_M30_RES_360732", direction="SELL", entry_mode="EARLY_PENDING",
+            order_ticket=r_ga.order, planned_entry=3602.07,
+        )
+        sm.state.setdefault("executed_setup_ids", []).append(f"ADOPTED_ORD_{r_ga.order}")
+
+        r_gb = mt5.order_send({
+            "action": mt5.TRADE_ACTION_PENDING, "symbol": "XAUUSDc", "volume": 0.01,
+            "type": mt5.ORDER_TYPE_BUY_LIMIT, "price": 3558.67, "sl": 3549.97, "tp": 3576.07,
+            "magic": SCANNER_MAGIC_NUMBER, "comment": "SMC_EP_S1_GB",
+        })
+        sm.update_setup_state(
+            f"ADOPTED_ORD_{r_gb.order}", STATE_ORDER_PLACED,
+            zone_id="SNR_H1_SUP_355117", direction="BUY", entry_mode="EARLY_PENDING",
+            order_ticket=r_gb.order, planned_entry=3558.67,
+        )
+
+        r_man = mt5.order_send({
+            "action": mt5.TRADE_ACTION_PENDING, "symbol": "XAUUSDc", "volume": 0.01,
+            "type": mt5.ORDER_TYPE_SELL_LIMIT, "price": 3602.50, "sl": 3610.00, "tp": 3585.00,
+            "magic": 0, "comment": "manual_user",
+        })
+
+        df_untouched = self.df_m5_rej.iloc[:-15].copy()
+        df_untouched.attrs["is_closed"] = True
+        snap_p = {
+            "symbol": "XAUUSDc", "bid": 3572.00, "ask": 3572.20, "mid": 3572.10,
+            "current_price": 3572.10, "spread": 0.20, "market_status": "OPEN",
+            "data_freshness": "FRESH", "tick_age": 0.5, "frames": {"M5": df_untouched},
+        }
+        scan_p = {
+            "symbol": "XAUUSDc", "current_price": 3572.10, "bid": 3572.00, "ask": 3572.20,
+            "mid": 3572.10, "spread": 0.20, "market_status": "OPEN", "data_freshness": "FRESH",
+            "htf_bias": "BEARISH", "h1_structure": "BEARISH", "m30_status": "CONFIRMED",
+            "htf_context": {"H4": "BEARISH", "H1": "BEARISH", "m30_status": "CONFIRMED", "has_conflict": False},
+            "active_zones": [], "radar_zones": [],
+        }
+        snr_p = {
+            "scan_result": {
+                "symbol": "XAUUSDc",
+                "supports": [{
+                    "zone_id": "SNR_H1_SUP_355117", "zone_type": "SUPPORT", "timeframe": "H1",
+                    "low": 3551.17, "high": 3561.17, "score": 77.73, "grade": "B",
+                    "lifecycle_status": "ACTIVE", "confirmed_time": "2026-11-26 04:00:00", "touch_count": 0,
+                }],
+                "resistances": [{
+                    "zone_id": "SNR_M30_RES_360732", "zone_type": "RESISTANCE", "timeframe": "M30",
+                    "low": 3600.32, "high": 3607.32, "score": 86.10, "grade": "A",
+                    "lifecycle_status": "ACTIVE", "confirmed_time": "2026-11-26 02:30:00", "touch_count": 1,
+                }],
+            },
+            "decision": {},
+        }
+
+        audit_ga = ord_mgr.audit_and_manage_pending_orders(
+            snapshot=snap_p, scan_result=scan_p, news_override=self.news_ok, symbol="XAUUSDc", snr_result=snr_p
+        )
+        self.assertEqual(len(audit_ga["cancelled"]), 1)
+        self.assertEqual(audit_ga["cancelled"][0]["ticket"], r_ga.order)
+        self.assertEqual(audit_ga["cancelled"][0]["reason_code"], "GRADE_A_WAIT_CONFIRM")
+        rem_tkts = [o.ticket for o in mt5.orders_get()]
+        self.assertNotIn(r_ga.order, rem_tkts)
+        self.assertIn(r_gb.order, rem_tkts)   # S1 SNR Grade B tetap aktif!
+        self.assertIn(r_man.order, rem_tkts)  # Manual user tetap utuh!
+
+        # 2) Zona SMC Grade A (76.5) saat harga belum menyentuh -> TIDAK pasang Limit (WAIT_ZONE_TOUCH)
+        z_smc_a = _make_supply_zone(score=76.5, grade="A", timeframe="H1", lo=3643.00, hi=3647.00)
+        z_smc_a.zone_id = "SMC_H1_GA_765"
+        mt5.bid, mt5.ask = 3630.00, 3630.20
+        snap_far, scan_far, dec_far = _make_snapshot_and_scan(
+            z_smc_a, df_untouched, bid=3630.00, ask=3630.20,
+            h4_bias="BEARISH", h1_bias="BULLISH", has_conflict=True,
+        )
+        val_wait_touch = validate_trade_candidate(
+            z_smc_a, mt5, sm, snapshot=snap_far, scan_result=scan_far, decision=dec_far,
+            news_override=self.news_ok, cfg=cfg_ga,
+        )
+        self.assertFalse(val_wait_touch["can_execute"])
+        self.assertEqual(val_wait_touch["entry_mode"], "ADAPTIVE_ENTRY")
+        self.assertEqual(val_wait_touch["reason_code"], "WAIT_ZONE_TOUCH")
+
+        # 3) Harga masuk ke dalam zona Grade A (3645.50 > 25% kedalaman zona), tapi candle M5 BELUM ada konfirmasi ->
+        #    meskipun AUTO_LOOSE_MODE=True, robot TIDAK boleh tembak buta (wajib WAIT_TRIGGER)!
+        df_touch_no_trig = df_untouched.copy()
+        ts_t = df_touch_no_trig.index[-1] + pd.Timedelta(minutes=5)
+        # Candle bullish biasa naik masuk zona tanpa wick rejection / CHoCH bearish
+        df_touch_no_trig.loc[ts_t] = {
+            "Open": 3641.0, "High": 3645.6, "Low": 3640.8, "Close": 3645.4, "Volume": 200,
+            "EMA20": 3638.0, "EMA50": 3636.0, "EMA200": 3634.0, "RSI14": 62.0, "ATR14": 2.0,
+        }
+        df_touch_no_trig.attrs["is_closed"] = True
+        mt5.bid, mt5.ask = 3645.50, 3645.70
+        snap_nt, scan_nt, dec_nt = _make_snapshot_and_scan(z_smc_a, df_touch_no_trig, bid=3645.50, ask=3645.70)
+        val_nt = validate_trade_candidate(
+            z_smc_a, mt5, sm, snapshot=snap_nt, scan_result=scan_nt, decision=dec_nt,
+            news_override=self.news_ok, cfg=cfg_ga,
+        )
+        self.assertFalse(val_nt["can_execute"])
+        self.assertEqual(val_nt["state"], "WAIT_TRIGGER")
+        self.assertEqual(val_nt["reason_code"], "WAIT_TRIGGER")
+
+        # 4) Begitu muncul konfirmasi M5 close valid (Rejection):
+        #    4a. SMC Grade A (76.5) -> ENTRY_READY & eksekusi Market 0.02 lot!
+        mt5.bid, mt5.ask = 3644.00, 3644.20
+        snap_c, scan_c, dec_c = _make_snapshot_and_scan(z_smc_a, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        dec_c["plan"]["sl"] = 3649.00
+        val_ga_ok = validate_trade_candidate(
+            z_smc_a, mt5, sm, snapshot=snap_c, scan_result=scan_c, decision=dec_c,
+            news_override=self.news_ok, cfg=cfg_ga,
+        )
+        self.assertEqual(val_ga_ok["state"], STATE_ENTRY_READY, msg=val_ga_ok.get("reason_text"))
+        self.assertAlmostEqual(val_ga_ok["final_lot"], 0.02, places=2)
+        ex_ga = eng.execute_validated_setup(val_ga_ok, trading_mode="FULL_AUTO")
+        self.assertTrue(ex_ga["executed"])
+        self.assertAlmostEqual(ex_ga["actual_lot"], 0.02, places=2)
+
+        #    4b. Strong H4+H1 (94.0) dengan konfirmasi M5 valid -> ENTRY_READY & eksekusi Market 0.03 lot!
+        z_str_94 = _make_supply_zone(score=94.0, grade="A+", timeframe="H4+H1", lo=3643.00, hi=3647.00)
+        z_str_94.zone_id = "SMC_H4H1_STR_940"
+        snap_s, scan_s, dec_s = _make_snapshot_and_scan(z_str_94, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        dec_s["plan"]["sl"] = 3649.00
+        val_94 = validate_trade_candidate(
+            z_str_94, mt5, sm, snapshot=snap_s, scan_result=scan_s, decision=dec_s,
+            news_override=self.news_ok, cfg=cfg_ga,
+        )
+        self.assertEqual(val_94["state"], STATE_ENTRY_READY, msg=val_94.get("reason_text"))
+        self.assertAlmostEqual(val_94["final_lot"], 0.03, places=2)
+
+    def test_two_stage_80plus_scout_limit_001_then_confirmed_scale_in_002_003(self):
+        """
+        Verifikasi penuh strategi 2-Tahap khusus zona skor >= 80.0 pada Auto Real:
+        1. Tahap 1: Pasang Pending Limit 0.01 lot lebih dulu (TP 110 pip / 11.00 USD).
+        2. Selama pending belum terjemput -> tidak ada duplikasi & Tahap 2 belum jalan.
+        3. Saat zona & pending 0.01 terjemput (jadi posisi aktif) tetapi M5 belum konfirmasi ->
+           Tahap 2 wajib WAIT_TRIGGER (tidak tembak buta meskipun AUTO_LOOSE_MODE=True).
+        4. Saat konfirmasi M5 close valid muncul -> Tahap 2 langsung tembak Market Order:
+           - Skor 80-89 -> tambah +0.02 lot (total 0.03 lot; tiket 0.02 ikut TP 2R & Partial +50 pip).
+           - Skor 90+ Strong HTF -> tambah +0.03 lot (total 0.04 lot).
+           - Jika risk budget sempit hanya cukup 0.01 lot -> Tahap 2 turun ke +0.01 lot & ikut TP 110 pip.
+        5. Setelah Tahap 2 tereksekusi -> terkunci permanen (maksimal 1x Scale-In per zona).
+        6. Zona skor < 80 (mis. 74.0) -> hanya Tahap 1 Limit 0.01 lot, TIDAK ada Scale-In Tahap 2.
+        """
+        cfg_2st = dict(self.cfg)
+        cfg_2st.update({
+            "AUTO_LOOSE_MODE": True,
+            "LOOSE_LOT": 0.01,
+            "LOT_STANDARD": 0.01,
+            "LOT_MEDIUM": 0.02,
+            "LOT_STRONG": 0.03,
+            "HTF_STRONG_MAX_LOT": 0.03,
+            "LTF_MAX_LOT": 0.02,
+            "EARLY_PENDING_MAX_LOT": 0.01,
+            "MAX_LOT": 0.04,
+            "MIN_RR": 2.0,
+            "TP1_RR": 2.0,
+            "TP1_MODE": "FIXED_RR",
+            "FORCE_FIXED_TP1": True,
+            "SCALE_IN_80PLUS_ENABLED": True,
+            "SCALE_IN_MIN_SCORE": 80.0,
+            "GRADE_A_WAIT_CONFIRMATION_ENABLED": False,
+            "AUTO_CANCEL_GRADE_A_PENDING_LIMIT": False,
+            "REAL_LOT_001_FIXED_TP_ENABLED": True,
+            "REAL_LOT_001_FIXED_TP_PIPS": 110.0,
+            "RISK_EARLY_PENDING_PERCENT": 2.5,
+            "RISK_ADAPTIVE_PERCENT": 2.5,
+            "MAX_RISK_PER_TRADE_PERCENT": 2.5,
+            "MAX_TOTAL_EXPOSURE_PERCENT": 5.0,
+            "MAX_ACTIVE_POSITIONS": 5,
+            "MAX_TRADES_PER_DAY": 10,
+            "SNR_ZONE_MIN_STABLE_SECONDS": 0.0,
+        })
+
+        # --- A. SKENARIO ZONA 86.0 (80-89): Limit 0.01 (TP 110 pip) -> Terjemput -> Confirm M5 -> +0.02 lot (Total 0.03) ---
+        mt5, sm, jrn, _ = self._new_env(equity_idc=30_000_000.0, bid=3630.00, ask=3630.20)
+        mon = AutoExecutionMonitor(mt5_api=mt5, state_mgr=sm, journal=jrn, symbol="XAUUSDc", cfg=cfg_2st, connect_fn=lambda: True)
+
+        df_untouched = self.df_m5_rej.iloc[:-15].copy()
+        df_untouched.attrs["is_closed"] = True
+
+        z86 = _make_supply_zone(score=86.0, grade="A", timeframe="H1", lo=3643.00, hi=3647.00)
+        z86.zone_id = "ZONE_H1_86_2STAGE"
+        z86.sl_recommended = 3649.00  # jarak SL dari limit 3644.00 = 5.00 USD -> RR 11/5 = 2.20 >= 2.0
+
+        # Siklus 1: Harga di 3630 -> Pasang Tahap 1 SELL LIMIT 0.01 lot @ 3644.00, TP = 3633.00 (110 pip)!
+        snap1, scan1, dec1 = _make_snapshot_and_scan(z86, df_untouched, bid=3630.00, ask=3630.20)
+        dec1["plan"]["sl"] = 3649.00
+        cyc1 = mon.run_once(snapshot=snap1, scan_result=scan1, decision=dec1, news_override=self.news_ok)
+        self.assertTrue(cyc1["execution_outcome"]["executed"])
+        self.assertEqual(len(mt5.orders), 1)
+        self.assertAlmostEqual(mt5.orders[0].volume_current, 0.01, places=2)
+        self.assertAlmostEqual(mt5.orders[0].price_open, 3644.00, places=2)
+        self.assertAlmostEqual(mt5.orders[0].tp, 3633.00, places=2)  # 110 pips!
+
+        # Siklus 2: Selama pending belum terjemput -> tidak ada order baru & Tahap 2 belum jalan
+        cyc2 = mon.run_once(snapshot=snap1, scan_result=scan1, decision=dec1, news_override=self.news_ok)
+        self.assertIsNone(cyc2["execution_outcome"])
+        self.assertEqual(len(mt5.orders), 1)
+        self.assertEqual(len(mt5.positions), 0)
+
+        # Siklus 3: Harga menjemput 3644.50 -> Simulasikan broker mengisi pending order Stage-1 menjadi posisi aktif 0.01 lot,
+        #           NAMUN candle M5 baru naik masuk zona tanpa konfirmasi rejection/CHoCH -> Tahap 2 wajib WAIT_TRIGGER!
+        ord_s1 = mt5.orders.pop(0)
+        mt5.positions.append(SimpleNamespace(
+            ticket=ord_s1.ticket, symbol="XAUUSDc", type=mt5.ORDER_TYPE_SELL, volume=0.01,
+            price_open=ord_s1.price_open, sl=ord_s1.sl, tp=ord_s1.tp, profit=-5000.0,
+            swap=0.0, commission=0.0, magic=SCANNER_MAGIC_NUMBER, comment=ord_s1.comment, time=int(time.time()),
+        ))
+        df_touch_no_conf = df_untouched.copy()
+        ts_nc = df_touch_no_conf.index[-1] + pd.Timedelta(minutes=5)
+        df_touch_no_conf.loc[ts_nc] = {
+            "Open": 3641.0, "High": 3645.2, "Low": 3640.8, "Close": 3645.0, "Volume": 180,
+            "EMA20": 3638.0, "EMA50": 3636.0, "EMA200": 3634.0, "RSI14": 62.0, "ATR14": 2.0,
+        }
+        df_touch_no_conf.attrs["is_closed"] = True
+        mt5.bid, mt5.ask = 3644.80, 3645.00
+        snap3, scan3, dec3 = _make_snapshot_and_scan(z86, df_touch_no_conf, bid=3644.80, ask=3645.00)
+        dec3["plan"]["sl"] = 3649.00
+        cyc3 = mon.run_once(snapshot=snap3, scan_result=scan3, decision=dec3, news_override=self.news_ok)
+        self.assertIsNone(cyc3["execution_outcome"])
+        self.assertTrue(cyc3["best_evaluation"]["is_scale_in"])
+        self.assertEqual(cyc3["best_evaluation"]["state"], "WAIT_TRIGGER")
+        self.assertEqual(len(mt5.positions), 1)  # Masih 1 posisi (0.01 lot)!
+
+        # Siklus 4: Candle M5 close mencetak VALID REJECTION di zona -> Tahap 2 langsung tembak SELL MARKET +0.02 lot (TP 2R = 3634.00)!
+        mt5.bid, mt5.ask = 3644.00, 3644.20
+        snap4, scan4, dec4 = _make_snapshot_and_scan(z86, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        dec4["plan"]["sl"] = 3649.00  # jarak SL = 5.00 USD -> TP 2R = 3634.00
+        cyc4 = mon.run_once(snapshot=snap4, scan_result=scan4, decision=dec4, news_override=self.news_ok)
+        self.assertTrue(cyc4["execution_outcome"]["executed"])
+        self.assertEqual(len(mt5.positions), 2)
+        self.assertEqual([round(p.volume, 2) for p in mt5.positions], [0.01, 0.02])  # Total 0.03 lot!
+        self.assertAlmostEqual(mt5.positions[0].tp, 3633.00, places=2)  # Stage-1 (0.01) TP = 110 pip
+        self.assertAlmostEqual(mt5.positions[1].tp, 3634.00, places=2)  # Stage-2 (0.02) TP = 2R
+
+        # Siklus 5: Siklus berikutnya -> Stage-2 sudah terkunci, TIDAK menembak order ke-3!
+        cyc5 = mon.run_once(snapshot=snap4, scan_result=scan4, decision=dec4, news_override=self.news_ok)
+        self.assertIsNone(cyc5["execution_outcome"])
+        self.assertEqual(len(mt5.positions), 2)
+
+        # --- B. SKENARIO ZONA 94.0 STRONG H4+H1: Stage-1 (0.01) + Stage-2 (+0.03) = Total 0.04 lot! ---
+        mt5_94, sm_94, jrn_94, _ = self._new_env(equity_idc=40_000_000.0, bid=3630.00, ask=3630.20)
+        mon_94 = AutoExecutionMonitor(mt5_api=mt5_94, state_mgr=sm_94, journal=jrn_94, symbol="XAUUSDc", cfg=cfg_2st, connect_fn=lambda: True)
+        z94 = _make_supply_zone(score=94.0, grade="A+", timeframe="H4+H1", lo=3643.00, hi=3647.00)
+        z94.zone_id = "ZONE_H4H1_94_2STAGE"
+        z94.sl_recommended = 3649.00
+
+        s94_1, sc94_1, d94_1 = _make_snapshot_and_scan(z94, df_untouched, bid=3630.00, ask=3630.20)
+        d94_1["plan"]["sl"] = 3649.00
+        mon_94.run_once(snapshot=s94_1, scan_result=sc94_1, decision=d94_1, news_override=self.news_ok)
+        self.assertEqual(len(mt5_94.orders), 1)
+        ord_94 = mt5_94.orders.pop(0)
+        mt5_94.positions.append(SimpleNamespace(
+            ticket=ord_94.ticket, symbol="XAUUSDc", type=mt5_94.ORDER_TYPE_SELL, volume=0.01,
+            price_open=ord_94.price_open, sl=ord_94.sl, tp=ord_94.tp, profit=0.0,
+            swap=0.0, commission=0.0, magic=SCANNER_MAGIC_NUMBER, comment=ord_94.comment, time=int(time.time()),
+        ))
+        mt5_94.bid, mt5_94.ask = 3644.00, 3644.20
+        s94_2, sc94_2, d94_2 = _make_snapshot_and_scan(z94, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        d94_2["plan"]["sl"] = 3649.00
+        cyc_94 = mon_94.run_once(snapshot=s94_2, scan_result=sc94_2, decision=d94_2, news_override=self.news_ok)
+        self.assertTrue(cyc_94["execution_outcome"]["executed"])
+        self.assertEqual([round(p.volume, 2) for p in mt5_94.positions], [0.01, 0.03])  # Total 0.04 lot!
+
+        # --- C. SKENARIO STEP-DOWN LOT TAHAP 2 -> Jika sisa budget hanya muat +0.01 lot, TP ikut 110 pip! ---
+        # Equity 6,500,000 IDC * 2.5% = 162,500 IDC total budget; Stage-1 (0.01 @ SL 5.0 USD) pakai 75,000 IDC ->
+        # sisa budget ~87,500 IDC (hanya cukup +0.01 lot ~79,050 IDC, tidak cukup +0.02 lot ~158,100 IDC)!
+        mt5_sd, sm_sd, jrn_sd, _ = self._new_env(equity_idc=6_500_000.0, bid=3630.00, ask=3630.20)
+        mon_sd = AutoExecutionMonitor(mt5_api=mt5_sd, state_mgr=sm_sd, journal=jrn_sd, symbol="XAUUSDc", cfg=cfg_2st, connect_fn=lambda: True)
+        z86_sd = _make_supply_zone(score=86.0, grade="A", timeframe="H1", lo=3643.00, hi=3647.00)
+        z86_sd.zone_id = "ZONE_H1_86_STEPDOWN"
+        z86_sd.sl_recommended = 3649.00
+        s_sd1, sc_sd1, d_sd1 = _make_snapshot_and_scan(z86_sd, df_untouched, bid=3630.00, ask=3630.20)
+        d_sd1["plan"]["sl"] = 3649.00
+        mon_sd.run_once(snapshot=s_sd1, scan_result=sc_sd1, decision=d_sd1, news_override=self.news_ok)
+        ord_sd = mt5_sd.orders.pop(0)
+        mt5_sd.positions.append(SimpleNamespace(
+            ticket=ord_sd.ticket, symbol="XAUUSDc", type=mt5_sd.ORDER_TYPE_SELL, volume=0.01,
+            price_open=ord_sd.price_open, sl=ord_sd.sl, tp=ord_sd.tp, profit=0.0,
+            swap=0.0, commission=0.0, magic=SCANNER_MAGIC_NUMBER, comment=ord_sd.comment, time=int(time.time()),
+        ))
+        mt5_sd.bid, mt5_sd.ask = 3644.00, 3644.20
+        s_sd2, sc_sd2, d_sd2 = _make_snapshot_and_scan(z86_sd, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        d_sd2["plan"]["sl"] = 3649.00
+        cyc_sd = mon_sd.run_once(snapshot=s_sd2, scan_result=sc_sd2, decision=d_sd2, news_override=self.news_ok)
+        self.assertTrue(cyc_sd["execution_outcome"]["executed"])
+        self.assertAlmostEqual(mt5_sd.positions[1].volume, 0.01, places=2)  # Disesuaikan jadi +0.01 lot!
+        self.assertAlmostEqual(mt5_sd.positions[1].tp, 3633.00, places=2)      # Tiket 0.01 ikut TP 110 pip!
+
+        # --- D. SKENARIO ZONA < 80 (skor 74.0): Hanya Tahap 1 Limit 0.01 lot, TIDAK ada Scale-In Tahap 2! ---
+        mt5_74, sm_74, jrn_74, _ = self._new_env(equity_idc=30_000_000.0, bid=3630.00, ask=3630.20)
+        mon_74 = AutoExecutionMonitor(mt5_api=mt5_74, state_mgr=sm_74, journal=jrn_74, symbol="XAUUSDc", cfg=cfg_2st, connect_fn=lambda: True)
+        z74 = _make_supply_zone(score=74.0, grade="B", timeframe="H1", lo=3643.00, hi=3647.00)
+        z74.zone_id = "ZONE_H1_74_NO_SCALEIN"
+        z74.sl_recommended = 3649.00
+        s74_1, sc74_1, d74_1 = _make_snapshot_and_scan(z74, df_untouched, bid=3630.00, ask=3630.20)
+        d74_1["plan"]["sl"] = 3649.00
+        mon_74.run_once(snapshot=s74_1, scan_result=sc74_1, decision=d74_1, news_override=self.news_ok)
+        ord_74 = mt5_74.orders.pop(0)
+        mt5_74.positions.append(SimpleNamespace(
+            ticket=ord_74.ticket, symbol="XAUUSDc", type=mt5_74.ORDER_TYPE_SELL, volume=0.01,
+            price_open=ord_74.price_open, sl=ord_74.sl, tp=ord_74.tp, profit=0.0,
+            swap=0.0, commission=0.0, magic=SCANNER_MAGIC_NUMBER, comment=ord_74.comment, time=int(time.time()),
+        ))
+        mt5_74.bid, mt5_74.ask = 3644.00, 3644.20
+        s74_2, sc74_2, d74_2 = _make_snapshot_and_scan(z74, self.df_m5_rej, bid=3644.00, ask=3644.20)
+        d74_2["plan"]["sl"] = 3649.00
+        cyc_74 = mon_74.run_once(snapshot=s74_2, scan_result=sc74_2, decision=d74_2, news_override=self.news_ok)
+        self.assertIsNone(cyc_74["execution_outcome"])
+        self.assertEqual(len(mt5_74.positions), 1)  # Tetap 1 posisi (0.01 lot) saja!
 
 
 if __name__ == "__main__":

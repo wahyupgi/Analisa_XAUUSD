@@ -488,6 +488,134 @@ MIN_RR = _env_cfg("MIN_RR", 1.0, float)
 TP1_RR = _env_cfg("TP1_RR", 1.0, float)
 TP1_MODE = _env_cfg("TP1_MODE", "FIXED_RR", str)  # "FIXED_RR" (1:1 / user-defined) atau "STRUCTURAL"
 FORCE_FIXED_TP1 = _env_cfg("FORCE_FIXED_TP1", True, bool)  # True = paksa TP1 = Entry +/- (TP1_RR * jarak SL struktural)
+REAL_LOT_001_FIXED_TP_ENABLED = _env_cfg("REAL_LOT_001_FIXED_TP_ENABLED", True, bool)
+REAL_LOT_001_FIXED_TP_PIPS = _env_cfg("REAL_LOT_001_FIXED_TP_PIPS", 110.0, float)
+GRADE_A_WAIT_CONFIRMATION_ENABLED = _env_cfg("GRADE_A_WAIT_CONFIRMATION_ENABLED", False, bool)
+GRADE_A_MIN_SCORE = _env_cfg("GRADE_A_MIN_SCORE", 75.0, float)
+AUTO_CANCEL_GRADE_A_PENDING_LIMIT = _env_cfg("AUTO_CANCEL_GRADE_A_PENDING_LIMIT", False, bool)
+SCALE_IN_80PLUS_ENABLED = _env_cfg("SCALE_IN_80PLUS_ENABLED", True, bool)
+SCALE_IN_MIN_SCORE = _env_cfg("SCALE_IN_MIN_SCORE", 80.0, float)
+
+
+def is_scale_in_80plus_zone(
+    zone=None,
+    score: float = None,
+    cfg: dict = None,
+) -> bool:
+    """
+    Cek apakah zona memenuhi syarat 2-Tahap (Scout Pending Limit 0.01 lot -> setelah terjemput,
+    tunggu konfirmasi M5 valid untuk Scale-In Market Order +0.02 / +0.03 lot maksimal 1x per zona).
+    """
+    c = cfg if isinstance(cfg, dict) else {}
+    if not bool(c.get("SCALE_IN_80PLUS_ENABLED", _env_cfg("SCALE_IN_80PLUS_ENABLED", True, bool))):
+        return False
+    min_sc = float(c.get("SCALE_IN_MIN_SCORE", _env_cfg("SCALE_IN_MIN_SCORE", 80.0, float)))
+    if score is not None:
+        sc_raw = score
+    elif isinstance(zone, dict):
+        sc_raw = zone.get("score")
+    else:
+        sc_raw = getattr(zone, "score", None)
+    try:
+        sc_val = float(sc_raw) if sc_raw is not None and sc_raw != "" else None
+    except (TypeError, ValueError):
+        sc_val = None
+    return bool(sc_val is not None and sc_val >= min_sc - 1e-9)
+
+
+def is_grade_a_wait_confirm_zone(
+    zone=None,
+    grade: str = None,
+    score: float = None,
+    cfg: dict = None,
+) -> bool:
+    """
+    Cek apakah zona termasuk kategori Grade A / A+ (atau score >= MEDIUM_ZONE_SCORE 80.0 /
+    SMC Grade A >= GRADE_A_MIN_SCORE 75.0) yang TIDAK dipasang Order Limit 0.01 lot,
+    melainkan menunggu harga menjemput zona + konfirmasi M5 close untuk eksekusi 0.02 / 0.03 lot.
+    Zona yang secara eksplisit berlabel Grade B/C/D dengan skor < 80 (mis. SNR Grade B 70-79.99)
+    tetap mengembalikan False sehingga tetap menggunakan jalur Order Limit 0.01 lot.
+    """
+    def _g(obj, key, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    c = cfg if isinstance(cfg, dict) else {}
+    if not bool(c.get("GRADE_A_WAIT_CONFIRMATION_ENABLED", _env_cfg("GRADE_A_WAIT_CONFIRMATION_ENABLED", True, bool))):
+        return False
+    med_score = float(c.get("MEDIUM_ZONE_SCORE", _env_cfg("MEDIUM_ZONE_SCORE", 80.0, float)))
+    min_a = float(c.get("GRADE_A_MIN_SCORE", _env_cfg("GRADE_A_MIN_SCORE", 75.0, float)))
+    grd = str(grade if grade is not None else (_g(zone, "grade", "") or "")).strip().upper()
+    sc_raw = score if score is not None else _g(zone, "score", None)
+    try:
+        sc_val = float(sc_raw) if sc_raw is not None and sc_raw != "" else None
+    except (TypeError, ValueError):
+        sc_val = None
+
+    if sc_val is not None and sc_val >= med_score - 1e-9:
+        return True
+    if grd and grd not in ("N/A", "NONE", "UNKNOWN", "-"):
+        return bool(grd.startswith("A") and (sc_val is None or sc_val >= min_a - 1e-9))
+    return bool(sc_val is not None and sc_val >= min_a - 1e-9)
+
+
+def resolve_real_lot_001_fixed_tp_distance(cfg: dict = None) -> float:
+    """
+    Hitung jarak TP tetap dalam USD/oz untuk aturan lot 0.01 pada akun REAL (FULL_AUTO).
+    Konvensi XAUUSD sistem: 1 pip = PIP_SIZE_PRICE (bila > 0) atau default 0.10 USD/oz
+    (sehingga 110 pips = 11.00 USD).
+    """
+    c = cfg if isinstance(cfg, dict) else {}
+    enabled = bool(c.get("REAL_LOT_001_FIXED_TP_ENABLED", _env_cfg("REAL_LOT_001_FIXED_TP_ENABLED", True, bool)))
+    if not enabled:
+        return 0.0
+    pips = float(c.get("REAL_LOT_001_FIXED_TP_PIPS", _env_cfg("REAL_LOT_001_FIXED_TP_PIPS", 110.0, float)) or 0.0)
+    if pips <= 0.0:
+        return 0.0
+    pip_sz = float(PIP_SIZE_PRICE) if (PIP_SIZE_PRICE is not None and float(PIP_SIZE_PRICE) > 0.0) else 0.10
+    return round(pips * pip_sz, 4)
+
+
+def should_use_real_lot_001_fixed_tp(
+    account_mode: str,
+    trading_mode: str,
+    lot: float,
+    cfg: dict = None,
+) -> bool:
+    """
+    Cek apakah aturan TP tetap (default 110 pips / 11.00 USD) berlaku:
+    - Hanya saat akun REAL (`account_mode == 'REAL'`) dalam mode `FULL_AUTO` (`auto real`).
+    - Hanya saat `final_lot` bernilai 0.01 lot.
+    """
+    if str(account_mode or "").strip().upper() != "REAL":
+        return False
+    if str(trading_mode or "").strip().upper() != "FULL_AUTO":
+        return False
+    try:
+        lot_f = round(float(lot or 0.0), 2)
+    except (TypeError, ValueError):
+        return False
+    if abs(lot_f - 0.01) > 1e-6:
+        return False
+    return resolve_real_lot_001_fixed_tp_distance(cfg) > 0.0
+
+
+def compute_fixed_tp_price(
+    entry_price: float,
+    direction: str,
+    tp_distance_usd: float,
+    digits: int = 2,
+) -> float:
+    """Hitung harga TP dari Entry +/- jarak tetap USD/oz sesuai arah BUY/SELL."""
+    ep = float(entry_price or 0.0)
+    dist = float(tp_distance_usd or 0.0)
+    if ep <= 0.0 or dist <= 0.0:
+        return 0.0
+    is_buy = str(direction or "").strip().upper() == "BUY"
+    return round((ep + dist) if is_buy else (ep - dist), digits)
 AUTO_SL_JARAK_MAKS = _env_cfg("AUTO_SL_JARAK_MAKS", SL_JARAK_MAKS, float)
 CONFLICT_MIDZONE_LIMIT_ENABLED = _env_cfg("CONFLICT_MIDZONE_LIMIT_ENABLED", True, bool)
 CONFLICT_MIDZONE_MIN_SCORE = _env_cfg("CONFLICT_MIDZONE_MIN_SCORE", 70.0, float)
@@ -642,6 +770,13 @@ def _build_auto_trading_config() -> dict:
         "TP1_RR": _env_cfg("TP1_RR", 1.0, float),
         "TP1_MODE": _env_cfg("TP1_MODE", "FIXED_RR", str),
         "FORCE_FIXED_TP1": _env_cfg("FORCE_FIXED_TP1", True, bool),
+        "REAL_LOT_001_FIXED_TP_ENABLED": _env_cfg("REAL_LOT_001_FIXED_TP_ENABLED", True, bool),
+        "REAL_LOT_001_FIXED_TP_PIPS": _env_cfg("REAL_LOT_001_FIXED_TP_PIPS", 110.0, float),
+        "GRADE_A_WAIT_CONFIRMATION_ENABLED": _env_cfg("GRADE_A_WAIT_CONFIRMATION_ENABLED", False, bool),
+        "GRADE_A_MIN_SCORE": _env_cfg("GRADE_A_MIN_SCORE", 75.0, float),
+        "AUTO_CANCEL_GRADE_A_PENDING_LIMIT": _env_cfg("AUTO_CANCEL_GRADE_A_PENDING_LIMIT", False, bool),
+        "SCALE_IN_80PLUS_ENABLED": _env_cfg("SCALE_IN_80PLUS_ENABLED", True, bool),
+        "SCALE_IN_MIN_SCORE": _env_cfg("SCALE_IN_MIN_SCORE", 80.0, float),
         "MIN_ENTRY_TRIGGERS": _env_cfg("MIN_ENTRY_TRIGGERS", 1, int),
         "REQUIRE_ALL_TRIGGERS": _env_cfg("REQUIRE_ALL_TRIGGERS", False, bool),
         "ALLOW_NEUTRAL_H1": _env_cfg("ALLOW_NEUTRAL_H1", True, bool),

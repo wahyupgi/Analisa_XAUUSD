@@ -482,6 +482,7 @@ def compute_effective_risk_budget(
     portfolio_risk: Dict[str, Any],
     cfg: Optional[Dict[str, Any]] = None,
     is_pending_order: bool = False,
+    allow_scale_in_companion: bool = False,
 ) -> Dict[str, Any]:
     """
     Hitung risk budget efektif berdasarkan batas TERENDAH dari:
@@ -531,13 +532,17 @@ def compute_effective_risk_budget(
             "mode_risk_pct": 0.0,
         }
 
-    if portfolio_risk.get("max_positions_reached"):
+    max_pos_cfg = int(conf.get("MAX_ACTIVE_POSITIONS", 1))
+    sc_pos_cnt = int(portfolio_risk.get("scanner_positions_count") or 0)
+    eff_max_pos = (max(2, max_pos_cfg) if (allow_scale_in_companion and max_pos_cfg > 0) else max_pos_cfg)
+    pos_cap_reached = (eff_max_pos > 0) and (sc_pos_cnt >= eff_max_pos)
+    if pos_cap_reached:
         return {
             "allowed": False,
             "reason_code": REASON_MAX_ACTIVE_POSITIONS,
             "reason_text": (
-                f"Posisi scanner aktif sudah mencapai batas ({portfolio_risk.get('scanner_positions_count', 0)} "
-                f"/ {conf.get('MAX_ACTIVE_POSITIONS', 1)})"
+                f"Posisi scanner aktif sudah mencapai batas ({sc_pos_cnt} "
+                f"/ {eff_max_pos})"
             ),
             "risk_budget_nominal": 0.0,
             "effective_risk_pct": 0.0,

@@ -14,12 +14,13 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from modules.config import SYMBOL, get_auto_trading_config
+from modules.config import SYMBOL, get_auto_trading_config, is_grade_a_wait_confirm_zone
 from modules.execution_engine import MT5ExecutionEngine, is_scanner_owned_item
 from modules.execution_state import (
     ExecutionStateManager,
     REASON_DAILY_LOSS_LIMIT,
     REASON_DUPLICATE_SETUP,
+    REASON_GRADE_A_WAIT_CONFIRM,
     REASON_HTF_CONFLICT,
     REASON_NEWS_BLACKOUT,
     REASON_ZONE_EXPIRED,
@@ -33,6 +34,7 @@ from modules.execution_state import (
     STATE_ORDER_PLACED,
     STATE_POSITION_ACTIVE,
     STATE_RADAR,
+    make_setup_id,
 )
 from modules.mt5_conn import MT5_IPC_LOCK
 from modules.risk_manager import evaluate_portfolio_risk_and_daily_limits
@@ -284,6 +286,21 @@ class PendingOrderManager:
                         cancel_code = z_code
                         cancel_reason = z_msg
 
+                # 4b. Jika zona berstatus Grade A / A+ / 80+ / 90+ dan kebijakan tunggu konfirmasi M5 aktif ->
+                #     batalkan pending limit 0.01 lot agar setup bebas dieksekusi 0.02 / 0.03 lot saat harga menjemput + konfirmasi!
+                if (
+                    not cancel_code
+                    and z_live is not None
+                    and bool(conf.get("AUTO_CANCEL_GRADE_A_PENDING_LIMIT", True))
+                    and is_grade_a_wait_confirm_zone(z_live, cfg=conf)
+                ):
+                    cancel_code = REASON_GRADE_A_WAIT_CONFIRM
+                    cancel_reason = (
+                        f"Zona {zid or z_live.get('zone_id')} berstatus Grade {z_live.get('grade', 'A')} "
+                        f"({float(z_live.get('score') or 0.0):.1f}) — pending limit dibatalkan agar menunggu "
+                        f"harga menjemput + konfirmasi M5 (0.02/0.03 lot)"
+                    )
+
             # 5. Cek Perubahan Struktur HTF (EARLY_PENDING standar membutuhkan H4 & H1 mendukung;
             #    kecuali order Mid-Zone 50% Limit yang memang dipasang khusus untuk kondisi konflik/sideways)
             is_midzone_ord = (str(rec.get("sub_mode") or "") == "CONFLICT_MIDZONE_LIMIT")
@@ -319,7 +336,7 @@ class PendingOrderManager:
                         self.state_mgr.record_trade_opened(sid, tkt)
                     filled_during_audit.append({"ticket": tkt, "setup_id": sid, "reason": c_res.get("reason")})
                 elif c_res.get("cancelled"):
-                    if cancel_code == REASON_ZONE_TOO_FAR:
+                    if cancel_code in (REASON_ZONE_TOO_FAR, REASON_GRADE_A_WAIT_CONFIRM):
                         new_st = STATE_RADAR
                     elif cancel_code == REASON_NEWS_BLACKOUT:
                         new_st = STATE_BLOCKED
@@ -329,10 +346,14 @@ class PendingOrderManager:
                         new_st = STATE_INVALIDATED
                     if sid:
                         with self.state_mgr.lock:
-                            if cancel_code in (REASON_ZONE_TOO_FAR, REASON_NEWS_BLACKOUT):
+                            if cancel_code in (REASON_ZONE_TOO_FAR, REASON_NEWS_BLACKOUT, REASON_GRADE_A_WAIT_CONFIRM):
                                 exec_ids = self.state_mgr.state.get("executed_setup_ids") or []
                                 if sid in exec_ids:
                                     exec_ids.remove(sid)
+                                if zid and cancel_code == REASON_GRADE_A_WAIT_CONFIRM:
+                                    canon_sid = make_setup_id(zid, direction, symbol=symbol)
+                                    if canon_sid in exec_ids:
+                                        exec_ids.remove(canon_sid)
                             self.state_mgr.update_setup_state(
                                 sid,
                                 new_st,

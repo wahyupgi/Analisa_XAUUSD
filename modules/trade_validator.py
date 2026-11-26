@@ -21,7 +21,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from modules import analisis_pasar, us_news_radar
 from modules.adaptive_entry_engine import evaluate_entry_paths_for_zone, _ensure_zone_obj
-from modules.config import SYMBOL, get_auto_trading_config
+from modules.config import (
+    SYMBOL,
+    compute_fixed_tp_price,
+    get_auto_trading_config,
+    is_scale_in_80plus_zone,
+    resolve_real_lot_001_fixed_tp_distance,
+    should_use_real_lot_001_fixed_tp,
+)
 from modules.dynamic_lot_manager import (
     classify_zone_quality_label,
     resolve_dynamic_lot_for_trade,
@@ -37,6 +44,7 @@ from modules.execution_state import (
     REASON_NEWS_BLACKOUT,
     REASON_OK,
     REASON_PRICE_LEFT_ENTRY_RANGE,
+    REASON_RR_BELOW_MINIMUM,
     REASON_SPREAD_TOO_HIGH,
     REASON_STALE_MARKET_DATA,
     REASON_STALE_NEWS_DATA,
@@ -589,6 +597,22 @@ def validate_trade_candidate(
         mkt_status = "CLOSED"
 
     # 2. Evaluasi Analisis Entry Path & Levels (Independen dari Trading Mode!)
+    #    Jika zona skor 80+ / 90+ sudah memiliki posisi Stage-1 (Scout Limit 0.01 lot) aktif dan belum pernah Scale-In,
+    #    alihkan evaluasi ke Stage-2 Confirmed Market Entry (wajib konfirmasi M5 close, maksimal 1x per zona).
+    is_stage2_scale_in = False
+    stage1_active_rec: Optional[Dict[str, Any]] = None
+    if is_scale_in_80plus_zone(zone, cfg=conf):
+        s1_cand, s2_blocked = state_mgr.find_stage1_for_scale_in(
+            zone.zone_id,
+            direction,
+            symbol=symbol,
+            max_scout_lot=float(conf.get("EARLY_PENDING_MAX_LOT", 0.01)),
+        )
+        if s1_cand is not None and not s2_blocked:
+            is_stage2_scale_in = True
+            stage1_active_rec = s1_cand
+            setup_id = make_setup_id(f"{zone.zone_id}::SCALE_IN", direction, symbol=symbol)
+
     snr_ctx = dec.get("snr_context") or sc.get("snr_context")
     opposing_zones = [
         z for z in (sc.get("active_zones") or []) + (sc.get("radar_zones") or [])
@@ -613,10 +637,11 @@ def validate_trade_candidate(
         existing_plan=existing_plan,
         preferred_mode=eff_entry_pref,
         cfg=conf,
+        force_market_confirmation=is_stage2_scale_in,
     )
 
     chosen_entry_mode = str(path_eval["entry_mode"])
-    chosen_sub_mode = str(path_eval.get("sub_mode") or "")
+    chosen_sub_mode = "SCALE_IN_STAGE2" if is_stage2_scale_in else str(path_eval.get("sub_mode") or "")
     is_conflict_midzone = (chosen_sub_mode == "CONFLICT_MIDZONE_LIMIT")
     order_kind = str(path_eval["order_kind"])
     is_market_order = (order_kind == "MARKET")
@@ -776,6 +801,8 @@ def validate_trade_candidate(
             "account": acc_snap,
             "live_price": live_price,
             "spread": spread,
+            "is_scale_in": is_stage2_scale_in,
+            "stage1_ticket": int((stage1_active_rec or {}).get("position_ticket") or (stage1_active_rec or {}).get("order_ticket") or 0),
         }
         if isinstance(extra_fields, dict):
             res_d.update(extra_fields)
@@ -899,7 +926,10 @@ def validate_trade_candidate(
     # Cek Duplicate Setup / Stopped-out Setup
     if conf.get("PREVENT_DUPLICATE_ORDER", True):
         is_dup, dup_code = state_mgr.is_setup_duplicate_or_locked(
-            setup_id, zone_id=zone.zone_id, zone_bos_time=str(zone.bos_candle_time or "")
+            setup_id,
+            zone_id=zone.zone_id,
+            zone_bos_time=str(zone.bos_candle_time or ""),
+            allow_scale_in_stage2=is_stage2_scale_in,
         )
         if is_dup:
             return _build_result(
@@ -915,6 +945,11 @@ def validate_trade_candidate(
     if not path_eval.get("trigger_passed"):
         p_code = str(path_eval.get("reason_code") or REASON_WAIT_TRIGGER)
         p_msg = str(path_eval.get("reason_text") or "")
+        if is_stage2_scale_in and p_code != REASON_PRICE_LEFT_ENTRY_RANGE:
+            p_msg = (
+                f"Stage-1 (0.01 lot) pada zona {zone.zone_id} ({zone.score:.1f}) sudah terjemput — "
+                f"menunggu konfirmasi M5 valid untuk tembak Stage-2"
+            )
         if p_code == REASON_PRICE_LEFT_ENTRY_RANGE:
             return _build_result(STATE_BLOCKED, REASON_PRICE_LEFT_ENTRY_RANGE, p_msg, val_chk="BLOCKED")
         if touch["touched"]:
@@ -936,6 +971,14 @@ def validate_trade_candidate(
     # =========================================================================
     # LAYER 6 & 7: SL/TP, ACTUAL RR, RISK BUDGET, DYNAMIC LOT & BROKER EXECUTION CHECK
     # =========================================================================
+    acc_mode_u = str(acc_snap.get("account_mode") or "").strip().upper()
+    fixed_tp_dist_001 = resolve_real_lot_001_fixed_tp_distance(conf)
+    may_override_real_001_tp = (
+        acc_mode_u == "REAL"
+        and eff_trading_mode == "FULL_AUTO"
+        and fixed_tp_dist_001 > 0.0
+    )
+
     sl_tp_res = validate_sl_tp_and_rr(
         direction=direction,
         entry_price=planned_entry,
@@ -950,7 +993,13 @@ def validate_trade_candidate(
         symbol=symbol,
         cfg=conf,
     )
-    if not sl_tp_res.get("valid"):
+    can_defer_rr_for_lot001 = (
+        may_override_real_001_tp
+        and sl_tp_res.get("reason_code") == REASON_RR_BELOW_MINIMUM
+        and float(sl_tp_res.get("entry") or 0.0) > 0.0
+        and float(sl_tp_res.get("sl") or 0.0) > 0.0
+    )
+    if (not sl_tp_res.get("valid")) and (not can_defer_rr_for_lot001):
         return _build_result(
             STATE_BLOCKED,
             str(sl_tp_res.get("reason_code")),
@@ -960,7 +1009,7 @@ def validate_trade_candidate(
             act_rr=float(sl_tp_res.get("actual_rr") or planned_rr),
         )
 
-    actual_rr = float(sl_tp_res["actual_rr"])
+    actual_rr = float(sl_tp_res.get("actual_rr") or planned_rr)
     trade_plan.update({
         "entry": sl_tp_res["entry"],
         "sl": sl_tp_res["sl"],
@@ -994,6 +1043,7 @@ def validate_trade_candidate(
         portfolio_risk=portfolio_risk,
         cfg=conf,
         is_pending_order=(not is_market_order),
+        allow_scale_in_companion=is_stage2_scale_in,
     )
 
     lot_res = resolve_dynamic_lot_for_trade(
@@ -1022,6 +1072,64 @@ def validate_trade_candidate(
             f_lot=0.0,
             l_rsn=str(lot_res.get("lot_reason") or ""),
             act_rr=actual_rr,
+            z_qual=zone_quality_lbl,
+            extra_fields={
+                "portfolio_risk": portfolio_risk,
+                "risk_budget": risk_budget_info,
+                "strong_validation": strong_val,
+                "supporting_confluence": supporting_confluence,
+            },
+        )
+
+    # Khusus akun REAL dalam mode FULL_AUTO (`auto real`) dengan final_lot == 0.01:
+    # Kunci TP pada jarak tetap (default 110 pips = 11.00 USD) dan validasi ulang terhadap MIN_RR / LOOSE_RR aktif!
+    final_lot_val = float(lot_res["final_lot"])
+    if should_use_real_lot_001_fixed_tp(acc_mode_u, eff_trading_mode, final_lot_val, cfg=conf):
+        tp_digits = int(sl_tp_res.get("digits") or 2)
+        fixed_tp1 = compute_fixed_tp_price(
+            sl_tp_res["entry"], direction, fixed_tp_dist_001, digits=tp_digits
+        )
+        adj_tp2 = (
+            tp2_px
+            if ((direction == "BUY" and tp2_px > fixed_tp1) or (direction == "SELL" and 0.0 < tp2_px < fixed_tp1))
+            else 0.0
+        )
+        sl_tp_res = validate_sl_tp_and_rr(
+            direction=direction,
+            entry_price=sl_tp_res["entry"],
+            sl_price=sl_tp_res["sl"],
+            tp1_price=fixed_tp1,
+            tp2_price=adj_tp2,
+            structural_invalidation=inval_px,
+            sym_info=acc_snap.get("symbol_info"),
+            bid=bid if bid > 0 else None,
+            ask=ask if ask > 0 else None,
+            is_market_order=is_market_order,
+            symbol=symbol,
+            cfg=conf,
+        )
+        actual_rr = float(sl_tp_res.get("actual_rr") or 0.0)
+        trade_plan.update({
+            "entry": sl_tp_res.get("entry", trade_plan["entry"]),
+            "sl": sl_tp_res.get("sl", trade_plan["sl"]),
+            "tp": sl_tp_res.get("tp", fixed_tp1),
+            "tp1": sl_tp_res.get("tp1", fixed_tp1),
+            "tp2": sl_tp_res.get("tp2", adj_tp2),
+            "planned_rr": actual_rr,
+            "actual_rr": actual_rr,
+        })
+
+    if not sl_tp_res.get("valid"):
+        return _build_result(
+            STATE_BLOCKED,
+            str(sl_tp_res.get("reason_code")),
+            str(sl_tp_res.get("reason_text")),
+            risk_chk="FAILED",
+            val_chk="BLOCKED",
+            t_lot=float(lot_res["target_lot"]),
+            f_lot=final_lot_val,
+            l_rsn=str(lot_res["lot_reason"]),
+            act_rr=float(sl_tp_res.get("actual_rr") or actual_rr),
             z_qual=zone_quality_lbl,
             extra_fields={
                 "portfolio_risk": portfolio_risk,

@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from modules.analisis_teknikal import deteksi_cisd
-from modules.config import SYMBOL, get_auto_trading_config
+from modules.config import SYMBOL, get_auto_trading_config, is_grade_a_wait_confirm_zone
 from modules.execution_state import (
     REASON_OK,
     REASON_PRICE_LEFT_ENTRY_RANGE,
@@ -770,6 +770,7 @@ def evaluate_entry_paths_for_zone(
     existing_plan: Optional[Dict[str, Any]] = None,
     preferred_mode: str = "ADAPTIVE",
     cfg: Optional[Dict[str, Any]] = None,
+    force_market_confirmation: bool = False,
 ) -> Dict[str, Any]:
     """
     Evaluasi terpadu 3 jalur entry yang saling melengkapi & eksklusif pada satu zona:
@@ -799,11 +800,14 @@ def evaluate_entry_paths_for_zone(
     adaptive_en = bool(conf.get("ADAPTIVE_ENTRY_ENABLED", True))
     confirmed_en = bool(conf.get("CONFIRMED_ENTRY_ENABLED", True))
     early_en = bool(conf.get("EARLY_PENDING_ENABLED", True))
+    wait_confirm_only = bool(force_market_confirmation or is_grade_a_wait_confirm_zone(zone, cfg=conf))
 
     # Kasus 0: Market sedang Konflik / Sideways (HTF_CONFLICT) & mode Mid-Zone 50% Limit diaktifkan ->
     # Pasang BUY/SELL LIMIT presisi tepat di tengah-tengah zona (50%) dengan SL & TP tipis di luar ujung zona!
+    # (Zona Grade A / A+ / 80+ / 90+ dikecualikan agar menunggu harga menjemput + konfirmasi M5 untuk lot 0.02/0.03)
     if (
         bool(conf.get("CONFLICT_MIDZONE_LIMIT_ENABLED", False))
+        and (not wait_confirm_only)
         and early_en
         and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY")
         and is_conflict_or_sideways_market(
@@ -904,6 +908,7 @@ def evaluate_entry_paths_for_zone(
     loose_mode_active = bool(conf.get("AUTO_LOOSE_MODE", False))
     defer_loose_edge_to_limit = (
         loose_mode_active
+        and (not wait_confirm_only)
         and touch["touched"]
         and (not touch["left_entry_range"])
         and early_en
@@ -959,10 +964,11 @@ def evaluate_entry_paths_for_zone(
                 trig_ok = True
                 chosen_mode = "CONFIRMED_ENTRY"
             else:
-                # LOOSE MODE: hanya eksekusi market tanpa trigger M5 bila harga sudah masuk minimal sedalam target limit zona (25% utk Grade B/A, 50% utk HIGH_RISK/Grade < B)
+                # LOOSE MODE: hanya eksekusi market tanpa trigger M5 bila harga sudah masuk minimal sedalam target limit zona
+                # KECUALI pada zona Grade A / A+ / 80+ / 90+ (`wait_confirm_only`), WAJIB menunggu konfirmasi M5 close!
                 min_in_px = zone_limit_px
                 deep_enough = (touch["exec_price"] <= min_in_px + 1e-6) if demand else (touch["exec_price"] >= min_in_px - 1e-6)
-                trig_ok = bool(loose_mode_active and deep_enough)
+                trig_ok = bool(loose_mode_active and deep_enough and (not wait_confirm_only))
                 chosen_mode = "ADAPTIVE_ENTRY" if adaptive_en else "CONFIRMED_ENTRY"
 
         return {
@@ -980,14 +986,19 @@ def evaluate_entry_paths_for_zone(
                 else (
                     f"LOOSE MODE: Harga masuk area tengah zona ({touch['exec_price']:.2f})"
                     if trig_ok
-                    else f"Zona tersentuh; menunggu minimal 1 trigger {chosen_mode} valid pada M5 close"
+                    else (
+                        f"Zona Grade {zone.grade or 'A'} ({zone.score:.1f}) tersentuh — menunggu minimal 1 konfirmasi M5 close untuk eksekusi {chosen_mode}"
+                        if wait_confirm_only
+                        else f"Zona tersentuh; menunggu minimal 1 trigger {chosen_mode} valid pada M5 close"
+                    )
                 )
             ),
             "levels": levels,
         }
 
     # Kasus 2: Harga belum menyentuh area tengah zona -> Evaluasi EARLY_PENDING (BUY LIMIT / SELL LIMIT di area tengah zona)
-    if early_en and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY"):
+    # Zona Grade A / A+ / 80+ / 90+ (`wait_confirm_only`) melewati Order Limit agar menunggu harga menjemput + konfirmasi M5!
+    if early_en and (not wait_confirm_only) and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY"):
         pending_plan = plan_pending_order(
             zone,
             current_price=current_price,
@@ -1128,6 +1139,7 @@ def evaluate_entry_paths_for_zone(
         opposing_zones=opposing_zones, snr_context=snr_context, existing_plan=existing_plan, cfg=conf,
     )
     levels_prov["entry_price"] = limit_px
+    is_far_z = "far" in str(getattr(zone, "zone_relevance", "")).lower()
     return {
         "entry_mode": "ADAPTIVE_ENTRY" if adaptive_en else "CONFIRMED_ENTRY",
         "order_kind": "MARKET",
@@ -1136,7 +1148,12 @@ def evaluate_entry_paths_for_zone(
         "touch": touch,
         "triggers": triggers,
         "trigger_passed": False,
-        "reason_code": REASON_WAIT_ZONE_TOUCH,
-        "reason_text": f"Menunggu harga menyentuh zona {zone.price_low:.2f}-{zone.price_high:.2f}",
+        "reason_code": REASON_ZONE_TOO_FAR if is_far_z else REASON_WAIT_ZONE_TOUCH,
+        "reason_text": (
+            f"Zona Grade {zone.grade or 'A'} ({zone.score:.1f}) tanpa Order Limit — menunggu harga menjemput zona "
+            f"{zone.price_low:.2f}-{zone.price_high:.2f} + konfirmasi M5"
+            if (wait_confirm_only and not is_far_z)
+            else f"Menunggu harga menyentuh zona {zone.price_low:.2f}-{zone.price_high:.2f}"
+        ),
         "levels": levels_prov,
     }

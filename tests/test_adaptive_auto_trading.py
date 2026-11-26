@@ -1496,6 +1496,249 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         self.assertAlmostEqual(mt5.positions[0].sl, 3649.70, places=2)
         self.assertAlmostEqual(mt5.positions[0].tp, 3635.00, places=2)
 
+    def test_stale_adopted_pending_order_auto_cancelled_and_valid_adopted_relinked(self):
+        """
+        Memastikan pending order scanner lama/ADOPTED (tanpa zone_id) yang TP-nya sudah terlewati
+        atau tidak lagi cocok dengan zona aktif otomatis dibatalkan sehingga tidak memblokir
+        MAX_ACTIVE_PENDING_ORDERS, sementara order ADOPTED yang masih cocok dengan zona aktif
+        dipertahankan & di-relink, serta order manual tidak pernah disentuh.
+        """
+        mt5, sm, _, eng = self._new_env(bid=3522.71, ask=3522.93)
+        ord_mgr = PendingOrderManager(eng, sm, cfg=self.cfg)
+        active_zone = _make_supply_zone(
+            score=78.6, timeframe="M30", lo=3529.39, hi=3540.16,
+        )
+        snap, scan, _ = _make_snapshot_and_scan(
+            active_zone, self.df_m5_rej, bid=3522.71, ask=3522.93,
+            h4_bias="BEARISH", h1_bias="BEARISH", m30_status="CONFIRMED",
+        )
+
+        # 1) Order scanner lama ADOPTED (TP 3554.05 sudah terlewati live price 3522.71 + di luar zona aktif)
+        res_stale = mt5.order_send({
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": "XAUUSDc",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_SELL_LIMIT,
+            "price": 3565.27,
+            "sl": 3576.49,
+            "tp": 3554.05,
+            "magic": SCANNER_MAGIC_NUMBER,
+            "comment": "SMC_EP_STALE",
+        })
+        tkt_stale = res_stale.order
+        sm.update_setup_state(
+            f"ADOPTED_ORD_{tkt_stale}", STATE_ORDER_PLACED,
+            reason_code="ADOPTED_SCANNER_ORDER", direction="SELL",
+            entry_mode="EARLY_PENDING", order_ticket=tkt_stale, planned_entry=3565.27,
+        )
+
+        # 2) Order manual user di harga jauh yang sama -> WAJIB tetap aman / tidak dibatalkan!
+        res_manual = mt5.order_send({
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": "XAUUSDc",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_SELL_LIMIT,
+            "price": 3565.27,
+            "sl": 3576.49,
+            "tp": 3554.05,
+            "magic": 0,
+            "comment": "manual_user_limit",
+        })
+        tkt_manual = res_manual.order
+
+        audit_1 = ord_mgr.audit_and_manage_pending_orders(
+            snapshot=snap, scan_result=scan, news_override=self.news_ok, symbol="XAUUSDc"
+        )
+        self.assertEqual(len(audit_1["cancelled"]), 1)
+        self.assertEqual(audit_1["cancelled"][0]["ticket"], tkt_stale)
+        rem_tickets = [o.ticket for o in mt5.orders_get()]
+        self.assertNotIn(tkt_stale, rem_tickets)
+        self.assertIn(tkt_manual, rem_tickets)
+
+        # 3) Order scanner ADOPTED tanpa zone_id, TP belum terlewati, tetapi tidak cocok dengan zona aktif manapun -> BATAL!
+        res_orphan = mt5.order_send({
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": "XAUUSDc",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_SELL_LIMIT,
+            "price": 3565.27,
+            "sl": 3576.49,
+            "tp": 3480.00,  # TP belum terlewati oleh 3522.71, tapi 3565.27 tidak cocok dengan zona aktif 3529.39-3540.16
+            "magic": SCANNER_MAGIC_NUMBER,
+            "comment": "SMC_EP_ORPHAN",
+        })
+        tkt_orphan = res_orphan.order
+        sm.update_setup_state(
+            f"ADOPTED_ORD_{tkt_orphan}", STATE_ORDER_PLACED,
+            reason_code="ADOPTED_SCANNER_ORDER", direction="SELL",
+            entry_mode="EARLY_PENDING", order_ticket=tkt_orphan, planned_entry=3565.27,
+        )
+        audit_2 = ord_mgr.audit_and_manage_pending_orders(
+            snapshot=snap, scan_result=scan, news_override=self.news_ok, symbol="XAUUSDc"
+        )
+        self.assertEqual(len(audit_2["cancelled"]), 1)
+        self.assertEqual(audit_2["cancelled"][0]["ticket"], tkt_orphan)
+
+        # 4) Order scanner ADOPTED tanpa zone_id yang COCOK dengan zona aktif 3529.39-3540.16 -> DIPERTAHANKAN & DI-RELINK!
+        res_valid = mt5.order_send({
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": "XAUUSDc",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_SELL_LIMIT,
+            "price": 3529.39,
+            "sl": 3546.68,
+            "tp": 3484.62,
+            "magic": SCANNER_MAGIC_NUMBER,
+            "comment": "SMC_EP_VALID_ADOPTED",
+        })
+        tkt_valid = res_valid.order
+        sid_valid = f"ADOPTED_ORD_{tkt_valid}"
+        sm.update_setup_state(
+            sid_valid, STATE_ORDER_PLACED,
+            reason_code="ADOPTED_SCANNER_ORDER", direction="SELL",
+            entry_mode="EARLY_PENDING", order_ticket=tkt_valid, planned_entry=3529.39,
+        )
+        audit_3 = ord_mgr.audit_and_manage_pending_orders(
+            snapshot=snap, scan_result=scan, news_override=self.news_ok, symbol="XAUUSDc"
+        )
+        self.assertEqual(len(audit_3["cancelled"]), 0)
+        self.assertIn(tkt_valid, [o.ticket for o in mt5.orders_get()])
+        self.assertEqual(sm.get_setup(sid_valid).get("zone_id"), active_zone.zone_id)
+
+    def test_multi_zone_unlimited_pending_and_auto_cancel_invalid_or_far(self):
+        """
+        1. MAX_ACTIVE_PENDING_ORDERS=0 memasang pending order limit untuk setiap zona valid dalam jangkauan
+           tanpa duplikasi di zona yang sama.
+        2. Ketika salah satu zona menjadi invalid, pending order zona tersebut otomatis dibatalkan.
+        3. Ketika harga menjauh melebihi batas jarak pending, pending order otomatis dibatalkan tanpa loop
+           dan dapat dipasang kembali apabila harga kembali masuk jangkauan selama zona masih fresh & valid.
+        """
+        cfg_multi = dict(self.cfg)
+        cfg_multi.update({
+            "MAX_ACTIVE_PENDING_ORDERS": 0,
+            "MAX_TOTAL_EXPOSURE_PERCENT": 10.0,
+            "RISK_EARLY_PENDING_PERCENT": 2.5,
+            "MAX_RISK_PER_TRADE_PERCENT": 2.5,
+            "TP1_MODE": "FIXED_RR",
+            "FORCE_FIXED_TP1": True,
+            "TP1_RR": 1.0,
+            "MIN_RR": 1.0,
+            "PENDING_MAX_DISTANCE_USD": 35.0,
+            "PENDING_CANCEL_HYSTERESIS_USD": 3.0,
+            "AUTO_CANCEL_FAR_PENDING": True,
+            "AUTO_CANCEL_INVALID_ZONE": True,
+        })
+        _, _, jrn_m, _ = self._new_env(bid=3520.0, ask=3520.2)
+        mt5_m = MockMT5(trade_mode=MockMT5.ACCOUNT_TRADE_MODE_DEMO, currency="USD", balance=10000.0, equity=10000.0, bid=3520.0, ask=3520.2)
+        sm_m = ExecutionStateManager(state_file=os.path.join(self.tmpdir.name, "state_multi_pend.json"), auto_load=False)
+        sm_m.authorize_account(login=mt5_m.login, server=mt5_m.server, currency="USD", account_mode="DEMO", real_confirmed=False)
+        sm_m.set_trading_mode("FULL_AUTO", auto_trading=True)
+        mon_m = AutoExecutionMonitor(mt5_api=mt5_m, state_mgr=sm_m, journal=jrn_m, symbol="XAUUSDc", cfg=cfg_multi, connect_fn=lambda: True)
+
+        z1 = _make_supply_zone(score=82.0, timeframe="M30", lo=3530.0, hi=3534.0)
+        z1.zone_id = "ZONE_M30_SUPPLY_Z1"
+        z2 = _make_supply_zone(score=86.0, timeframe="H1", lo=3545.0, hi=3549.0)
+        z2.zone_id = "ZONE_H1_SUPPLY_Z2"
+
+        snap, scan, dec = _make_snapshot_and_scan(z1, self.df_m5_rej, bid=3520.0, ask=3520.2)
+        scan["active_zones"] = [z1.to_dict()]
+        scan["radar_zones"] = [z2.to_dict()]
+
+        # Siklus 1: Kedua zona valid (jarak 10 USD & 25 USD <= 35 USD) -> KEDUANYA dipasang SELL LIMIT!
+        cyc1 = mon_m.run_once(snapshot=snap, scan_result=scan, decision=dec, news_override=self.news_ok)
+        self.assertTrue(cyc1["execution_outcome"]["executed"])
+        self.assertEqual(len(mt5_m.orders_get()), 2)
+        ord_prices = sorted(round(o.price_open, 2) for o in mt5_m.orders_get())
+        self.assertEqual(ord_prices, [3531.0, 3546.0])
+
+        # Siklus 2: Tidak ada duplikasi order pada zona yang sama
+        mon_m.run_once(snapshot=snap, scan_result=scan, decision=dec, news_override=self.news_ok)
+        self.assertEqual(len(mt5_m.orders_get()), 2)
+
+        # Siklus 3: Zona Z1 menjadi INVALIDATED -> order Z1 (3531.0) batal otomatis, Z2 (3546.0) tetap aktif!
+        z1_inv = _make_supply_zone(score=0.0, timeframe="M30", lo=3530.0, hi=3534.0, is_valid=False, freshness="INVALIDATED")
+        z1_inv.zone_id = "ZONE_M30_SUPPLY_Z1"
+        scan_inv = dict(scan)
+        scan_inv["active_zones"] = [z2.to_dict()]
+        scan_inv["radar_zones"] = []
+        scan_inv["rejected_zones"] = [z1_inv.to_dict()]
+        cyc3 = mon_m.run_once(snapshot=snap, scan_result=scan_inv, decision=dec, news_override=self.news_ok)
+        self.assertEqual(len(cyc3["order_audit"]["cancelled"]), 1)
+        self.assertEqual([round(o.price_open, 2) for o in mt5_m.orders_get()], [3546.0])
+
+        # Siklus 4: Harga turun menjauh ke 3502.0 (jarak ke 3546.0 = 44.0 > batas 38.0 USD, namun di atas TP)
+        mt5_m.orders[0].tp = 3480.0
+        mt5_m.bid, mt5_m.ask = 3502.0, 3502.2
+        snap_far, scan_far, dec_far = _make_snapshot_and_scan(z2, self.df_m5_rej, bid=3502.0, ask=3502.2)
+        scan_far["active_zones"] = [z2.to_dict()]
+        scan_far["radar_zones"] = []
+        cyc4 = mon_m.run_once(snapshot=snap_far, scan_result=scan_far, decision=dec_far, news_override=self.news_ok)
+        self.assertEqual(len(cyc4["order_audit"]["cancelled"]), 1)
+        self.assertEqual(cyc4["order_audit"]["cancelled"][0]["reason_code"], "ZONE_TOO_FAR")
+        # Dan TIDAK dipasang ulang selama masih jauh (0 active orders)!
+        self.assertEqual(len(mt5_m.orders_get()), 0)
+
+        # Siklus 5: Harga naik kembali ke 3520.0 (jarak 26 USD <= 35 USD) dan Z2 masih fresh -> otomatis dipasang kembali!
+        mt5_m.bid, mt5_m.ask = 3520.0, 3520.2
+        snap_back, scan_back, dec_back = _make_snapshot_and_scan(z2, self.df_m5_rej, bid=3520.0, ask=3520.2)
+        scan_back["active_zones"] = [z2.to_dict()]
+        cyc5 = mon_m.run_once(snapshot=snap_back, scan_result=scan_back, decision=dec_back, news_override=self.news_ok)
+        self.assertTrue(cyc5["execution_outcome"]["executed"])
+        self.assertEqual([round(o.price_open, 2) for o in mt5_m.orders_get()], [3546.0])
+
+    def test_single_lot_001_auto_be_plus_after_80_pips(self):
+        """
+        Posisi 0.01 lot tidak bisa partial close, sehingga:
+        - Di +79 pips (7.9 USD) belum digeser ke BE+.
+        - Begitu menyentuh +80 pips (8.0 USD), SL otomatis digeser ke BE+ (entry +/- BE_PLUS_LOCK_POINTS).
+        """
+        from modules.position_manager import PositionManager
+        mt5, sm, _, eng = self._new_env(bid=3530.0, ask=3530.2)
+        cfg_be = dict(self.cfg)
+        cfg_be.update({
+            "PARTIAL_CLOSE_ENABLED": True,
+            "PARTIAL_CLOSE_LOT_STEP": 0.01,
+            "PARTIAL_MIN_REMAINING_LOT": 0.01,
+            "BE_AFTER_PARTIAL_ENABLED": True,
+            "BE_PLUS_LOCK_POINTS": 0.30,
+            "BE_SINGLE_LOT_ENABLED": True,
+            "BE_SINGLE_LOT_TRIGGER_POINTS": 8.0,
+            "BREAK_EVEN_ENABLED": False,
+        })
+        pm = PositionManager(exec_engine=eng, state_mgr=sm, cfg=cfg_be)
+
+        # Buka posisi SELL 0.01 lot @ 3530.00, SL 3545.00, TP 3515.00
+        res = mt5.order_send({
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": "XAUUSDc",
+            "volume": 0.01,
+            "type": mt5.ORDER_TYPE_SELL,
+            "price": 3530.00,
+            "sl": 3545.00,
+            "tp": 3515.00,
+            "magic": SCANNER_MAGIC_NUMBER,
+            "comment": "SMC_EP_BE001",
+        })
+        tkt = res.order
+        sm.update_setup_state(
+            "SETUP_XAUUSDC_SELL_BE001", STATE_POSITION_ACTIVE,
+            direction="SELL", position_ticket=tkt, actual_entry=3530.00,
+            actual_lot=0.01, final_lot=0.01, sl=3545.00, tp=3515.00,
+        )
+
+        # +79 pips (Ask 3522.10 -> profit 7.90 USD < 8.00 USD) -> BELUM BE+!
+        mt5.bid, mt5.ask = 3521.90, 3522.10
+        r_before = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(r_before["protection_updates"]), 0)
+        self.assertAlmostEqual(mt5.positions[0].sl, 3545.00, places=2)
+
+        # +80 pips (Ask 3522.00 -> profit 8.00 USD) -> BE+ AKTIF (3530.00 - 0.30 = 3529.70)!
+        mt5.bid, mt5.ask = 3521.80, 3522.00
+        r_after = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(r_after["protection_updates"]), 1)
+        self.assertAlmostEqual(mt5.positions[0].sl, 3529.70, places=2)
+        self.assertAlmostEqual(mt5.positions[0].volume, 0.01, places=2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

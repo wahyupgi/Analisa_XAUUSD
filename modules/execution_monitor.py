@@ -356,10 +356,11 @@ class AutoExecutionMonitor:
                 scan_result=eff_scan,
                 news_override=news_override,
                 symbol=self.symbol,
+                snr_result=eff_snr,
             )
 
             # Evaluasi kandidat zona terbaik (Hybrid SMC + SNR) menggunakan Validator 7-Lapis
-            # Jika ada plan invalid/missed, jangan berhenti: release & cari kandidat pengganti otomatis!
+            # Mendukung multi-zone pending limit (ketika MAX_ACTIVE_PENDING_ORDERS <= 0 atau masih di bawah kuota)
             candidates = select_candidate_zones(eff_scan, eff_dec, snr_result=eff_snr)
             # Stabilitas zona SNR: zona SNR hanya boleh dieksekusi setelah hadir terus-menerus >= N detik.
             # Zona yang baru muncul / sering berganti (flip fokus) tidak boleh langsung memicu order.
@@ -383,8 +384,10 @@ class AutoExecutionMonitor:
             ]
             best_eval: Optional[Dict[str, Any]] = None
             evaluated_list: List[Dict[str, Any]] = []
+            ready_market_eval: Optional[Dict[str, Any]] = None
+            ready_pending_candidates: List[tuple] = []
 
-            for cand_z in candidates[:6]:
+            for cand_z in candidates[:12]:
                 val_res = validate_trade_candidate(
                     zone_in=cand_z,
                     mt5_api=self.mt5,
@@ -407,10 +410,17 @@ class AutoExecutionMonitor:
                         zone_id=str(val_res["zone_id"]),
                     )
                 if val_res.get("can_execute") and val_res.get("state") == STATE_ENTRY_READY:
-                    best_eval = val_res
-                    break
+                    if str(val_res.get("entry_mode") or "").upper() == "EARLY_PENDING":
+                        ready_pending_candidates.append((cand_z, val_res))
+                    elif ready_market_eval is None:
+                        ready_market_eval = val_res
+                        break
 
-            if best_eval is None and evaluated_list:
+            if ready_market_eval is not None:
+                best_eval = ready_market_eval
+            elif ready_pending_candidates:
+                best_eval = ready_pending_candidates[0][1]
+            elif evaluated_list:
                 # Prioritaskan kandidat pengganti yang masih aktif/valid dibanding zona invalid/missed
                 state_rank = {
                     STATE_POSITION_ACTIVE: 0,
@@ -426,33 +436,51 @@ class AutoExecutionMonitor:
                 evaluated_list.sort(key=lambda r: (state_rank.get(str(r.get("state")), 9), -float((r.get("zone") or {}).get("score") or 0.0)))
                 best_eval = evaluated_list[0]
 
-            execution_outcome = None
-            if best_eval is not None:
-                sid = str(best_eval["setup_id"])
-                cur_rec = self.state_mgr.get_setup(sid)
-                # Update state non-terminal apabila belum ORDER_PLACED / POSITION_ACTIVE
-                if not (isinstance(cur_rec, dict) and cur_rec.get("state") in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE)):
+            def _sync_eval_to_state(ev_item: Dict[str, Any]) -> None:
+                sid_i = str(ev_item["setup_id"])
+                cur_rec_i = self.state_mgr.get_setup(sid_i)
+                if not (isinstance(cur_rec_i, dict) and cur_rec_i.get("state") in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE)):
                     self.state_mgr.update_setup_state(
-                        sid,
-                        state=str(best_eval["state"]),
-                        reason_code=str(best_eval["reason_code"]),
-                        reason_text=str(best_eval["reason_text"]),
-                        zone_id=str(best_eval["zone_id"]),
+                        sid_i,
+                        state=str(ev_item["state"]),
+                        reason_code=str(ev_item["reason_code"]),
+                        reason_text=str(ev_item["reason_text"]),
+                        zone_id=str(ev_item["zone_id"]),
                         symbol=self.symbol,
-                        direction=str((best_eval.get("trade_plan") or {}).get("direction") or ""),
-                        entry_mode=str(best_eval.get("entry_mode") or ""),
-                        sub_mode=str(best_eval.get("sub_mode") or (best_eval.get("trade_plan") or {}).get("sub_mode") or ""),
-                        planned_entry=float((best_eval.get("trade_plan") or {}).get("entry") or 0.0),
-                        sl=float((best_eval.get("trade_plan") or {}).get("sl") or 0.0),
-                        tp=float((best_eval.get("trade_plan") or {}).get("tp") or 0.0),
-                        target_lot=float(best_eval.get("target_lot") or 0.0),
-                        final_lot=float(best_eval.get("final_lot") or 0.0),
-                        zone_score=float((best_eval.get("zone") or {}).get("score") or 0.0),
-                        zone_grade=str((best_eval.get("zone") or {}).get("grade") or ""),
-                        zone_quality=str(best_eval.get("zone_quality") or ""),
-                        zone_timeframe=str((best_eval.get("zone") or {}).get("timeframe") or ""),
-                        trigger_name=str((best_eval.get("triggers") or {}).get("primary_trigger") or ""),
+                        direction=str((ev_item.get("trade_plan") or {}).get("direction") or ""),
+                        entry_mode=str(ev_item.get("entry_mode") or ""),
+                        sub_mode=str(ev_item.get("sub_mode") or (ev_item.get("trade_plan") or {}).get("sub_mode") or ""),
+                        planned_entry=float((ev_item.get("trade_plan") or {}).get("entry") or 0.0),
+                        sl=float((ev_item.get("trade_plan") or {}).get("sl") or 0.0),
+                        tp=float((ev_item.get("trade_plan") or {}).get("tp") or 0.0),
+                        target_lot=float(ev_item.get("target_lot") or 0.0),
+                        final_lot=float(ev_item.get("final_lot") or 0.0),
+                        zone_score=float((ev_item.get("zone") or {}).get("score") or 0.0),
+                        zone_grade=str((ev_item.get("zone") or {}).get("grade") or ""),
+                        zone_quality=str(ev_item.get("zone_quality") or ""),
+                        zone_timeframe=str((ev_item.get("zone") or {}).get("timeframe") or ""),
+                        trigger_name=str((ev_item.get("triggers") or {}).get("primary_trigger") or ""),
                     )
+
+            def _apply_exec_outcome(ev_item: Dict[str, Any], out_res: Dict[str, Any]) -> None:
+                ev_item["execution_result"] = out_res
+                if out_res.get("executed"):
+                    ev_item["execution_status"] = out_res.get("state", STATE_POSITION_ACTIVE)
+                    ev_item["state"] = out_res.get("state", STATE_POSITION_ACTIVE)
+                elif out_res.get("simulated"):
+                    ev_item["execution_status"] = out_res.get("execution_status", "DRY_RUN_SIMULATED")
+                elif out_res.get("queued_for_approval"):
+                    ev_item["execution_status"] = "AWAITING_USER_APPROVAL"
+                else:
+                    ev_item["execution_status"] = out_res.get("state", STATE_BLOCKED)
+                    ev_item["decision"] = STATE_BLOCKED
+                    ev_item["reason_code"] = out_res.get("reason_code", ev_item["reason_code"])
+                    ev_item["reason_text"] = out_res.get("reason_text", ev_item["reason_text"])
+
+            execution_outcome = None
+            extra_pending_outcomes: List[Dict[str, Any]] = []
+            if best_eval is not None:
+                _sync_eval_to_state(best_eval)
 
                 # Catat missed entry ke jurnal bila harga meninggalkan zona
                 log_blocked_pref = bool(self.cfg.get("JOURNAL_LOG_BLOCKED_EVENTS", False))
@@ -475,19 +503,27 @@ class AutoExecutionMonitor:
                 if best_eval.get("can_execute") and best_eval.get("state") == STATE_ENTRY_READY:
                     if auto_enabled and trading_mode in ("FULL_AUTO", "DRY_RUN", "SEMI_AUTO"):
                         execution_outcome = self.engine.execute_validated_setup(best_eval, trading_mode=trading_mode)
-                        best_eval["execution_result"] = execution_outcome
-                        if execution_outcome.get("executed"):
-                            best_eval["execution_status"] = execution_outcome.get("state", STATE_POSITION_ACTIVE)
-                            best_eval["state"] = execution_outcome.get("state", STATE_POSITION_ACTIVE)
-                        elif execution_outcome.get("simulated"):
-                            best_eval["execution_status"] = execution_outcome.get("execution_status", "DRY_RUN_SIMULATED")
-                        elif execution_outcome.get("queued_for_approval"):
-                            best_eval["execution_status"] = "AWAITING_USER_APPROVAL"
-                        else:
-                            best_eval["execution_status"] = execution_outcome.get("state", STATE_BLOCKED)
-                            best_eval["decision"] = STATE_BLOCKED
-                            best_eval["reason_code"] = execution_outcome.get("reason_code", best_eval["reason_code"])
-                            best_eval["reason_text"] = execution_outcome.get("reason_text", best_eval["reason_text"])
+                        _apply_exec_outcome(best_eval, execution_outcome)
+
+                        # Pasang juga pending order limit untuk seluruh zona valid lainnya bila tidak ada market entry
+                        if ready_market_eval is None and len(ready_pending_candidates) > 1:
+                            for idx_p, (cand_p, _) in enumerate(ready_pending_candidates[1:], start=1):
+                                fresh_p = validate_trade_candidate(
+                                    zone_in=cand_p,
+                                    mt5_api=self.mt5,
+                                    state_mgr=self.state_mgr,
+                                    snapshot=eff_snap,
+                                    scan_result=eff_scan,
+                                    decision=eff_dec,
+                                    trading_mode=trading_mode,
+                                    news_override=news_override,
+                                    cfg=self.cfg,
+                                )
+                                if fresh_p.get("can_execute") and fresh_p.get("state") == STATE_ENTRY_READY:
+                                    _sync_eval_to_state(fresh_p)
+                                    out_p = self.engine.execute_validated_setup(fresh_p, trading_mode=trading_mode)
+                                    _apply_exec_outcome(fresh_p, out_p)
+                                    extra_pending_outcomes.append(out_p)
                     else:
                         best_eval["execution_status"] = "AUTO_TRADING_DISABLED"
 
@@ -500,6 +536,7 @@ class AutoExecutionMonitor:
                 "account": acc_snap,
                 "best_evaluation": best_eval,
                 "execution_outcome": execution_outcome,
+                "extra_pending_outcomes": extra_pending_outcomes,
                 "position_audit": pos_audit,
                 "order_audit": ord_audit,
                 "premarket_plan": (eff_dec.get("best_trade_plan") if isinstance(eff_dec, dict) else None) if not acc_snap.get("market_open") else None,
@@ -1011,12 +1048,13 @@ def handle_auto_cli_command(
         port = evaluate_portfolio_risk_and_daily_limits(mt5_api=mon.mt5, state_mgr=sm, symbol=mon.symbol, cfg=conf)
         rb_ad = compute_effective_risk_budget("ADAPTIVE_ENTRY", port, cfg=conf)
         rb_ep = compute_effective_risk_budget("EARLY_PENDING", port, cfg=conf, is_pending_order=True)
+        max_pend_lbl = "UNLIMITED" if int(conf.get("MAX_ACTIVE_PENDING_ORDERS", 0)) <= 0 else str(conf["MAX_ACTIVE_PENDING_ORDERS"])
         lines = [
             "=" * 68,
             f"AUDIT MANAJEMEN RISIKO & KUOTA HARIAN ({cur})",
             "=" * 68,
             f"Balance / Equity       : {port['balance']:,.2f} {cur} / {port['equity']:,.2f} {cur}",
-            f"Scanner Positions/Ords : Pos={port['scanner_positions_count']}/{conf['MAX_ACTIVE_POSITIONS']} | Pending={port['scanner_orders_count']}/{conf['MAX_ACTIVE_PENDING_ORDERS']}",
+            f"Scanner Positions/Ords : Pos={port['scanner_positions_count']}/{conf['MAX_ACTIVE_POSITIONS']} | Pending={port['scanner_orders_count']}/{max_pend_lbl}",
             f"Manual Positions/Ords  : Pos={port['manual_positions_count']} | Pending={port['manual_orders_count']} (Dihitung ke exposure, tidak dimodifikasi)",
             f"Total Open Exposure    : {port['total_open_risk_nominal']:,.2f} {cur} ({port['open_exposure_pct']:.2f}% / maks {conf['MAX_TOTAL_EXPOSURE_PERCENT']:.2f}%)",
             f"Realized P/L Today     : {port['realized_pnl_today']:+,.2f} {cur}",

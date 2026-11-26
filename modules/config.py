@@ -508,7 +508,7 @@ MAX_TOTAL_EXPOSURE_PERCENT = _env_cfg("MAX_TOTAL_EXPOSURE_PERCENT", 1.0, float)
 
 MAX_DAILY_LOSS_PERCENT = _env_cfg("MAX_DAILY_LOSS_PERCENT", 2.0, float)
 MAX_ACTIVE_POSITIONS = _env_cfg("MAX_ACTIVE_POSITIONS", 1, int)
-MAX_ACTIVE_PENDING_ORDERS = _env_cfg("MAX_ACTIVE_PENDING_ORDERS", 1, int)
+MAX_ACTIVE_PENDING_ORDERS = _env_cfg("MAX_ACTIVE_PENDING_ORDERS", 0, int)  # 0 = unlimited pending per zona valid (anti-duplicate per zona tetap aktif)
 MAX_TRADES_PER_DAY = _env_cfg("MAX_TRADES_PER_DAY", 3, int)
 
 REQUIRE_STOP_LOSS = _env_cfg("REQUIRE_STOP_LOSS", True, bool)
@@ -518,6 +518,9 @@ JOURNAL_LOG_BLOCKED_EVENTS = _env_cfg("JOURNAL_LOG_BLOCKED_EVENTS", False, bool)
 PREVENT_DUPLICATE_ORDER = _env_cfg("PREVENT_DUPLICATE_ORDER", True, bool)
 AUTO_CANCEL_INVALID_ZONE = _env_cfg("AUTO_CANCEL_INVALID_ZONE", True, bool)
 AUTO_CANCEL_EXPIRED_SETUP = _env_cfg("AUTO_CANCEL_EXPIRED_SETUP", True, bool)
+AUTO_CANCEL_FAR_PENDING = _env_cfg("AUTO_CANCEL_FAR_PENDING", True, bool)
+PENDING_MAX_DISTANCE_USD = _env_cfg("PENDING_MAX_DISTANCE_USD", 40.0, float)
+PENDING_CANCEL_HYSTERESIS_USD = _env_cfg("PENDING_CANCEL_HYSTERESIS_USD", 3.0, float)
 ALLOW_PENDING_TO_MARKET_SWITCH = _env_cfg("ALLOW_PENDING_TO_MARKET_SWITCH", False, bool)
 
 NEWS_FILTER = _env_cfg("NEWS_FILTER", True, bool)
@@ -649,7 +652,7 @@ def _build_auto_trading_config() -> dict:
         "MAX_TOTAL_EXPOSURE_PERCENT": _env_cfg("MAX_TOTAL_EXPOSURE_PERCENT", 1.0, float),
         "MAX_DAILY_LOSS_PERCENT": _env_cfg("MAX_DAILY_LOSS_PERCENT", 2.0, float),
         "MAX_ACTIVE_POSITIONS": _env_cfg("MAX_ACTIVE_POSITIONS", 1, int),
-        "MAX_ACTIVE_PENDING_ORDERS": _env_cfg("MAX_ACTIVE_PENDING_ORDERS", 1, int),
+        "MAX_ACTIVE_PENDING_ORDERS": _env_cfg("MAX_ACTIVE_PENDING_ORDERS", 0, int),
         "MAX_TRADES_PER_DAY": _env_cfg("MAX_TRADES_PER_DAY", 3, int),
         "REQUIRE_STOP_LOSS": _env_cfg("REQUIRE_STOP_LOSS", True, bool),
         "REQUIRE_TAKE_PROFIT": _env_cfg("REQUIRE_TAKE_PROFIT", True, bool),
@@ -657,6 +660,9 @@ def _build_auto_trading_config() -> dict:
         "PREVENT_DUPLICATE_ORDER": _env_cfg("PREVENT_DUPLICATE_ORDER", True, bool),
         "AUTO_CANCEL_INVALID_ZONE": _env_cfg("AUTO_CANCEL_INVALID_ZONE", True, bool),
         "AUTO_CANCEL_EXPIRED_SETUP": _env_cfg("AUTO_CANCEL_EXPIRED_SETUP", True, bool),
+        "AUTO_CANCEL_FAR_PENDING": _env_cfg("AUTO_CANCEL_FAR_PENDING", True, bool),
+        "PENDING_MAX_DISTANCE_USD": _env_cfg("PENDING_MAX_DISTANCE_USD", 40.0, float),
+        "PENDING_CANCEL_HYSTERESIS_USD": _env_cfg("PENDING_CANCEL_HYSTERESIS_USD", 3.0, float),
         "ALLOW_PENDING_TO_MARKET_SWITCH": _env_cfg("ALLOW_PENDING_TO_MARKET_SWITCH", False, bool),
         "NEWS_FILTER": _env_cfg("NEWS_FILTER", True, bool),
         "BLOCK_ON_STALE_NEWS_DATA": _env_cfg("BLOCK_ON_STALE_NEWS_DATA", True, bool),

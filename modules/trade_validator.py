@@ -463,6 +463,16 @@ def select_candidate_zones(
     for z in act_list:
         _add(z)
 
+    radar_list = sorted(
+        [z for z in (sc.get("radar_zones") or []) if isinstance(z, dict)],
+        key=lambda z: (
+            -float(z.get("score") or 0.0),
+            float(z.get("distance") or 9999.0),
+        ),
+    )
+    for z in radar_list:
+        _add(z)
+
     # Hybrid SMC + SNR: sertakan zona SNR aktif tervalidasi sebagai kandidat pengganti / pelengkap
     snr_scan = (
         snr_r.get("scan_result")

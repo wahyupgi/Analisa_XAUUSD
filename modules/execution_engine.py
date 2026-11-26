@@ -32,6 +32,7 @@ from modules.execution_state import (
     REASON_INVALID_STOP_LOSS,
     REASON_INVALID_VOLUME,
     REASON_MARKET_CLOSED,
+    REASON_MAX_ACTIVE_PENDING_ORDERS,
     REASON_MT5_DISCONNECTED,
     REASON_OK,
     REASON_PRICE_LEFT_ENTRY_RANGE,
@@ -606,13 +607,27 @@ class MT5ExecutionEngine:
                 }
         if not is_market:
             scanner_ords = [o for o in cur_ord if is_scanner_owned_item(o, magic)]
-            if len(scanner_ords) >= int(conf.get("MAX_ACTIVE_PENDING_ORDERS", 1)):
+            dup_price_tol = max(float(getattr(sym_info, "point", 0.01) or 0.01) * 5.0, 0.15)
+            for o_ex in scanner_ords:
+                o_cmt = str(getattr(o_ex, "comment", "") or "")
+                o_px = float(getattr(o_ex, "price_open", 0.0) or 0.0)
+                o_dir = "BUY" if int(getattr(o_ex, "type", 2) or 2) in (2, 4, 6) else "SELL"
+                if o_cmt == comment or (o_dir == direction and o_px > 0 and abs(o_px - exec_price) <= dup_price_tol):
+                    if sm is not None:
+                        sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text="Pending order scanner untuk zona/harga yang sama sudah aktif di MT5", zone_id=zone_id)
+                    return {
+                        "executed": False, "simulated": False, "state": STATE_BLOCKED,
+                        "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
+                        "reason_text": "Pending order scanner untuk zona/harga yang sama sudah aktif di MT5", "setup_id": setup_id,
+                    }
+            max_pend_cfg = int(conf.get("MAX_ACTIVE_PENDING_ORDERS", 0))
+            if max_pend_cfg > 0 and len(scanner_ords) >= max_pend_cfg:
                 if sm is not None:
-                    sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text="Pending order scanner sudah aktif di MT5", zone_id=zone_id)
+                    sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_MAX_ACTIVE_PENDING_ORDERS, reason_text="Jumlah pending order scanner sudah mencapai batas maksimum", zone_id=zone_id)
                 return {
                     "executed": False, "simulated": False, "state": STATE_BLOCKED,
-                    "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
-                    "reason_text": "Pending order scanner sudah aktif di MT5", "setup_id": setup_id,
+                    "execution_status": STATE_BLOCKED, "reason_code": REASON_MAX_ACTIVE_PENDING_ORDERS,
+                    "reason_text": "Jumlah pending order scanner sudah mencapai batas maksimum", "setup_id": setup_id,
                 }
 
         # ---------------------------------------------------------------------

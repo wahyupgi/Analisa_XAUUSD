@@ -1050,12 +1050,23 @@ def evaluate_entry_paths_for_zone(
                     })
                     ep_plan_valid = True
 
-        if ep_plan_valid and is_fresh_zone and score_ok_ep:
-            limit_entry = float(pending_plan.get("entry_price") or zone_limit_px)
-            # Pastikan limit_entry tidak jatuh di tepi awal zona bila lebar zona memadai
-            if zone.price_high > zone.price_low + 0.20:
-                if (demand and abs(limit_entry - zone.price_high) < 1e-6) or ((not demand) and abs(limit_entry - zone.price_low) < 1e-6):
-                    limit_entry = zone_limit_px
+        limit_cand_px = float(pending_plan.get("entry_price") or zone_limit_px)
+        # Pastikan limit_cand_px tidak jatuh di tepi awal zona bila lebar zona memadai
+        if zone.price_high > zone.price_low + 0.20:
+            if (demand and abs(limit_cand_px - zone.price_high) < 1e-6) or ((not demand) and abs(limit_cand_px - zone.price_low) < 1e-6):
+                limit_cand_px = zone_limit_px
+
+        max_pend_dist = float(conf.get("PENDING_MAX_DISTANCE_USD", 40.0) or 0.0)
+        pend_dist_usd = abs(limit_cand_px - current_price) if (limit_cand_px > 0 and current_price > 0) else 0.0
+        dist_ok_ep = (max_pend_dist <= 0.0) or (pend_dist_usd <= max_pend_dist + 1e-9)
+        if not dist_ok_ep:
+            pending_plan = dict(pending_plan)
+            pending_plan["rejection_reason"] = (
+                f"Jarak entry limit ({pend_dist_usd:.2f} USD) terlalu jauh melebihi batas maksimal ({max_pend_dist:.2f} USD)"
+            )
+
+        if ep_plan_valid and is_fresh_zone and score_ok_ep and dist_ok_ep:
+            limit_entry = limit_cand_px
             ep_sl = float(pending_plan.get("sl") or 0.0)
             ep_tp1 = float(pending_plan.get("tp1") or 0.0)
             ep_tp2 = float(pending_plan.get("tp2") or 0.0)

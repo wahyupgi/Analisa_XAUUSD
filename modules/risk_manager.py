@@ -442,7 +442,7 @@ def evaluate_portfolio_risk_and_daily_limits(
     max_daily_loss_pct = float(conf.get("MAX_DAILY_LOSS_PERCENT", 2.0))
     max_total_exp_pct = float(conf.get("MAX_TOTAL_EXPOSURE_PERCENT", 1.0))
     max_pos = int(conf.get("MAX_ACTIVE_POSITIONS", 1))
-    max_ord = int(conf.get("MAX_ACTIVE_PENDING_ORDERS", 1))
+    max_ord = int(conf.get("MAX_ACTIVE_PENDING_ORDERS", 0))
     max_trades = int(conf.get("MAX_TRADES_PER_DAY", 3))
 
     return {
@@ -471,9 +471,9 @@ def evaluate_portfolio_risk_and_daily_limits(
         "trades_today": trades_today,
         "daily_loss_limit_reached": daily_loss_pct >= max_daily_loss_pct - 1e-9,
         "exposure_limit_reached": open_exposure_pct >= max_total_exp_pct - 1e-9,
-        "max_positions_reached": len(scanner_positions) >= max_pos,
-        "max_pending_reached": len(scanner_orders) >= max_ord,
-        "max_trades_reached": trades_today >= max_trades,
+        "max_positions_reached": (max_pos > 0) and (len(scanner_positions) >= max_pos),
+        "max_pending_reached": (max_ord > 0) and (len(scanner_orders) >= max_ord),
+        "max_trades_reached": (max_trades > 0) and (trades_today >= max_trades),
     }
 
 

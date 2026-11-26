@@ -963,6 +963,81 @@ def _tangani_error_model(model_name, err):
         MODEL_COOLDOWN[model_name] = time.time() + 120
 
 
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_COOLDOWN_UNTIL = 0.0
+
+
+def _env_groq(nama):
+    v = os.environ.get(nama, "").strip()
+    if v:
+        return v
+    try:
+        from modules.config import _DIR_SCRIPT
+        with open(os.path.join(_DIR_SCRIPT, ".env"), "r", encoding="utf-8") as f:
+            for baris in f:
+                baris = baris.strip()
+                if baris.startswith(nama + "="):
+                    return baris.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def _contents_ke_messages(contents):
+    """Konversi format contents Gemini (str / list dict role+parts) ke messages OpenAI/Groq."""
+    if isinstance(contents, str):
+        return [{"role": "user", "content": contents}]
+    msgs = []
+    for c in contents if isinstance(contents, (list, tuple)) else [contents]:
+        if isinstance(c, str):
+            msgs.append({"role": "user", "content": c})
+            continue
+        if isinstance(c, dict):
+            role, parts = c.get("role", "user"), c.get("parts", [])
+        else:
+            role, parts = getattr(c, "role", "user") or "user", getattr(c, "parts", []) or []
+        teks = "\n".join(
+            (p if isinstance(p, str) else (p.get("text") if isinstance(p, dict) else getattr(p, "text", "")) or "")
+            for p in parts
+        ).strip()
+        if teks:
+            msgs.append({"role": "assistant" if role == "model" else "user", "content": teks})
+    return msgs
+
+
+def _panggil_groq(contents):
+    """Panggil Groq (utama). Return (teks, model) atau (None, None) bila gagal/limit (-> fallback Gemini)."""
+    global GROQ_COOLDOWN_UNTIL
+    import requests
+    key = _env_groq("GROQ_API_KEY")
+    if not key or time.time() < GROQ_COOLDOWN_UNTIL:
+        return None, None
+    model = _env_groq("GROQ_MODEL") or "llama-3.3-70b-versatile"
+    try:
+        msgs = _contents_ke_messages(contents)
+        if not msgs:
+            return None, None
+        r = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": msgs, "temperature": 0.0},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            teks = (r.json()["choices"][0]["message"]["content"] or "").strip()
+            return (teks, model) if teks else (None, None)
+        if r.status_code == 429:
+            GROQ_COOLDOWN_UNTIL = time.time() + 120
+            print("\n   [⚠️ Limit Groq tercapai. Beralih ke Gemini (cadangan)...]")
+        else:
+            GROQ_COOLDOWN_UNTIL = time.time() + 30
+            print(f"\n   [⚠️ Groq error HTTP {r.status_code}. Beralih ke Gemini (cadangan)...]")
+    except Exception as e:
+        GROQ_COOLDOWN_UNTIL = time.time() + 30
+        print(f"\n   [⚠️ Groq gagal ({type(e).__name__}). Beralih ke Gemini (cadangan)...]")
+    return None, None
+
+
 def panggil_gemini(client, contents, stream_output=False):
     """Memilih otomatis server AI yang paling longgar & cepat:
     - Mengingat model tercepat sebelumnya & mem-blacklist model 404 / cooldown 429 agar tidak buang waktu.
@@ -971,6 +1046,16 @@ def panggil_gemini(client, contents, stream_output=False):
     global MODEL_AKTIF_TERCEPAT
 
     if client is None:
+        return None, None
+
+    # PRIORITAS 1: Groq (utama). Jika limit/gagal -> otomatis lanjut ke Gemini (cadangan) di bawah.
+    teks_groq, mdl_groq = _panggil_groq(contents)
+    if teks_groq:
+        teks_groq = sanitasi_output_gemini(teks_groq)
+        if stream_output:
+            print(f"\n[Jawaban AI (Groq {mdl_groq})]:\n{teks_groq}")
+        return teks_groq, f"groq:{mdl_groq}"
+    if client == "GROQ_ONLY":
         return None, None
 
     now = time.time()

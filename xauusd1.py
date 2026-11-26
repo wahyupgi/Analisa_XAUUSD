@@ -348,6 +348,11 @@ def main():
             client = None
     else:
         ai_status = "DISCONNECTED"
+    if client is None and _m_ai._env_groq("GROQ_API_KEY"):
+        client = "GROQ_ONLY"
+        ai_status = "READY (Groq)"
+    elif client is not None and _m_ai._env_groq("GROQ_API_KEY"):
+        ai_status = "READY (Groq utama, Gemini cadangan)"
 
     # TAMPILKAN STARTUP AWAL RINGKAS (4 BAGIAN: HEADER, SYSTEM STATUS, MARKET OVERVIEW, COMMAND MENU)
     print_terminal(format_startup_presentation(

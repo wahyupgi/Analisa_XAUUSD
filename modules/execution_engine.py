@@ -959,7 +959,11 @@ class MT5ExecutionEngine:
                 zone_timeframe=str(zone_dict.get("timeframe") or ""),
                 trigger_name=str((validation_result.get("triggers") or {}).get("primary_trigger") or ""),
                 bos_time=str(zone_dict.get("bos_candle_time") or ""),
-                extra={"planned_sl": float(sl_px), "planned_tp": float(tp_px)},
+                extra={
+                    "planned_sl": float(sl_px),
+                    "planned_tp": float(tp_px),
+                    "initial_lot": float(actual_vol if actual_vol > 0 else lot),
+                },
             )
             if is_market:
                 sm.record_trade_opened(setup_id, position_ticket or order_ticket)
@@ -1181,6 +1185,143 @@ class MT5ExecutionEngine:
             "close_price": close_px,
             "volume": vol,
             "reason": reason if ok else f"CLOSE_FAILED_{rc}",
+        }
+
+    def partial_close_scanner_position(
+        self,
+        position_ticket: int,
+        close_volume: float,
+        symbol: str = SYMBOL,
+        stage_no: int = 1,
+        min_remaining_lot: float = 0.01,
+    ) -> Dict[str, Any]:
+        """
+        Tutup sebagian volume (partial close) posisi aktif MILIK SCANNER:
+        - Memverifikasi kepemilikan magic number scanner (posisi manual user TIDAK PERNAH disentuh).
+        - Memastikan sisa volume >= min_remaining_lot (mis. 0.01 lot) agar runner tetap jalan ke TP1.
+        - Menjalankan mt5.order_check() sebelum mt5.order_send() dan merekonsiliasi sisa posisi aktual.
+        """
+        magic = int(self.cfg.get("SCANNER_MAGIC_NUMBER", 20260991))
+        tkt = int(position_ticket or 0)
+        if tkt <= 0:
+            return {"partial_closed": False, "reason": "INVALID_TICKET"}
+
+        with MT5_IPC_LOCK:
+            positions = list(self.mt5.positions_get(ticket=tkt) or self.mt5.positions_get(symbol=symbol) or ())
+        pos = next((p for p in positions if int(getattr(p, "ticket", 0) or 0) == tkt), None)
+        if pos is None:
+            return {"partial_closed": False, "reason": "POSITION_NOT_FOUND"}
+        if not is_scanner_owned_item(pos, magic):
+            return {"partial_closed": False, "reason": "MANUAL_POSITION_PROTECTED"}
+
+        pos_sym = str(getattr(pos, "symbol", symbol) or symbol)
+        sym_info = self.mt5.symbol_info(pos_sym)
+        tick = self.mt5.symbol_info_tick(pos_sym)
+        if tick is None:
+            return {"partial_closed": False, "reason": "MISSING_TICK"}
+
+        vol_step = float(getattr(sym_info, "volume_step", 0.01) or 0.01) if sym_info is not None else 0.01
+        vol_min = float(getattr(sym_info, "volume_min", 0.01) or 0.01) if sym_info is not None else 0.01
+        eff_min_rem = max(vol_min, float(min_remaining_lot or 0.01))
+
+        cur_vol = round(float(getattr(pos, "volume", 0.0) or 0.0), 4)
+        req_close = round(math.floor((float(close_volume or 0.0) + 1e-9) / vol_step) * vol_step, 4)
+        if req_close < vol_min - 1e-9:
+            return {"partial_closed": False, "reason": "CLOSE_VOLUME_BELOW_MIN"}
+        rem_expected = round(cur_vol - req_close, 4)
+        if rem_expected < eff_min_rem - 1e-9:
+            return {"partial_closed": False, "reason": "REMAINING_BELOW_MIN_RUNNER"}
+
+        is_buy = int(getattr(pos, "type", 0) or 0) == getattr(self.mt5, "ORDER_TYPE_BUY", 0)
+        close_type = getattr(self.mt5, "ORDER_TYPE_SELL", 1) if is_buy else getattr(self.mt5, "ORDER_TYPE_BUY", 0)
+        close_px = float(getattr(tick, "bid", 0.0) if is_buy else getattr(tick, "ask", 0.0))
+        if close_px <= 0:
+            return {"partial_closed": False, "reason": "INVALID_TICK_PRICE"}
+
+        req = {
+            "action": getattr(self.mt5, "TRADE_ACTION_DEAL", 1),
+            "position": tkt,
+            "symbol": pos_sym,
+            "volume": float(round(req_close, 2)),
+            "type": close_type,
+            "price": close_px,
+            "deviation": int(self.cfg.get("ORDER_DEVIATION_POINTS", 30)),
+            "magic": magic,
+            "comment": f"PARTIAL_S{int(stage_no)}",
+            "type_time": getattr(self.mt5, "ORDER_TIME_GTC", 0),
+            "type_filling": resolve_broker_filling_mode(self.mt5, sym_info),
+        }
+
+        with MT5_IPC_LOCK:
+            chk = self.mt5.order_check(req) if hasattr(self.mt5, "order_check") else None
+        if chk is not None:
+            chk_rc = _safe_retcode(chk)
+            if chk_rc not in (0, RETCODE_DONE):
+                return {
+                    "partial_closed": False,
+                    "retcode": chk_rc,
+                    "reason": f"ORDER_CHECK_FAILED_{chk_rc}",
+                }
+
+        with MT5_IPC_LOCK:
+            res = self.mt5.order_send(req)
+        rc = _safe_retcode(res)
+        ok = rc in (RETCODE_DONE, RETCODE_DONE_PARTIAL, 0)
+        if not ok:
+            return {
+                "partial_closed": False,
+                "retcode": rc,
+                "reason": f"PARTIAL_SEND_FAILED_{rc}",
+            }
+
+        # Rekonsiliasi sisa posisi aktual di MT5 (antisipasi jika ticket tetap sama atau berganti di bridge broker)
+        with MT5_IPC_LOCK:
+            after_positions = list(self.mt5.positions_get(symbol=pos_sym) or self.mt5.positions_get() or ())
+        rem_pos = next((p for p in after_positions if int(getattr(p, "ticket", 0) or 0) == tkt and is_scanner_owned_item(p, magic)), None)
+        if rem_pos is None:
+            rem_pos = next(
+                (
+                    p for p in after_positions
+                    if is_scanner_owned_item(p, magic)
+                    and int(getattr(p, "type", -1)) == int(getattr(pos, "type", -2))
+                    and abs(float(getattr(p, "volume", 0.0) or 0.0) - rem_expected) <= 0.005
+                ),
+                None,
+            )
+        rem_tkt = int(getattr(rem_pos, "ticket", tkt) or tkt) if rem_pos is not None else tkt
+        rem_vol = round(float(getattr(rem_pos, "volume", rem_expected) or rem_expected), 2) if rem_pos is not None else round(rem_expected, 2)
+
+        if self.journal is not None and hasattr(self.journal, "record_execution_event"):
+            try:
+                self.journal.record_execution_event(
+                    event_type="PARTIAL_CLOSE",
+                    validation_result={
+                        "setup_id": str(getattr(pos, "comment", "") or f"POS_{tkt}"),
+                        "zone_id": "",
+                        "entry_mode": "PARTIAL_STEP",
+                        "trade_plan": {"direction": "BUY" if is_buy else "SELL", "entry": float(getattr(pos, "price_open", 0.0) or 0.0), "sl": float(getattr(pos, "sl", 0.0) or 0.0), "tp": float(getattr(pos, "tp", 0.0) or 0.0)},
+                    },
+                    trading_mode="FULL_AUTO",
+                    actual_entry=close_px,
+                    actual_lot=round(req_close, 2),
+                    actual_sl=float(getattr(pos, "sl", 0.0) or 0.0),
+                    actual_tp=float(getattr(pos, "tp", 0.0) or 0.0),
+                    retcode=rc,
+                    position_ticket=rem_tkt,
+                    decision_reason=f"PARTIAL_STAGE_{stage_no}_CLOSED_{req_close:.2f}_REM_{rem_vol:.2f}",
+                )
+            except Exception:
+                pass
+
+        return {
+            "partial_closed": True,
+            "stage": int(stage_no),
+            "closed_volume": round(req_close, 2),
+            "remaining_volume": rem_vol,
+            "remaining_ticket": rem_tkt,
+            "close_price": close_px,
+            "retcode": rc,
+            "reason": f"PARTIAL_STAGE_{stage_no}_OK",
         }
 
     def _log_journal_event(

@@ -36,8 +36,11 @@ from modules.utils import (
     format_mt5_sync_short,
     format_price_distance,
     format_trade_plan_lines,
+    format_zone_relative_distance,
     resolve_entry_blocker_code,
     select_relevant_invalid_zone,
+    consume_one_shot_invalid_zone,
+    zones_represent_same_level,
 )
 from modules.terminal_ui import get_terminal_width, wrap_dashboard_field
 from modules.zone_scanner import (
@@ -1442,7 +1445,7 @@ def format_scan_presentation(
             else:
                 entry_status_line = f"NO VALID ENTRY ({blk_c})"
 
-        def _fmt_zone_1line(z_obj: Optional[Dict[str, Any]]) -> str:
+        def _fmt_zone_1line(z_obj: Optional[Dict[str, Any]], is_far: bool = False) -> str:
             if not isinstance(z_obj, dict) or not z_obj.get("price_low"):
                 return "NONE"
             zt_f = str(z_obj.get("timeframe") or "H1")
@@ -1454,19 +1457,15 @@ def format_scan_presentation(
             z_fr = str(z_obj.get("freshness") or "FRESH").upper()
             z_struct_inv = resolve_smc_structure_invalidation_price(z_obj) or (z_lo if zt_t == "DEMAND" else z_hi)
             from modules.utils import resolve_stored_setup_sl
-            z_setup_sl = resolve_stored_setup_sl(
+            z_setup_sl = 0.0 if is_far else (resolve_stored_setup_sl(
                 "SMC",
                 str(z_obj.get("zone_id") or ""),
                 trade_plans=dec.get("trade_plans") if isinstance(dec.get("trade_plans"), list) else None,
                 best_trade_plan=dec.get("best_trade_plan") if isinstance(dec.get("best_trade_plan"), dict) else None,
                 timeframe=zt_f,
                 setup_version=z_obj.get("setup_version") if isinstance(z_obj.get("setup_version"), int) else None,
-            ) or resolve_smc_setup_invalidation_price(z_obj)
-            if price > 0 and z_lo > 0 and z_hi >= z_lo:
-                _dz = calculate_zone_distance(z_lo, z_hi, price, zone_type=zt_t, bid=scan.get("bid"), ask=scan.get("ask"), atr=z_obj.get("atr_value"))
-                d_txt = "IN ZONE" if _dz.distance <= 0 else format_price_distance(_dz.distance, spec=_u_spec_pres)
-            else:
-                d_txt = "N/A"
+            ) or resolve_smc_setup_invalidation_price(z_obj))
+            d_txt = format_zone_relative_distance(z_lo, z_hi, price, spec=_u_spec_pres, is_far=is_far)
             inv_segs = []
             if z_struct_inv > 0:
                 inv_segs.append(f"StructInv {z_struct_inv:.2f}")
@@ -1474,9 +1473,10 @@ def format_scan_presentation(
                 inv_segs.append(f"SetupSL {z_setup_sl:.2f}")
             inv_txt = (" | " + " | ".join(inv_segs)) if inv_segs else ""
             rel_t = str(z_obj.get("zone_relevance") or z_obj.get("status") or "RADAR").upper()
-            zid_t = f" [ID:{z_obj['zone_id']}]" if z_obj.get("zone_id") else ""
             ct_t = " COUNTER" if z_obj.get("is_counter") else ""
-            return f"{zt_f} {zt_t} {z_lo:.2f}-{z_hi:.2f} | G:{z_grd}{z_sc} {z_fr} | Dist {d_txt}{inv_txt} | {rel_t}{ct_t}{zid_t}"
+            if is_far:
+                return f"[SMC] {zt_f} {zt_t} {z_lo:.2f}-{z_hi:.2f} | {d_txt} | Grade {z_grd}{z_sc} ({z_fr}){inv_txt}"
+            return f"[SMC] {zt_f} {zt_t} {z_lo:.2f}-{z_hi:.2f} | {d_txt} | Grade {z_grd}{z_sc} ({z_fr}){inv_txt} | {rel_t}{ct_t}"
 
         from modules.snr.formatter import build_snr_zone_reason
 
@@ -1501,11 +1501,7 @@ def format_scan_presentation(
                 timeframe=s_tf,
                 setup_version=sz_obj.get("setup_version") if isinstance(sz_obj.get("setup_version"), int) else None,
             ) or float(sz_obj.get("setup_sl") or 0.0)
-            if price > 0 and s_hi >= s_lo:
-                d_val_s = 0.0 if s_lo <= price <= s_hi else min(abs(price - s_lo), abs(price - s_hi))
-                d_txt_s = "IN ZONE" if d_val_s <= 0 else format_price_distance(d_val_s, spec=_u_spec_pres)
-            else:
-                d_txt_s = "N/A"
+            d_txt_s = format_zone_relative_distance(s_lo, s_hi, price, spec=_u_spec_pres)
             inv_s_segs = []
             if s_sinv > 0:
                 inv_s_segs.append(f"StructInv {s_sinv:.2f}")
@@ -1513,8 +1509,7 @@ def format_scan_presentation(
                 inv_s_segs.append(f"SetupSL {s_sl:.2f}")
             inv_s_txt = (" | " + " | ".join(inv_s_segs)) if inv_s_segs else ""
             rel_s = str(sz_obj.get("zone_relevance") or sz_obj.get("lifecycle_status") or sz_obj.get("status") or "ACTIVE").upper()
-            zid_s = f" [ID:{sz_obj['zone_id']}]" if sz_obj.get("zone_id") else ""
-            return f"{s_tf} {s_zt} {s_lo:.2f}-{s_hi:.2f} | G:{s_grd}{s_sc} | Dist {d_txt_s}{inv_s_txt} | {rel_s} [SNR]{zid_s}"
+            return f"[SNR] {s_tf} {s_zt} {s_lo:.2f}-{s_hi:.2f} | {d_txt_s} | Grade {s_grd}{s_sc}{inv_s_txt} | {rel_s}"
 
         smc_far_ref_line = ""
         if isinstance(selected_snr_main_z, dict) and float(selected_snr_main_z.get("price_low") or 0.0) > 0:
@@ -1525,12 +1520,12 @@ def format_scan_presentation(
                 or str((best_tp_c or {}).get("why") or "")
             )
             if isinstance(smc_far_ref_z, dict) and smc_far_ref_z.get("price_low"):
-                smc_far_ref_line = _fmt_zone_1line(smc_far_ref_z)
+                smc_far_ref_line = _fmt_zone_1line(smc_far_ref_z, is_far=True)
         else:
             active_radar_line = _fmt_zone_1line(main_z)
             shown_main_z = main_z if (isinstance(main_z, dict) and main_z.get("price_low")) else None
             if active_radar_line == "NONE" and isinstance(far_ref_z, dict):
-                active_radar_line = f"NONE | FAR REF: {_fmt_zone_1line(far_ref_z)}"
+                active_radar_line = f"NONE (Hanya Ref Jauh: {_fmt_zone_1line(far_ref_z, is_far=True)})"
                 if far_ref_z.get("price_low"):
                     shown_main_z = far_ref_z
             main_why_c = build_smc_zone_reason(shown_main_z, h4_bias=h4_bias, h1_bias=h1_struct) if shown_main_z else ""
@@ -1543,15 +1538,16 @@ def format_scan_presentation(
         inv_pool_c = list(dec.get("invalidated_zones") or []) + list((r_prio or {}).get("invalidated_zones") or []) + list(scan.get("invalidated_zones") or [])
         if tracker is not None and isinstance(getattr(tracker, "invalidated_zones", None), dict):
             inv_pool_c.extend(list(tracker.invalidated_zones.values()))
-        iz0 = select_relevant_invalid_zone(
+        iz0 = consume_one_shot_invalid_zone(
             inv_pool_c,
             current_price=price if price > 0 else None,
             atr=_pres_atr,
             direction=dir_analysis,
+            cycle_key=f"scan:{snapshot_time}",
         )
         if isinstance(iz0, dict):
             iz_t = str(iz0.get("invalidation_type") or iz0.get("invalid_label") or INVALIDATION_ZONE_STRUCTURAL).upper()
-            invalid_line = format_invalid_zone_compact(iz0, current_price=price if price > 0 else None, unit_spec=_u_spec_pres, status_override=iz_t)
+            invalid_line = format_invalid_zone_compact(iz0, current_price=price if price > 0 else None, unit_spec=_u_spec_pres, status_override=iz_t, include_id=False)
         else:
             invalid_line = "NONE"
         inv_why_c = format_smc_invalid_why(iz0, h4_bias=h4_bias, h1_bias=h1_struct) if isinstance(iz0, dict) else ""
@@ -1571,17 +1567,27 @@ def format_scan_presentation(
         r1_why_c = ""
         snr_parts = []
         if isinstance(sup_c, dict) and sup_c.get("low"):
-            snr_parts.append(f"S1 {float(sup_c['low']):.2f}-{float(sup_c.get('high', sup_c['low'])):.2f}(G:{sup_c.get('grade', '-')})")
-            s1_why_c = build_snr_zone_reason(sup_c, h4_bias=_eff_h4_snr_c, h1_bias=_snr_h1_c)
+            s1_same_c = zones_represent_same_level(sup_c, shown_main_z)
+            s1_tf_c = str(sup_c.get("timeframe") or "").strip().upper()
+            snr_parts.append(f"S1: {(s1_tf_c + ' ') if s1_tf_c else ''}{float(sup_c['low']):.2f}-{float(sup_c.get('high', sup_c['low'])):.2f} (G:{sup_c.get('grade', '-')}{', = RADAR' if s1_same_c else ''})")
+            if not s1_same_c:
+                s1_why_c = build_snr_zone_reason(sup_c, h4_bias=_eff_h4_snr_c, h1_bias=_snr_h1_c)
+        else:
+            snr_parts.append("S1: NONE")
         if isinstance(res_c, dict) and res_c.get("low"):
-            snr_parts.append(f"R1 {float(res_c['low']):.2f}-{float(res_c.get('high', res_c['low'])):.2f}(G:{res_c.get('grade', '-')})")
-            r1_why_c = build_snr_zone_reason(res_c, h4_bias=_eff_h4_snr_c, h1_bias=_snr_h1_c)
+            r1_same_c = zones_represent_same_level(res_c, shown_main_z)
+            r1_tf_c = str(res_c.get("timeframe") or "").strip().upper()
+            snr_parts.append(f"R1: {(r1_tf_c + ' ') if r1_tf_c else ''}{float(res_c['low']):.2f}-{float(res_c.get('high', res_c['low'])):.2f} (G:{res_c.get('grade', '-')}{', = RADAR' if r1_same_c else ''})")
+            if not r1_same_c:
+                r1_why_c = build_snr_zone_reason(res_c, h4_bias=_eff_h4_snr_c, h1_bias=_snr_h1_c)
+        else:
+            snr_parts.append("R1: NONE")
         if isinstance(confl_obj, dict) and confl_obj.get("available"):
             if confl_obj.get("is_aligned") and float(confl_obj.get("overlap_points") or 0.0) > 0:
                 snr_parts.append(f"CONFLUENCE ({format_price_distance(float(confl_obj['overlap_points']), spec=_u_spec_pres)})")
             elif confl_obj.get("opposing_conflict"):
                 snr_parts.append("SNR CONFLICT")
-        snr_line = " | ".join(snr_parts) if snr_parts else str(snr_ctx_obj.get("summary") or "UNAVAILABLE")
+        snr_line = " | ".join(snr_parts) if (isinstance(sup_c, dict) or isinstance(res_c, dict)) else str(snr_ctx_obj.get("summary") or "UNAVAILABLE")
 
         # RISK 1-line summary (MT5 read-only + sync timestamp)
         mt5_risk_c = summarize_mt5_risk_warnings(
@@ -1623,6 +1629,7 @@ def format_scan_presentation(
             and str(best_tp_c.get("zone_id") or "") == str(best_p_c.get("zone_id") or "")
             and str(best_tp_c.get("status") or "").upper() == "READY"
         )
+        _act_zid_c = shown_main_z.get("zone_id") if isinstance(shown_main_z, dict) else None
         if best_tp_c:
             _brk_tag_c = (best_p_c.get("compact_status") or "NOT PLACED") if bp_same_zone else None
             out.extend(format_trade_plan_lines(
@@ -1632,14 +1639,16 @@ def format_scan_presentation(
                 width=term_w_c,
                 include_source=True,
                 broker_tag=_brk_tag_c,
-                skip_why_for_zone_id=(shown_main_z.get("zone_id") if isinstance(shown_main_z, dict) else None),
+                skip_why_for_zone_id=_act_zid_c,
+                include_id=False,
+                active_zone_id=_act_zid_c,
             ))
         if pending_ready_c and not confirmed_ready_c and not bp_same_zone:
             bp_c_st = best_p_c.get("compact_status") or "READY | NOT PLACED"
             out.extend(wrap_dashboard_field(
                 "PENDING PLAN : ",
                 f"{best_p_c['order_type']} {best_p_c['entry_price']:.2f} | "
-                f"SetupSL {best_p_c['sl']:.2f} | TP1 {best_p_c['tp1']:.2f} | RR 1:{best_p_c['rr']:.1f} | {bp_c_st} [ID:{best_p_c.get('zone_id', 'N/A')}]",
+                f"SetupSL {best_p_c['sl']:.2f} | TP1 {best_p_c['tp1']:.2f} | RR 1:{best_p_c['rr']:.1f} | {bp_c_st}",
                 term_w_c,
                 max_lines=None,
             ))
@@ -1651,16 +1660,15 @@ def format_scan_presentation(
             next_why_c = build_smc_zone_reason(next_z, h4_bias=h4_bias, h1_bias=h1_struct)
             if next_why_c:
                 out.extend(wrap_dashboard_field("  WHY        : ", next_why_c, term_w_c, max_lines=None))
-        if smc_far_ref_line:
-            out.extend(wrap_dashboard_field("SMC FAR REF  : ", smc_far_ref_line, term_w_c, max_lines=None))
-        out.extend(wrap_dashboard_field("INVALID      : ", invalid_line, term_w_c, max_lines=None))
-        if inv_why_c:
-            out.extend(wrap_dashboard_field("  WHY        : ", inv_why_c, term_w_c, max_lines=None))
-        out.extend(wrap_dashboard_field("SNR          : ", snr_line, term_w_c, max_lines=None))
+        out.extend(wrap_dashboard_field("SNR LEVEL    : ", snr_line, term_w_c, max_lines=None))
         if s1_why_c:
             out.extend(wrap_dashboard_field("  WHY S1     : ", s1_why_c, term_w_c, max_lines=None))
         if r1_why_c:
             out.extend(wrap_dashboard_field("  WHY R1     : ", r1_why_c, term_w_c, max_lines=None))
+        if smc_far_ref_line:
+            out.extend(wrap_dashboard_field("SMC FAR REF  : ", smc_far_ref_line, term_w_c, max_lines=None))
+        if invalid_line != "NONE":
+            out.extend(wrap_dashboard_field("INVALID      : ", invalid_line, term_w_c, max_lines=None))
         out.extend(wrap_dashboard_field("RISK         : ", risk_line, term_w_c, max_lines=None))
         out.append("=" * min(70, term_w_c))
         return "\n".join(out)

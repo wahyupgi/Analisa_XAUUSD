@@ -11,6 +11,54 @@ _DIR_SCRIPT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_VERSION = "v2.5"
 
 
+def _env_cfg(key: str, default, cast_type=str):
+    """Baca override konfigurasi dari environment variable atau .env secara live."""
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        env_path = os.path.join(_DIR_SCRIPT, ".env")
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    prefix = f"{key}="
+                    for line in f:
+                        s = line.strip()
+                        if s.startswith(prefix):
+                            raw = s.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+            except Exception:
+                raw = ""
+    if not raw:
+        return default
+    try:
+        if cast_type is bool:
+            return raw.lower() in ("1", "true", "yes", "on", "ya")
+        return cast_type(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def set_env_value(key: str, value: str) -> bool:
+    """Tulis/ubah satu baris KEY=VALUE pada .env (baris lain tidak diubah) & sinkronkan os.environ."""
+    env_path = os.path.join(_DIR_SCRIPT, ".env")
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    new_line = f"{key}={value}"
+    replaced = False
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith(f"{key}="):
+            lines[i] = new_line
+            replaced = True
+            break
+    if not replaced:
+        lines.append(new_line)
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.environ[key] = str(value)
+    return True
+
+
 def _muat_api_key():
     """Baca GEMINI_API_KEY dari environment variable atau file .env di folder script (fallback ke nilai default)."""
     kunci = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -84,7 +132,7 @@ ZONE_RELEVANCE_TF_LIMITS = {
 RR_MIN = 1.5                       # R:R minimal ke TP1
 ENTRY_LEBAR_MAKS = 2.5             # lebar area entry maksimal (Price Distance USD/oz)
 ENTRY_JARAK_MAKS = 40.0            # jarak entry dari harga live maksimal (Price Distance USD/oz)
-SL_JARAK_MAKS = 20.0               # jarak SL maksimal dari entry (Price Distance USD/oz)
+SL_JARAK_MAKS = _env_cfg("SL_JARAK_MAKS", _env_cfg("AUTO_SL_JARAK_MAKS", 12.0, float), float)  # jarak SL maksimal dari entry (USD/oz)
 SPREAD_MAKS_POIN = 1.0             # spread maksimal (Price Distance USD/oz) untuk sinyal baru
 SPREAD_MAKS_RASIO_ATR = 0.35       # ...dan maksimal sekian x ATR M5 (lantai 0.5 USD/oz)
 SINYAL_TTL_BELUM_TERISI_JAM = 6    # sinyal yang belum terjemput melewati batas ini dianggap kedaluwarsa
@@ -224,32 +272,6 @@ MODEL_COOLDOWN = {}  # model_name -> timestamp bebas cooldown (untuk 429 / 503)
 # =============================================================================
 # KONFIGURASI XAUUSD SMC ADAPTIVE AUTO TRADING SYSTEM (SINGLE SOURCE OF TRUTH)
 # =============================================================================
-def _env_cfg(key: str, default, cast_type=str):
-    """Baca override konfigurasi dari environment variable atau .env secara live."""
-    raw = os.environ.get(key, "").strip()
-    if not raw:
-        env_path = os.path.join(_DIR_SCRIPT, ".env")
-        if os.path.exists(env_path):
-            try:
-                with open(env_path, "r", encoding="utf-8") as f:
-                    prefix = f"{key}="
-                    for line in f:
-                        s = line.strip()
-                        if s.startswith(prefix):
-                            raw = s.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
-            except Exception:
-                raw = ""
-    if not raw:
-        return default
-    try:
-        if cast_type is bool:
-            return raw.lower() in ("1", "true", "yes", "on", "ya")
-        return cast_type(raw)
-    except (TypeError, ValueError):
-        return default
-
-
 AUTO_TRADING = _env_cfg("AUTO_TRADING", False, bool)
 TRADING_MODE = _env_cfg("TRADING_MODE", "SCANNER_ONLY", str).upper()   # SCANNER_ONLY | DRY_RUN | SEMI_AUTO | FULL_AUTO
 ENTRY_MODE = _env_cfg("ENTRY_MODE", "ADAPTIVE", str).upper()           # ADAPTIVE | EARLY_PENDING | CONFIRMED
@@ -283,7 +305,11 @@ MIN_RR = _env_cfg("MIN_RR", 1.0, float)
 TP1_RR = _env_cfg("TP1_RR", 1.0, float)
 TP1_MODE = _env_cfg("TP1_MODE", "FIXED_RR", str)  # "FIXED_RR" (1:1 / user-defined) atau "STRUCTURAL"
 FORCE_FIXED_TP1 = _env_cfg("FORCE_FIXED_TP1", True, bool)  # True = paksa TP1 = Entry +/- (TP1_RR * jarak SL struktural)
-AUTO_SL_JARAK_MAKS = _env_cfg("AUTO_SL_JARAK_MAKS", 35.0, float)
+AUTO_SL_JARAK_MAKS = _env_cfg("AUTO_SL_JARAK_MAKS", SL_JARAK_MAKS, float)
+CONFLICT_MIDZONE_LIMIT_ENABLED = _env_cfg("CONFLICT_MIDZONE_LIMIT_ENABLED", True, bool)
+CONFLICT_MIDZONE_MIN_SCORE = _env_cfg("CONFLICT_MIDZONE_MIN_SCORE", 70.0, float)
+CONFLICT_MIDZONE_MAX_WIDTH = _env_cfg("CONFLICT_MIDZONE_MAX_WIDTH", 16.0, float)
+CONFLICT_MIDZONE_SL_BUFFER = _env_cfg("CONFLICT_MIDZONE_SL_BUFFER", 0.60, float)
 MIN_ENTRY_TRIGGERS = _env_cfg("MIN_ENTRY_TRIGGERS", 1, int)
 
 REQUIRE_ALL_TRIGGERS = _env_cfg("REQUIRE_ALL_TRIGGERS", False, bool)
@@ -353,8 +379,49 @@ FILE_STATE_AUTO_EXECUTION = os.path.join(_DIR_SCRIPT, "state_auto_execution.json
 FILE_JURNAL_AUTO_EXECUTION = os.path.join(_DIR_SCRIPT, "jurnal_eksekusi_auto.csv")
 
 
+def _apply_loose_overrides(conf: dict) -> dict:
+    """
+    LOOSE MODE (data-collection / eksperimen, default OFF via AUTO_LOOSE_MODE=false).
+    Melonggarkan: jumlah order, skor/grade zona, konflik HTF, trigger, news, batas risiko.
+    TETAP berlaku: SL & TP wajib, SL di luar structural invalidation, RR tetap, lot <= 0.01 untuk grade < B,
+    anti-duplikat per zona, zona INVALIDATED/EXPIRED/BROKEN, market/MT5/data/spread, order_check & verifikasi broker.
+    """
+    if not _env_cfg("AUTO_LOOSE_MODE", False, bool):
+        conf["AUTO_LOOSE_MODE"] = False
+        return conf
+    rr = _env_cfg("LOOSE_RR", 2.0, float)
+    max_active = _env_cfg("LOOSE_MAX_ACTIVE", 5, int)
+    conf.update({
+        "AUTO_LOOSE_MODE": True,
+        "LOOSE_LOT": _env_cfg("LOOSE_LOT", 0.01, float),
+        "MIN_ZONE_SCORE": 0.0,
+        "EARLY_PENDING_MIN_SCORE": 0.0,
+        "MIN_RR": rr,
+        "TP1_RR": rr,
+        "TP1_MODE": "FIXED_RR",
+        "FORCE_FIXED_TP1": True,
+        "MAX_ACTIVE_POSITIONS": max_active,
+        "MAX_ACTIVE_PENDING_ORDERS": max_active,
+        "MAX_TRADES_PER_DAY": _env_cfg("LOOSE_MAX_TRADES_PER_DAY", 999, int),
+        "MAX_TOTAL_EXPOSURE_PERCENT": _env_cfg("LOOSE_MAX_EXPOSURE_PERCENT", 100.0, float),
+        "MAX_DAILY_LOSS_PERCENT": _env_cfg("LOOSE_MAX_DAILY_LOSS_PERCENT", 100.0, float),
+        "MAX_RISK_PER_TRADE_PERCENT": 100.0,
+        "RISK_EARLY_PENDING_PERCENT": 100.0,
+        "RISK_ADAPTIVE_PERCENT": 100.0,
+        "RISK_CONFIRMED_PERCENT": 100.0,
+        "NEWS_FILTER": False,
+        "ALLOW_NEUTRAL_H1": True,
+        "CONFLICT_MIDZONE_LIMIT_ENABLED": False,
+    })
+    return conf
+
+
 def get_auto_trading_config() -> dict:
     """Kembalikan snapshot dictionary konfigurasi Auto Trading terpusat (membaca .env terbaru secara live)."""
+    return _apply_loose_overrides(_build_auto_trading_config())
+
+
+def _build_auto_trading_config() -> dict:
     return {
         "SYMBOL": SYMBOL,
         "AUTO_TRADING": _env_cfg("AUTO_TRADING", False, bool),
@@ -420,7 +487,13 @@ def get_auto_trading_config() -> dict:
         "TRAILING_STOP_ACTIVATE_RR": _env_cfg("TRAILING_STOP_ACTIVATE_RR", 1.5, float),
         "TRAILING_STOP_DISTANCE_POINTS": _env_cfg("TRAILING_STOP_DISTANCE_POINTS", 2.5, float),
         "PARTIAL_CLOSE_ENABLED": _env_cfg("PARTIAL_CLOSE_ENABLED", False, bool),
+        "PARTIAL_STEP_POINTS": _env_cfg("PARTIAL_STEP_POINTS", 5.0, float),
+        "PARTIAL_CLOSE_LOT_STEP": _env_cfg("PARTIAL_CLOSE_LOT_STEP", 0.01, float),
+        "PARTIAL_MIN_REMAINING_LOT": _env_cfg("PARTIAL_MIN_REMAINING_LOT", 0.01, float),
+        "BE_AFTER_PARTIAL_ENABLED": _env_cfg("BE_AFTER_PARTIAL_ENABLED", True, bool),
+        "BE_PLUS_LOCK_POINTS": _env_cfg("BE_PLUS_LOCK_POINTS", 0.30, float),
         "MONITOR_INTERVAL_SECONDS": _env_cfg("MONITOR_INTERVAL_SECONDS", 1.0, float),
+        "SNR_ZONE_MIN_STABLE_SECONDS": _env_cfg("SNR_ZONE_MIN_STABLE_SECONDS", 120.0, float),
         "SCANNER_MAGIC_NUMBER": _env_cfg("SCANNER_MAGIC_NUMBER", 20260991, int),
         "ORDER_DEVIATION_POINTS": _env_cfg("ORDER_DEVIATION_POINTS", 30, int),
         "ORDER_SEND_MAX_RETRIES": _env_cfg("ORDER_SEND_MAX_RETRIES", 2, int),
@@ -430,7 +503,11 @@ def get_auto_trading_config() -> dict:
         "DAILY_RESET_TIMEZONE": _env_cfg("DAILY_RESET_TIMEZONE", "WIB", str).upper(),
         "SPREAD_MAKS_POIN": _env_cfg("SPREAD_MAKS_POIN", SPREAD_MAKS_POIN, float),
         "BERITA_BLACKOUT_MENIT": _env_cfg("BERITA_BLACKOUT_MENIT", BERITA_BLACKOUT_MENIT, int),
-        "SL_JARAK_MAKS": _env_cfg("AUTO_SL_JARAK_MAKS", SL_JARAK_MAKS, float),
+        "SL_JARAK_MAKS": _env_cfg("AUTO_SL_JARAK_MAKS", _env_cfg("SL_JARAK_MAKS", SL_JARAK_MAKS, float), float),
+        "CONFLICT_MIDZONE_LIMIT_ENABLED": _env_cfg("CONFLICT_MIDZONE_LIMIT_ENABLED", CONFLICT_MIDZONE_LIMIT_ENABLED, bool),
+        "CONFLICT_MIDZONE_MIN_SCORE": _env_cfg("CONFLICT_MIDZONE_MIN_SCORE", CONFLICT_MIDZONE_MIN_SCORE, float),
+        "CONFLICT_MIDZONE_MAX_WIDTH": _env_cfg("CONFLICT_MIDZONE_MAX_WIDTH", CONFLICT_MIDZONE_MAX_WIDTH, float),
+        "CONFLICT_MIDZONE_SL_BUFFER": _env_cfg("CONFLICT_MIDZONE_SL_BUFFER", CONFLICT_MIDZONE_SL_BUFFER, float),
         "DEFAULT_PENDING_EXPIRATION_HOURS": DEFAULT_PENDING_EXPIRATION_HOURS,
         "PANTAU_TICK_STALE_SECONDS": PANTAU_TICK_STALE_SECONDS,
         "REJECTION_MIN_WICK_RATIO": _env_cfg("REJECTION_MIN_WICK_RATIO", 0.45, float),

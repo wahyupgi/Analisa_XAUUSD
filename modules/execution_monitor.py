@@ -361,6 +361,26 @@ class AutoExecutionMonitor:
             # Evaluasi kandidat zona terbaik (Hybrid SMC + SNR) menggunakan Validator 7-Lapis
             # Jika ada plan invalid/missed, jangan berhenti: release & cari kandidat pengganti otomatis!
             candidates = select_candidate_zones(eff_scan, eff_dec, snr_result=eff_snr)
+            # Stabilitas zona SNR: zona SNR hanya boleh dieksekusi setelah hadir terus-menerus >= N detik.
+            # Zona yang baru muncul / sering berganti (flip fokus) tidak boleh langsung memicu order.
+            import time as _tm
+            _now_m = _tm.monotonic()
+            _min_stable = float(self.cfg.get("SNR_ZONE_MIN_STABLE_SECONDS", 120.0))
+            _seen = getattr(self, "_snr_zone_first_seen", None)
+            if _seen is None:
+                _seen = {}
+                self._snr_zone_first_seen = _seen
+            _present = {str(c.get("zone_id")) for c in candidates if str(c.get("source") or "").upper() == "SNR"}
+            for _zid in list(_seen):
+                if _zid not in _present:
+                    del _seen[_zid]
+            for _zid in _present:
+                _seen.setdefault(_zid, _now_m)
+            candidates = [
+                c for c in candidates
+                if str(c.get("source") or "").upper() != "SNR"
+                or (_now_m - _seen.get(str(c.get("zone_id")), _now_m)) >= _min_stable
+            ]
             best_eval: Optional[Dict[str, Any]] = None
             evaluated_list: List[Dict[str, Any]] = []
 
@@ -421,6 +441,7 @@ class AutoExecutionMonitor:
                         symbol=self.symbol,
                         direction=str((best_eval.get("trade_plan") or {}).get("direction") or ""),
                         entry_mode=str(best_eval.get("entry_mode") or ""),
+                        sub_mode=str(best_eval.get("sub_mode") or (best_eval.get("trade_plan") or {}).get("sub_mode") or ""),
                         planned_entry=float((best_eval.get("trade_plan") or {}).get("entry") or 0.0),
                         sl=float((best_eval.get("trade_plan") or {}).get("sl") or 0.0),
                         tp=float((best_eval.get("trade_plan") or {}).get("tp") or 0.0),
@@ -1048,11 +1069,25 @@ def handle_auto_cli_command(
         lines.append("=" * 72)
         return {"ok": True, "subcommand": "journal", "output": "\n".join(lines), "analytics": stats}
 
+    # AUTO LOOSE (on/off/status) — default OFF; hanya mengubah AUTO_LOOSE_MODE di .env
+    if sub == "loose":
+        from modules.config import set_env_value
+        if arg2 in ("on", "off"):
+            set_env_value("AUTO_LOOSE_MODE", "true" if arg2 == "on" else "false")
+            mon.cfg.update(get_auto_trading_config())
+        state_now = bool(get_auto_trading_config().get("AUTO_LOOSE_MODE"))
+        extra_l = (
+            f" | MaxActive={conf.get('MAX_ACTIVE_POSITIONS')} | RR=1:{conf.get('TP1_RR')} | "
+            f"Zona invalid tetap DIBLOKIR | SL/TP wajib"
+        ) if state_now else ""
+        return {"ok": True, "subcommand": "loose", "output": f"[LOOSE MODE] {'ON' if state_now else 'OFF'}{extra_l}"}
+
     help_auto = (
         "Perintah Auto Trading yang tersedia:\n"
         "  auto status    | auto on       | auto off       | auto real\n"
         "  auto demo      | auto dryrun   | auto semi      | auto approve / reject\n"
         "  auto positions | auto orders   | auto journal   | auto risk\n"
+        "  auto loose [on|off]\n"
         "  auto emergency [close]"
     )
     return {"ok": False, "subcommand": sub, "output": help_auto}

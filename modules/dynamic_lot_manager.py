@@ -163,6 +163,7 @@ def select_target_lot(
     Tidak pernah melebihi MAX_LOT (0.05).
     """
     conf = cfg or get_auto_trading_config()
+    loose = bool(conf.get("AUTO_LOOSE_MODE", False))
     is_valid = bool(_z_attr(zone, "is_valid", False)) and not bool(_z_attr(zone, "is_broken", False))
     status = str(_z_attr(zone, "status", "ACTIVE") or "ACTIVE").upper()
     if not is_valid or status in ("INVALIDATED", "EXPIRED", "MITIGATED", "REJECTED", "BROKEN"):
@@ -201,6 +202,12 @@ def select_target_lot(
 
     if is_ltf_only_zone(zone):
         target = min(target, ltf_max)
+
+    if loose:
+        # LOOSE MODE: grade di bawah B (C/D/dst) selalu 0.01 lot
+        grade_u = str(_z_attr(zone, "grade", "") or "").strip().upper()
+        if not grade_u or grade_u[0] not in ("A", "B"):
+            target = min(target, float(conf.get("LOOSE_LOT", 0.01)))
 
     return round(min(target, max_lot), 2)
 

@@ -293,12 +293,16 @@ class MockMT5:
                 pos.tp = float(request.get("tp", pos.tp))
                 return SimpleNamespace(retcode=RETCODE_DONE, order=pt, comment="Modified")
 
-            # 3. CLOSE EXISTING POSITION
+            # 3. CLOSE / PARTIAL CLOSE EXISTING POSITION
             if act == self.TRADE_ACTION_DEAL and request.get("position"):
                 pt = int(request["position"])
                 pos = next((p for p in self.positions if p.ticket == pt), None)
                 if pos is None:
                     return SimpleNamespace(retcode=10013, comment="Pos not found")
+                req_v = round(float(request.get("volume", pos.volume) or pos.volume), 2)
+                if req_v < float(pos.volume) - 1e-9:
+                    pos.volume = round(float(pos.volume) - req_v, 2)
+                    return SimpleNamespace(retcode=RETCODE_DONE, order=pt, deal=pt + 1000, price=request["price"], volume=req_v)
                 self.positions = [p for p in self.positions if p.ticket != pt]
                 return SimpleNamespace(retcode=RETCODE_DONE, order=pt, deal=pt + 1000, price=request["price"], volume=pos.volume)
 
@@ -502,6 +506,7 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         self.cfg = get_auto_trading_config()
         self.cfg["SYMBOL"] = "XAUUSDc"
         self.cfg.update({
+            "SNR_ZONE_MIN_STABLE_SECONDS": 0.0,
             "LOT_STANDARD": 0.01,
             "LOT_MEDIUM": 0.02,
             "LOT_STRONG": 0.05,
@@ -520,6 +525,8 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
             "MAX_TOTAL_EXPOSURE_PERCENT": 1.0,
             "MAX_DAILY_LOSS_PERCENT": 2.0,
             "SL_JARAK_MAKS": 20.0,
+            "CONFLICT_MIDZONE_LIMIT_ENABLED": False,
+            "PARTIAL_CLOSE_ENABLED": False,
         })
         self.news_ok = {"blackout": False, "status": "READY", "age_seconds": 10.0}
         self.df_m5_rej = _build_m5_df_with_bearish_rejection()
@@ -1212,10 +1219,9 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         self.assertEqual(cyc_h["best_evaluation"]["zone_id"], "SNR_H1_RES_20261124_3643")
 
     def test_env_max_lot_001_cap_enforced(self):
-        cfg_live = get_auto_trading_config()
-        self.assertEqual(cfg_live["MAX_LOT"], 0.01)
+        cfg_cap = {**get_auto_trading_config(), "MAX_LOT": 0.01}
         z94 = _make_supply_zone(score=94.0, grade="A+", timeframe="H4+H1")
-        self.assertEqual(select_target_lot(z94, "ADAPTIVE_ENTRY", strong_zone_validated=True, cfg=cfg_live), 0.01)
+        self.assertEqual(select_target_lot(z94, "ADAPTIVE_ENTRY", strong_zone_validated=True, cfg=cfg_cap), 0.01)
 
     def test_live_1to1_structural_sl_tp_and_wide_zone_execution_not_blocked(self):
         cfg_live = get_auto_trading_config()
@@ -1223,9 +1229,10 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         self.assertEqual(cfg_live["TP1_RR"], 1.0)
         self.assertEqual(cfg_live["MIN_RR"], 1.0)
 
-        # Akun Real IDC 18.280.000 IDC seperti milik user, dengan zona H4/H1 lebar (jarak SL 26.34 USD > 20 USD lama)
+        # Akun Real IDC 18.280.000 IDC:
+        # 1) Dengan konfigurasi ketat (SL_JARAK_MAKS=12.0), zona lebar (SL 26.34 USD) wajib di-skip (REASON_INVALID_STOP_LOSS)
+        # 2) Jika SL_JARAK_MAKS dilonggarkan secara eksplisit (35.0), TP1 1:1 dihitung presisi sesuai jarak SL struktural
         mt5, sm, jrn, eng = self._new_env(equity_idc=18_280_000.0, bid=3520.0, ask=3520.2)
-        eng.cfg = cfg_live
         wide_zone = Zone(
             zone_id="SNR_H4_SUP_WIDE_3502",
             symbol="XAUUSDc",
@@ -1267,9 +1274,18 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         dec["plan"]["sl"] = 3493.86
         dec["plan"]["tp1"] = 3580.00
 
+        cfg_strict = {**cfg_live, "SL_JARAK_MAKS": 12.0}
+        val_strict = validate_trade_candidate(
+            wide_zone, mt5, sm, snapshot=snap, scan_result=scan, decision=dec,
+            news_override=self.news_ok, cfg=cfg_strict,
+        )
+        self.assertEqual(val_strict["reason_code"], REASON_INVALID_STOP_LOSS)
+
+        cfg_wide = {**cfg_live, "SL_JARAK_MAKS": 35.0}
+        eng.cfg = cfg_wide
         val = validate_trade_candidate(
             wide_zone, mt5, sm, snapshot=snap, scan_result=scan, decision=dec,
-            news_override=self.news_ok, cfg=cfg_live,
+            news_override=self.news_ok, cfg=cfg_wide,
         )
         self.assertEqual(val["state"], STATE_ENTRY_READY, msg=f"Harus ENTRY_READY, bukan {val.get('reason_code')}: {val.get('reason_text')}")
         self.assertEqual(val["final_lot"], 0.01)
@@ -1283,6 +1299,202 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         tp_dist = round(pos.tp - pos.price_open, 2)
         self.assertAlmostEqual(sl_dist, 26.34, places=2)
         self.assertAlmostEqual(tp_dist, sl_dist, places=2)
+
+    def test_one_shot_invalid_zone_displayed_once_then_hidden(self):
+        from unittest.mock import patch
+        import modules.utils as u
+        old_ready = u._INVALID_ZONES_BASELINE_READY
+        old_dismissed = list(u._DISMISSED_INVALID_ZONES)
+        old_ck = u._LAST_INVALID_ONCE_CYCLE_KEY
+        old_lz = u._LAST_INVALID_ONCE_ZONE
+        try:
+            u._INVALID_ZONES_BASELINE_READY = False
+            u._DISMISSED_INVALID_ZONES.clear()
+            u._LAST_INVALID_ONCE_CYCLE_KEY = None
+            u._LAST_INVALID_ONCE_ZONE = None
+            with patch.object(u, "_save_trade_plan_state", lambda: None), \
+                 patch.object(u, "_load_trade_plan_state_once", lambda: None):
+                hist_inv = {"zone_id": "OLD_INV_1", "timeframe": "M30", "zone_type": "SUPPLY", "price_low": 3558.37, "price_high": 3560.79}
+                # Siklus awal: baseline zona invalid lama langsung diabaikan (tidak dimunculkan)
+                self.assertIsNone(u.consume_one_shot_invalid_zone([hist_inv], current_price=3575.0, cycle_key="c1"))
+
+                # Siklus #2: ada zona baru terkena SL -> tampilkan INVALID tepat 1 kali pada siklus #2
+                new_sl_hit = {"zone_id": "NEW_SL_HIT_2", "timeframe": "M30", "zone_type": "SUPPLY", "price_low": 3586.0, "price_high": 3589.0, "invalidation_type": "SETUP_INVALID_SL_BREACHED"}
+                res_c2_a = u.consume_one_shot_invalid_zone([hist_inv, new_sl_hit], current_price=3590.0, cycle_key="c2")
+                res_c2_b = u.consume_one_shot_invalid_zone([hist_inv, new_sl_hit], current_price=3590.0, cycle_key="c2")
+                self.assertIsNotNone(res_c2_a)
+                self.assertEqual(res_c2_a["zone_id"], "NEW_SL_HIT_2")
+                self.assertEqual(res_c2_b["zone_id"], "NEW_SL_HIT_2")
+
+                # Siklus #3 dan seterusnya: zona invalid tadi langsung hilang dan tidak pernah ditampilkan lagi
+                self.assertIsNone(u.consume_one_shot_invalid_zone([hist_inv, new_sl_hit], current_price=3590.0, cycle_key="c3"))
+                self.assertIsNone(u.consume_one_shot_invalid_zone([hist_inv, new_sl_hit], current_price=3587.0, cycle_key="c4"))
+        finally:
+            u._INVALID_ZONES_BASELINE_READY = old_ready
+            u._DISMISSED_INVALID_ZONES[:] = old_dismissed
+            u._LAST_INVALID_ONCE_CYCLE_KEY = old_ck
+            u._LAST_INVALID_ONCE_ZONE = old_lz
+
+    def test_conflict_midzone_50pct_limit_sl_tp_outside_zone(self):
+        # Skenario live user: Market HTF_CONFLICT (H4=BEARISH, H1=BULLISH, M30=CONFLICT),
+        # harga di 3602.31/3602.51, ada zona [SNR] M30 RESISTANCE 3625.18-3632.18 (Grade B / 71.8)
+        cfg_mz = {
+            **get_auto_trading_config(),
+            "SNR_ZONE_MIN_STABLE_SECONDS": 0.0,
+            "CONFLICT_MIDZONE_LIMIT_ENABLED": True,
+            "CONFLICT_MIDZONE_MIN_SCORE": 70.0,
+            "CONFLICT_MIDZONE_MAX_WIDTH": 16.0,
+            "CONFLICT_MIDZONE_SL_BUFFER": 0.60,
+            "SL_JARAK_MAKS": 12.0,
+            "MIN_RR": 1.0,
+            "TP1_RR": 1.0,
+            "TP1_MODE": "FIXED_RR",
+            "FORCE_FIXED_TP1": True,
+        }
+        mt5, sm, jrn, eng = self._new_env(equity_idc=18_280_000.0, bid=3602.31, ask=3602.51)
+        mon = AutoExecutionMonitor(mt5_api=mt5, state_mgr=sm, journal=jrn, symbol="XAUUSDc", cfg=cfg_mz, connect_fn=lambda: True)
+
+        df_m5 = self.df_m5_rej.iloc[:-5].copy()
+        snap = {
+            "symbol": "XAUUSDc",
+            "bid": 3602.31,
+            "ask": 3602.51,
+            "mid": 3602.41,
+            "current_price": 3602.41,
+            "spread": 0.20,
+            "market_status": "OPEN",
+            "data_freshness": "FRESH",
+            "tick_age": 1.0,
+            "frames": {"M5": df_m5},
+        }
+        scan_empty_smc = {
+            "symbol": "XAUUSDc",
+            "current_price": 3602.41,
+            "bid": 3602.31,
+            "ask": 3602.51,
+            "spread": 0.20,
+            "market_status": "OPEN",
+            "data_freshness": "FRESH",
+            "htf_bias": "BEARISH",
+            "h1_structure": "BULLISH",
+            "m30_status": "CONFLICT",
+            "htf_context": {"H4": "BEARISH", "H1": "BULLISH", "m30_status": "CONFLICT", "has_conflict": True},
+            "active_zones": [],
+            "radar_zones": [],
+        }
+        snr_res = {
+            "scan_result": {
+                "symbol": "XAUUSDc",
+                "ranked_zones": {
+                    "active_supports": [],
+                    "active_resistances": [{
+                        "zone_id": "SNR_M30_RES_362518_363218",
+                        "timeframe": "M30",
+                        "zone_type": "RESISTANCE",
+                        "low": 3625.18,
+                        "high": 3632.18,
+                        "score": 71.8,
+                        "grade": "B",
+                        "freshness": "FRESH",
+                        "touch_count": 0,
+                        "invalidation_price": 3632.18,
+                        "is_active": True,
+                    }],
+                },
+            },
+            "decision": {"signal": "WAIT"},
+        }
+
+        cyc = mon.run_once(snapshot=snap, scan_result=scan_empty_smc, decision={}, snr_result=snr_res, news_override=self.news_ok)
+        self.assertTrue(cyc["execution_outcome"]["executed"], msg=str(cyc.get("best_evaluation")))
+        self.assertEqual(len(mt5.orders), 1)
+        ord_placed = mt5.orders[0]
+
+        # 1. Entry wajib tepat di 50% tengah zona: (3625.18 + 3632.18) / 2 = 3628.68 (bukan 3625.18, bukan 3632.18)
+        self.assertAlmostEqual(ord_placed.price_open, 3628.68, places=2)
+        # 2. SL tipis tepat di luar ujung atas zona (3632.18 + 0.60 = 3632.78)
+        self.assertAlmostEqual(ord_placed.sl, 3632.78, places=2)
+        # 3. TP tipis tepat di luar ujung bawah zona (3625.18 - 0.60 = 3624.58)
+        self.assertAlmostEqual(ord_placed.tp, 3624.58, places=2)
+
+        # 4. Siklus berikutnya saat masih HTF_CONFLICT -> pending order TIDAK dibatalkan!
+        cyc_next = mon.run_once(snapshot=snap, scan_result=scan_empty_smc, decision={}, snr_result=snr_res, news_override=self.news_ok)
+        self.assertEqual(len(mt5.orders), 1)
+
+    def test_stepwise_partial_close_002_and_003_lot_with_auto_be_plus(self):
+        from modules.position_manager import PositionManager
+
+        cfg_p = {
+            **self.cfg,
+            "PARTIAL_CLOSE_ENABLED": True,
+            "PARTIAL_STEP_POINTS": 5.0,       # 50 pips = 5.00 USD
+            "PARTIAL_CLOSE_LOT_STEP": 0.01,
+            "PARTIAL_MIN_REMAINING_LOT": 0.01,
+            "BE_AFTER_PARTIAL_ENABLED": True,
+            "BE_PLUS_LOCK_POINTS": 0.30,
+        }
+        mt5, sm, jrn, eng = self._new_env(bid=3600.0, ask=3600.2)
+        eng.cfg = cfg_p
+        pm = PositionManager(exec_engine=eng, state_mgr=sm, cfg=cfg_p)
+        magic = int(cfg_p["SCANNER_MAGIC_NUMBER"])
+
+        # A) SKENARIO 0.02 LOT BUY @ 3600.00 (SL 3592.00, TP1 3612.00) + posisi manual user 0.03 lot (magic=0)
+        mt5.positions = [
+            SimpleNamespace(ticket=501, symbol="XAUUSDc", type=mt5.ORDER_TYPE_BUY, volume=0.02, price_open=3600.00, sl=3592.00, tp=3612.00, profit=0.0, swap=0.0, commission=0.0, magic=magic, comment="SCAN_002", time=1000),
+            SimpleNamespace(ticket=999, symbol="XAUUSDc", type=mt5.ORDER_TYPE_BUY, volume=0.03, price_open=3600.00, sl=3590.00, tp=3620.00, profit=0.0, swap=0.0, commission=0.0, magic=0, comment="MANUAL_USER", time=1000),
+        ]
+        sm.update_setup_state("SETUP_BUY_002", "POSITION_ACTIVE", position_ticket=501, actual_entry=3600.00, sl=3592.00, tp=3612.00, final_lot=0.02, actual_lot=0.02, extra={"planned_sl": 3592.00, "initial_lot": 0.02})
+
+        # Running +4.50 USD (45 pips) -> belum partial, SL masih 3592.00
+        mt5.bid, mt5.ask = 3604.50, 3604.70
+        res_45 = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(res_45["partial_actions"]), 0)
+        self.assertAlmostEqual(mt5.positions[0].volume, 0.02, places=2)
+        self.assertAlmostEqual(mt5.positions[0].sl, 3592.00, places=2)
+
+        # Running +5.00 USD (50 pips) -> partial 0.01 lot (sisa 0.01 ke TP1) + SL langsung pindah ke BE+ (3600.30)!
+        mt5.bid, mt5.ask = 3605.00, 3605.20
+        res_50 = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(res_50["partial_actions"]), 1)
+        self.assertAlmostEqual(mt5.positions[0].volume, 0.01, places=2)
+        self.assertAlmostEqual(mt5.positions[0].sl, 3600.30, places=2)
+        self.assertAlmostEqual(mt5.positions[0].tp, 3612.00, places=2)
+        # Posisi manual user (ticket 999) sama sekali tidak disentuh!
+        self.assertAlmostEqual(mt5.positions[1].volume, 0.03, places=2)
+        self.assertAlmostEqual(mt5.positions[1].sl, 3590.00, places=2)
+
+        # Running +10.50 USD -> sisa 0.01 lot TIDAK di-partial lagi, tetap dibiarkan sampai TP1!
+        mt5.bid, mt5.ask = 3610.50, 3610.70
+        res_105 = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(res_105["partial_actions"]), 0)
+        self.assertAlmostEqual(mt5.positions[0].volume, 0.01, places=2)
+
+        # B) SKENARIO 0.03 LOT SELL @ 3650.00 (SL 3658.00, TP1 3635.00) -> berturut-turut +50 pips & +100 pips!
+        mt5.positions = [
+            SimpleNamespace(ticket=601, symbol="XAUUSDc", type=mt5.ORDER_TYPE_SELL, volume=0.03, price_open=3650.00, sl=3658.00, tp=3635.00, profit=0.0, swap=0.0, commission=0.0, magic=magic, comment="SCAN_003", time=2000),
+        ]
+        sm.update_setup_state("SETUP_SELL_003", "POSITION_ACTIVE", position_ticket=601, actual_entry=3650.00, sl=3658.00, tp=3635.00, final_lot=0.03, actual_lot=0.03, extra={"planned_sl": 3658.00, "initial_lot": 0.03})
+
+        # Tahap 1: Running +50 pips SELL (Ask turun ke 3645.00) -> tutup 0.01 (sisa 0.02) + BE+ di 3649.70!
+        mt5.bid, mt5.ask = 3644.80, 3645.00
+        r_s1 = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(r_s1["partial_actions"]), 1)
+        self.assertAlmostEqual(mt5.positions[0].volume, 0.02, places=2)
+        self.assertAlmostEqual(mt5.positions[0].sl, 3649.70, places=2)
+
+        # Tick berikutnya di +55 pips (Ask 3644.50) -> JANGAN partial tahap 2 dulu sebelum +100 pips!
+        mt5.bid, mt5.ask = 3644.30, 3644.50
+        r_mid = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(r_mid["partial_actions"]), 0)
+        self.assertAlmostEqual(mt5.positions[0].volume, 0.02, places=2)
+
+        # Tahap 2: Running +100 pips SELL (Ask turun ke 3640.00) -> tutup 0.01 lagi (sisa 0.01 biarkan ke TP1 3635.00)!
+        mt5.bid, mt5.ask = 3639.80, 3640.00
+        r_s2 = pm.audit_and_manage_positions("XAUUSDc")
+        self.assertEqual(len(r_s2["partial_actions"]), 1)
+        self.assertAlmostEqual(mt5.positions[0].volume, 0.01, places=2)
+        self.assertAlmostEqual(mt5.positions[0].sl, 3649.70, places=2)
+        self.assertAlmostEqual(mt5.positions[0].tp, 3635.00, places=2)
 
 
 if __name__ == "__main__":

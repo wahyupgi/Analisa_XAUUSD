@@ -539,6 +539,7 @@ class ExecutionStateManager:
         symbol: str = SYMBOL,
         direction: str = "",
         entry_mode: str = "",
+        sub_mode: str = "",
         order_ticket: Optional[int] = None,
         position_ticket: Optional[int] = None,
         planned_entry: Optional[float] = None,
@@ -590,6 +591,8 @@ class ExecutionStateManager:
                 rec["direction"] = str(direction).upper()
             if entry_mode:
                 rec["entry_mode"] = str(entry_mode).upper()
+            if sub_mode:
+                rec["sub_mode"] = str(sub_mode).upper()
             if order_ticket is not None:
                 rec["order_ticket"] = int(order_ticket)
             if position_ticket is not None:

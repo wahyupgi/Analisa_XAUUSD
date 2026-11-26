@@ -606,18 +606,18 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
             + list(bo_watch_c.get("historical") or [])
         )
         h1_atr_c = safe_float(((sr.get("atr_diagnostics") or {}).get("H1") or {}).get("atr14"), 0.0) or None
-        iw0 = select_relevant_invalid_zone(
+        from modules.utils import consume_one_shot_invalid_zone
+        iw0 = consume_one_shot_invalid_zone(
             inv_items_c,
             current_price=price_val if price_val > 0 else None,
             atr=h1_atr_c,
             direction=dir_snr,
+            cycle_key=f"snr_fmt:{time_label}",
         )
-        inv_why_c = ""
         if isinstance(iw0, dict):
             iw_z = iw0.get("zone") if isinstance(iw0.get("zone"), dict) else iw0
             iw_st = str(iw0.get("state") or classify_snr_breakout_state(iw_z).get("state") or "BROKEN").upper()
-            inv_snr_line = format_invalid_zone_compact(iw0, current_price=price_val if price_val > 0 else None, unit_spec=_u_snr_c, status_override=iw_st)
-            inv_why_c = format_snr_invalid_why(iw0, h4_bias=h4_b, h1_bias=h1_b)
+            inv_snr_line = format_invalid_zone_compact(iw0, current_price=price_val if price_val > 0 else None, unit_spec=_u_snr_c, status_override=iw_st, include_id=False)
         else:
             inv_snr_line = "NONE"
 
@@ -703,8 +703,7 @@ def format_snr_summary(scan_result, decision=None, detailed=False):
             *snr_tp_lines,
             *wrap_dashboard_field("ACTIVE/RADAR : ", _fmt_snr_1line(target_z), term_w_snr, max_lines=None),
             *(wrap_dashboard_field("  WHY        : ", target_why_c, term_w_snr, max_lines=None) if target_why_c else []),
-            *wrap_dashboard_field("INVALID      : ", inv_snr_line, term_w_snr, max_lines=None),
-            *(wrap_dashboard_field("  WHY        : ", inv_why_c, term_w_snr, max_lines=None) if inv_why_c else []),
+            *(wrap_dashboard_field("INVALID      : ", inv_snr_line, term_w_snr, max_lines=None) if inv_snr_line != "NONE" else []),
             *wrap_dashboard_field("SNR          : ", f"{s1_t} | {r1_t}", term_w_snr, max_lines=None),
             *(wrap_dashboard_field("  WHY S1     : ", s1_why_c, term_w_snr, max_lines=None) if s1_why_c else []),
             *(wrap_dashboard_field("  WHY R1     : ", r1_why_c, term_w_snr, max_lines=None) if r1_why_c else []),

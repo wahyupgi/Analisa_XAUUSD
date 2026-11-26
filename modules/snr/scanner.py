@@ -464,6 +464,59 @@ def generate_snr_trade_plan(
     missed_thresh_snr = round(max_entry_dist_atr * ref_atr_tp, digits)
     m5_eval_st_snr = str(dec.get("m5_eval_status") or ev.get("m5_eval_status") or "").strip().upper() or None
 
+    # Mode Conflict/Sideways Mid-Zone 50% Limit pada SNR (selaras dengan Auto Execution)
+    early_mz_snr = None
+    eff_min_rr_snr = min_rr
+    try:
+        from modules.adaptive_entry_engine import compute_midzone_scalp_levels, is_conflict_or_sideways_market
+        from modules.config import get_auto_trading_config, ENTRY_JARAK_MAKS
+        _acfg_snr = get_auto_trading_config()
+        if (
+            not is_closed
+            and not is_invalid_z
+            and not is_expired_z
+            and not is_far_z
+            and bool(_acfg_snr.get("CONFLICT_MIDZONE_LIMIT_ENABLED", False))
+            and sc >= float(_acfg_snr.get("CONFLICT_MIDZONE_MIN_SCORE", 70.0))
+            and is_conflict_or_sideways_market(
+                direction=direction,
+                htf_bias=h4,
+                h1_bias=str(mb.get("h1") or "NETRAL"),
+                m30_status=str(mb.get("m30") or ("CONFLICT" if m30_conflict else "CONFIRMED")),
+                has_explicit_htf_conflict=(htf_conflict or m30_conflict),
+            )
+        ):
+            _mz_cand_s = {
+                "zone_id": zid,
+                "timeframe": tf,
+                "zone_type": "DEMAND" if direction == "BUY" else "SUPPLY",
+                "price_low": lo,
+                "price_high": hi,
+                "score": sc,
+                "grade": grd,
+                "invalidation_price": struct_inv,
+                "is_valid": True,
+            }
+            _mz_lvls = compute_midzone_scalp_levels(_mz_cand_s, spread=spread_pts, cfg=_acfg_snr, digits=digits)
+            if _mz_lvls.get("valid"):
+                _mid_e = float(_mz_lvls["entry_price"])
+                _ref_m = float(ask_v if (direction == "BUY" and ask_v) else (bid_v if (direction == "SELL" and bid_v) else price))
+                _gap_ok = (_mid_e < _ref_m - max(0.15, spread_pts)) if direction == "BUY" else (_mid_e > _ref_m + max(0.15, spread_pts))
+                if _gap_ok and abs(_mid_e - _ref_m) <= float(ENTRY_JARAK_MAKS):
+                    early_mz_snr = {
+                        "entry": _mid_e,
+                        "sl": float(_mz_lvls["sl"]),
+                        "tp1": float(_mz_lvls["tp1"]),
+                        "tp2": 0.0,
+                        "ready": True,
+                        "is_expired": False,
+                        "is_midzone_limit": True,
+                    }
+                    struct_inv = float(_mz_lvls["invalidation_price"])
+                    eff_min_rr_snr = min(min_rr, float(_acfg_snr.get("MIN_RR", 1.0)))
+    except Exception:
+        pass
+
     return build_shared_trade_plan(
         source="SNR",
         zone_id=zid,
@@ -483,7 +536,7 @@ def generate_snr_trade_plan(
         max_spread=max_spr,
         digits=digits,
         min_stop=min_stop,
-        min_rr=min_rr,
+        min_rr=eff_min_rr_snr,
         max_sl_dist=float(SL_JARAK_MAKS),
         atr_value=safe_float(z.get("ref_atr"), 0.0),
         is_closed=is_closed,
@@ -494,10 +547,10 @@ def generate_snr_trade_plan(
         is_breakout_pending=is_bo_pending,
         is_far_zone=is_far_z,
         confirmed_plan=confirmed_payload,
-        early_pending_plan=None,
+        early_pending_plan=early_mz_snr,
         cond_reason=cond_rsn,
         compute_levels_fn=_compute_snr_levels,
-        was_touched=was_touched_snr,
+        was_touched=(False if early_mz_snr else was_touched_snr),
         touch_time=touch_time_snr,
         m5_eval_status=m5_eval_st_snr,
         missed_move_threshold=missed_thresh_snr,

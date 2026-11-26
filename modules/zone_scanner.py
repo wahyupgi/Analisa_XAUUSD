@@ -8872,6 +8872,47 @@ def generate_smc_trade_plan(
             "is_expired": bool(matched_early.get("is_expired")),
         }
 
+    # Mode Conflict/Sideways Mid-Zone 50% Limit pada SMC (selaras dengan Auto Execution)
+    eff_min_rr_smc = float(RR_MIN)
+    try:
+        from modules.adaptive_entry_engine import compute_midzone_scalp_levels, is_conflict_or_sideways_market
+        from modules.config import get_auto_trading_config
+        _acfg_smc = get_auto_trading_config()
+        if (
+            not is_closed
+            and not is_invalid_z
+            and not is_expired_z
+            and not is_far_z
+            and bool(_acfg_smc.get("CONFLICT_MIDZONE_LIMIT_ENABLED", False))
+            and sc >= float(_acfg_smc.get("CONFLICT_MIDZONE_MIN_SCORE", 70.0))
+            and is_conflict_or_sideways_market(
+                direction=direction,
+                htf_bias=h4,
+                h1_bias=str((ctx or {}).get("H1") or "NETRAL"),
+                m30_status=str((ctx or {}).get("m30_status") or ("CONFLICT" if m30_bad else "CONFIRMED")),
+                has_explicit_htf_conflict=(htf_conflict or m30_bad),
+            )
+        ):
+            _mz_smc_lvls = compute_midzone_scalp_levels(zd, spread=eff_spread, cfg=_acfg_smc, digits=digits)
+            if _mz_smc_lvls.get("valid"):
+                _mid_e_smc = float(_mz_smc_lvls["entry_price"])
+                _ref_m_smc = float(ask_v if (demand and ask_v) else (bid_v if ((not demand) and bid_v) else price))
+                _gap_ok_smc = (_mid_e_smc < _ref_m_smc - max(0.15, eff_spread)) if demand else (_mid_e_smc > _ref_m_smc + max(0.15, eff_spread))
+                if _gap_ok_smc and abs(_mid_e_smc - _ref_m_smc) <= float(ENTRY_JARAK_MAKS):
+                    early_payload = {
+                        "entry": _mid_e_smc,
+                        "sl": float(_mz_smc_lvls["sl"]),
+                        "tp1": float(_mz_smc_lvls["tp1"]),
+                        "tp2": 0.0,
+                        "ready": True,
+                        "is_expired": False,
+                        "is_midzone_limit": True,
+                    }
+                    struct_inv = float(_mz_smc_lvls["invalidation_price"])
+                    eff_min_rr_smc = min(eff_min_rr_smc, float(_acfg_smc.get("MIN_RR", 1.0)))
+    except Exception:
+        pass
+
     ref_atr_z = zd.get("atr_value")
     if not ref_atr_z and frames and "H1" in frames and "ATR14" in frames["H1"].columns:
         try:
@@ -9021,7 +9062,7 @@ def generate_smc_trade_plan(
         max_spread=max(float(SPREAD_MAKS_POIN), 0.0),
         digits=digits,
         min_stop=min_stop,
-        min_rr=float(RR_MIN),
+        min_rr=eff_min_rr_smc,
         max_sl_dist=float(SL_JARAK_MAKS),
         atr_value=atr_num,
         is_closed=is_closed,
@@ -9034,7 +9075,7 @@ def generate_smc_trade_plan(
         early_pending_plan=early_payload,
         cond_reason=cond_rsn,
         compute_levels_fn=_compute_smc_levels,
-        was_touched=was_touched_smc,
+        was_touched=(False if (isinstance(early_payload, dict) and early_payload.get("is_midzone_limit")) else was_touched_smc),
         touch_time=touch_time_smc,
         m5_eval_status=m5_eval_st_smc,
         is_missed=is_missed_smc,

@@ -157,8 +157,10 @@ class PendingOrderManager:
                         cancel_code = z_code
                         cancel_reason = z_msg
 
-            # 5. Cek Perubahan Struktur HTF (EARLY_PENDING membutuhkan H4 & H1 tetap mendukung)
-            if not cancel_code and h4_bias in ("BULLISH", "BEARISH", "NETRAL") and sc:
+            # 5. Cek Perubahan Struktur HTF (EARLY_PENDING standar membutuhkan H4 & H1 mendukung;
+            #    kecuali order Mid-Zone 50% Limit yang memang dipasang khusus untuk kondisi konflik/sideways)
+            is_midzone_ord = (str(rec.get("sub_mode") or "") == "CONFLICT_MIDZONE_LIMIT")
+            if not cancel_code and (not is_midzone_ord) and h4_bias in ("BULLISH", "BEARISH", "NETRAL") and sc:
                 dir_ok, d_code, d_msg = evaluate_directional_alignment(
                     direction=direction,
                     entry_mode="EARLY_PENDING",
@@ -166,6 +168,7 @@ class PendingOrderManager:
                     h1_bias=h1_bias,
                     m30_status=m30_status,
                     has_explicit_htf_conflict=has_htf_conflict,
+                    allow_conflict_midzone=False,
                     cfg=conf,
                 )
                 if not dir_ok:

@@ -55,6 +55,7 @@ class PositionManager:
 
         emergency_actions: List[Dict[str, Any]] = []
         protection_updates: List[Dict[str, Any]] = []
+        partial_actions: List[Dict[str, Any]] = []
 
         setups = self.state_mgr.get_all_setups()
         setup_by_pos_tkt: Dict[int, Dict[str, Any]] = {}
@@ -135,21 +136,89 @@ class PositionManager:
             freeze_pts = mt5_points_to_price_distance(u_spec["trade_freeze_level"] or 0, spec=u_spec)
             min_brk_dist = max(stops_pts, freeze_pts, float(u_spec["trade_tick_size"] or 0.01))
 
-            initial_sl = float(rec.get("sl") or cur_sl)
+            initial_sl = float(rec.get("planned_sl") or rec.get("sl") or cur_sl)
             init_risk = abs(entry_px - initial_sl) if initial_sl > 0 else 0.0
             cur_close_px = bid if is_buy else ask
             profit_pts = (cur_close_px - entry_px) if is_buy else (entry_px - cur_close_px)
             cur_rr = (profit_pts / init_risk) if init_risk > 0 else 0.0
 
+            # 2A. PARTIAL CLOSE BERTAHAP (+50 pips / 5.0 USD per tahap) + AUTO BE+
+            cur_vol = round(float(getattr(pos, "volume", 0.0) or 0.0), 2)
+            step_pts = float(conf.get("PARTIAL_STEP_POINTS", 5.0))
+            step_lot = round(float(conf.get("PARTIAL_CLOSE_LOT_STEP", 0.01)), 2)
+            min_rem_lot = round(float(conf.get("PARTIAL_MIN_REMAINING_LOT", 0.01)), 2)
+            be_after_partial = bool(conf.get("BE_AFTER_PARTIAL_ENABLED", True))
+            be_plus_pts = float(conf.get("BE_PLUS_LOCK_POINTS", 0.30))
+
+            init_lot_rec = round(
+                max(
+                    float(rec.get("initial_lot") or 0.0),
+                    float(rec.get("final_lot") or 0.0),
+                    cur_vol,
+                ),
+                2,
+            )
+            stages_done = int(rec.get("partial_stages_done") or 0)
+            if step_lot > 0 and init_lot_rec > cur_vol + 1e-6:
+                inferred_done = int(round((init_lot_rec - cur_vol) / step_lot))
+                stages_done = max(stages_done, inferred_done)
+
+            if sid and float(rec.get("initial_lot") or 0.0) <= 0.0 and init_lot_rec > 0.0:
+                self.state_mgr.update_setup_state(sid, "POSITION_ACTIVE", extra={"initial_lot": init_lot_rec})
+
+            if conf.get("PARTIAL_CLOSE_ENABLED", False) and step_pts > 0 and step_lot > 0:
+                if round(cur_vol - step_lot, 2) >= min_rem_lot - 1e-9:
+                    next_stage = stages_done + 1
+                    req_profit = next_stage * step_pts
+                    if profit_pts >= req_profit - 1e-6:
+                        p_res = self.engine.partial_close_scanner_position(
+                            tkt,
+                            close_volume=step_lot,
+                            symbol=pos_sym,
+                            stage_no=next_stage,
+                            min_remaining_lot=min_rem_lot,
+                        )
+                        if p_res.get("partial_closed"):
+                            tkt = int(p_res.get("remaining_ticket") or tkt)
+                            cur_vol = round(float(p_res.get("remaining_volume") or (cur_vol - step_lot)), 2)
+                            stages_done = next_stage
+                            if sid:
+                                self.state_mgr.update_setup_state(
+                                    sid,
+                                    "POSITION_ACTIVE",
+                                    position_ticket=tkt,
+                                    actual_lot=cur_vol,
+                                    extra={
+                                        "initial_lot": init_lot_rec,
+                                        "partial_stages_done": stages_done,
+                                    },
+                                )
+                            partial_actions.append({
+                                "ticket": tkt,
+                                "stage": stages_done,
+                                "closed_lot": p_res["closed_volume"],
+                                "remaining_lot": cur_vol,
+                                "profit_pts": round(profit_pts, 2),
+                            })
+
             candidate_sl = None
+
+            # Jika sudah pernah partial minimal 1x dan BE_AFTER_PARTIAL_ENABLED aktif -> pastikan SL dikunci ke BE+!
+            if stages_done >= 1 and be_after_partial:
+                be_plus_sl = (entry_px + be_plus_pts) if is_buy else (entry_px - be_plus_pts)
+                if (is_buy and be_plus_sl > cur_sl + 1e-6) or ((not is_buy) and be_plus_sl < cur_sl - 1e-6):
+                    candidate_sl = be_plus_sl
 
             if conf.get("BREAK_EVEN_ENABLED", False) and init_risk > 0:
                 be_rr = float(conf.get("BREAK_EVEN_TRIGGER_RR", 1.0))
                 be_lock = float(conf.get("BREAK_EVEN_LOCK_POINTS", 0.30))
                 if cur_rr >= be_rr:
                     be_sl = (entry_px + be_lock) if is_buy else (entry_px - be_lock)
-                    if (is_buy and be_sl > cur_sl) or ((not is_buy) and be_sl < cur_sl):
-                        candidate_sl = be_sl
+                    if candidate_sl is None:
+                        if (is_buy and be_sl > cur_sl) or ((not is_buy) and be_sl < cur_sl):
+                            candidate_sl = be_sl
+                    else:
+                        candidate_sl = max(candidate_sl, be_sl) if is_buy else min(candidate_sl, be_sl)
 
             if conf.get("TRAILING_STOP_ENABLED", False) and init_risk > 0:
                 tr_rr = float(conf.get("TRAILING_STOP_ACTIVATE_RR", 1.5))
@@ -174,6 +243,8 @@ class PositionManager:
                         tkt, new_sl=norm_cand, new_tp=cur_tp, symbol=pos_sym
                     )
                     if m_res.get("modified"):
+                        if sid:
+                            self.state_mgr.update_setup_state(sid, "POSITION_ACTIVE", sl=m_res["sl"], tp=cur_tp)
                         protection_updates.append({
                             "ticket": tkt,
                             "old_sl": cur_sl,
@@ -185,6 +256,7 @@ class PositionManager:
             "manual_positions_count": len(manual_positions),
             "emergency_actions": emergency_actions,
             "protection_updates": protection_updates,
+            "partial_actions": partial_actions,
         }
 
     def emergency_close_all_scanner_positions(self, symbol: str = SYMBOL) -> List[Dict[str, Any]]:

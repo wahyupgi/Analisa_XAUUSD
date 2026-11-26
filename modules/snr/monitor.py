@@ -72,7 +72,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
             format_invalid_zone_compact,
             format_price_distance,
             resolve_entry_blocker_code,
-            select_relevant_invalid_zone,
+            consume_one_shot_invalid_zone,
         )
         from modules.zone_scanner import resolve_analysis_direction
         _u_mon = extract_unit_spec_from_container(sr)
@@ -116,15 +116,13 @@ def format_snr_monitor_section(cycle_result, detailed=False):
             + list(ranked.get("invalidated_zones") or [])
         )
         h1_atr_m = safe_float(((sr.get("atr_diagnostics") or {}).get("H1") or {}).get("atr14"), 0.0) or None
-        iz_m = select_relevant_invalid_zone(inv_pool_m, current_price=last_price if last_price > 0 else None, atr=h1_atr_m)
+        iz_m = consume_one_shot_invalid_zone(inv_pool_m, current_price=last_price if last_price > 0 else None, atr=h1_atr_m, cycle_key=f"snr:{last_price_str}")
         if isinstance(iz_m, dict):
             iz_m_z = iz_m.get("zone") if isinstance(iz_m.get("zone"), dict) else iz_m
             iz_m_st = str(iz_m.get("state") or classify_snr_breakout_state(iz_m_z).get("state") or "BROKEN").upper()
-            inv_m = format_invalid_zone_compact(iz_m, current_price=last_price if last_price > 0 else None, unit_spec=_u_mon, status_override=iz_m_st)
-            inv_why_m = format_snr_invalid_why(iz_m, h4_bias=h4_m)
+            inv_m = format_invalid_zone_compact(iz_m, current_price=last_price if last_price > 0 else None, unit_spec=_u_mon, status_override=iz_m_st, include_id=False)
         else:
             inv_m = "NONE"
-            inv_why_m = ""
         if isinstance(tz_m, dict):
             tz_lo = safe_float(tz_m.get("low"), 0.0)
             tz_hi = safe_float(tz_m.get("high"), tz_lo)
@@ -146,8 +144,7 @@ def format_snr_monitor_section(cycle_result, detailed=False):
             f"ENTRY STATUS : {ent_m}",
             f"ACTIVE/RADAR : {act_m}",
             *([f"  WHY        : {act_why_m}"] if act_why_m else []),
-            f"INVALID      : {inv_m}",
-            *([f"  WHY        : {inv_why_m}"] if inv_why_m else []),
+            *([f"INVALID      : {inv_m}"] if inv_m != "NONE" else []),
             f"SNR          : {s1_m} | {r1_m}",
             *([f"  WHY S1     : {s1_why_m}"] if s1_why_m else []),
             *([f"  WHY R1     : {r1_why_m}"] if r1_why_m else []),

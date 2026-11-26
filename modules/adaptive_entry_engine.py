@@ -665,6 +665,94 @@ def compute_setup_sl_tp_levels(
     }
 
 
+def is_conflict_or_sideways_market(
+    direction: str,
+    htf_bias: str = "NETRAL",
+    h1_bias: str = "NETRAL",
+    m30_status: str = "CONFIRMED",
+    has_explicit_htf_conflict: bool = False,
+) -> bool:
+    """Deteksi apakah market sedang konflik antar-timeframe (HTF_CONFLICT) atau sideways/ranging."""
+    if has_explicit_htf_conflict:
+        return True
+    dir_u = str(direction or "").upper()
+    opp_bias = "BEARISH" if dir_u == "BUY" else "BULLISH"
+    h4_u = str(htf_bias or "NETRAL").upper()
+    h1_u = str(h1_bias or "NETRAL").upper()
+    m30_u = str(m30_status or "CONFIRMED").upper()
+
+    if h4_u in ("NETRAL", "NEUTRAL", "SIDEWAYS", "CONFLICT"):
+        return True
+    if any(tok in h1_u for tok in ("CONFLICT", "COUNTER", "SIDEWAYS", opp_bias)):
+        return True
+    if h4_u == "BULLISH" and "BEARISH" in h1_u:
+        return True
+    if h4_u == "BEARISH" and "BULLISH" in h1_u:
+        return True
+    if any(tok in m30_u for tok in ("CONFLICT", "COUNTER", "OPPOSING", "SIDEWAYS", opp_bias)):
+        return True
+    return False
+
+
+def compute_midzone_scalp_levels(
+    zone_in: Any,
+    spread: float = 0.0,
+    cfg: Optional[Dict[str, Any]] = None,
+    digits: int = 2,
+) -> Dict[str, Any]:
+    """
+    Hitung level presisi untuk mode Conflict/Sideways Mid-Zone 50% Limit:
+    - Entry  : tepat di tengah-tengah zona ((lo + hi) / 2) — bukan di awal zona, bukan di akhir zona.
+    - SL     : tipis tepat di luar batas belakang zona (lo - buffer untuk BUY, hi + buffer untuk SELL).
+    - TP1    : tipis tepat di luar batas depan zona secara simetris 1:1 (hi + buffer untuk BUY, lo - buffer untuk SELL).
+    """
+    conf = cfg or get_auto_trading_config()
+    zone = _ensure_zone_obj(zone_in)
+    demand = (zone.zone_type == "DEMAND")
+    lo = float(zone.price_low or 0.0)
+    hi = float(zone.price_high or 0.0)
+    width = hi - lo
+    max_w = float(conf.get("CONFLICT_MIDZONE_MAX_WIDTH", 16.0))
+    max_sl = float(conf.get("SL_JARAK_MAKS", 12.0))
+    if lo <= 0.0 or hi <= lo or width < 0.40:
+        return {"valid": False, "reason": "Lebar zona terlalu tipis untuk dibagi 2 ke titik tengah"}
+    if width > max_w + 1e-6:
+        return {"valid": False, "reason": f"Lebar zona ({width:.2f} USD) melebihi batas mid-zone ({max_w:.2f} USD)"}
+
+    mid_entry = round((lo + hi) / 2.0, digits)
+    base_buf = float(conf.get("CONFLICT_MIDZONE_SL_BUFFER", 0.60))
+    eff_buf = round(max(base_buf, max(0.0, float(spread or 0.0)) + 0.30), digits)
+
+    outer_back = lo if demand else hi
+    sl = round(outer_back - eff_buf if demand else outer_back + eff_buf, digits)
+    risk_dist = round(abs(mid_entry - sl), digits)
+    if risk_dist <= 0.30 or risk_dist > max_sl + 1e-6:
+        return {"valid": False, "reason": f"Jarak SL mid-zone ({risk_dist:.2f} USD) di luar batas aman (maks {max_sl:.2f} USD)"}
+
+    target_rr = max(1.0, float(conf.get("MIN_RR", 1.0)), float(conf.get("TP1_RR", 1.0)))
+    tp1 = round(mid_entry + (target_rr * risk_dist) if demand else mid_entry - (target_rr * risk_dist), digits)
+    # Pastikan TP1 benar-benar jatuh di luar tepi depan zona
+    if demand and tp1 <= hi:
+        tp1 = round(hi + eff_buf, digits)
+    elif (not demand) and tp1 >= lo:
+        tp1 = round(lo - eff_buf, digits)
+
+    reward_dist = round(abs(tp1 - mid_entry), digits)
+    rr_val = round(reward_dist / risk_dist, 2) if risk_dist > 0 else 0.0
+    return {
+        "valid": True,
+        "entry_price": mid_entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": 0.0,
+        "risk": risk_dist,
+        "reward": reward_dist,
+        "rr": rr_val,
+        "invalidation_price": round(outer_back, digits),
+        "buffer": eff_buf,
+    }
+
+
 def evaluate_entry_paths_for_zone(
     zone_in: Any,
     frames: Optional[Dict[str, pd.DataFrame]],
@@ -675,6 +763,7 @@ def evaluate_entry_paths_for_zone(
     htf_bias: str = "NETRAL",
     h1_bias: str = "NETRAL",
     m30_status: str = "CONFIRMED",
+    has_htf_conflict: bool = False,
     server_time: Any = None,
     opposing_zones: Optional[List[Any]] = None,
     snr_context: Optional[Dict[str, Any]] = None,
@@ -710,6 +799,90 @@ def evaluate_entry_paths_for_zone(
     adaptive_en = bool(conf.get("ADAPTIVE_ENTRY_ENABLED", True))
     confirmed_en = bool(conf.get("CONFIRMED_ENTRY_ENABLED", True))
     early_en = bool(conf.get("EARLY_PENDING_ENABLED", True))
+
+    # Kasus 0: Market sedang Konflik / Sideways (HTF_CONFLICT) & mode Mid-Zone 50% Limit diaktifkan ->
+    # Pasang BUY/SELL LIMIT presisi tepat di tengah-tengah zona (50%) dengan SL & TP tipis di luar ujung zona!
+    if (
+        bool(conf.get("CONFLICT_MIDZONE_LIMIT_ENABLED", False))
+        and early_en
+        and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY")
+        and is_conflict_or_sideways_market(
+            direction=direction,
+            htf_bias=htf_bias,
+            h1_bias=h1_bias,
+            m30_status=m30_status,
+            has_explicit_htf_conflict=has_htf_conflict,
+        )
+    ):
+        min_sc_mz = float(conf.get("CONFLICT_MIDZONE_MIN_SCORE", 70.0))
+        z_score_mz = float(getattr(zone, "score", 0.0) or 0.0)
+        mid_lvls = compute_midzone_scalp_levels(zone, spread=float(spread or 0.0), cfg=conf)
+        if z_score_mz >= min_sc_mz and mid_lvls.get("valid"):
+            mid_px = float(mid_lvls["entry_price"])
+            ref_mkt_mz = float(
+                ask if (demand and ask and ask > 0) else (bid if ((not demand) and bid and bid > 0) else current_price)
+            )
+            min_gap_mz = max(0.15, float(spread or 0.0))
+            limit_side_valid = (demand and mid_px < ref_mkt_mz - min_gap_mz) or ((not demand) and mid_px > ref_mkt_mz + min_gap_mz)
+            dist_to_mid = abs(mid_px - ref_mkt_mz)
+            from modules.config import ENTRY_JARAK_MAKS
+            max_pend_dist = float(conf.get("ENTRY_JARAK_MAKS", ENTRY_JARAK_MAKS))
+            if limit_side_valid and dist_to_mid <= max_pend_dist:
+                ord_type_mz = "BUY LIMIT" if demand else "SELL LIMIT"
+                return {
+                    "entry_mode": "EARLY_PENDING",
+                    "sub_mode": "CONFLICT_MIDZONE_LIMIT",
+                    "order_kind": "LIMIT",
+                    "order_type": ord_type_mz,
+                    "direction": direction,
+                    "touch": touch,
+                    "triggers": triggers,
+                    "trigger_passed": True,
+                    "reason_code": REASON_OK,
+                    "reason_text": (
+                        f"Market konflik/sideways: {ord_type_mz} presisi di tengah zona 50% ({mid_px:.2f}), "
+                        f"SL {mid_lvls['sl']:.2f} & TP {mid_lvls['tp1']:.2f} tipis di luar zona"
+                    ),
+                    "pending_plan": {
+                        "valid": True,
+                        "status": "READY",
+                        "order_type": ord_type_mz,
+                        "entry_price": mid_px,
+                        "sl": mid_lvls["sl"],
+                        "tp1": mid_lvls["tp1"],
+                        "tp2": 0.0,
+                        "risk": mid_lvls["risk"],
+                        "reward": mid_lvls["reward"],
+                        "rr": mid_lvls["rr"],
+                    },
+                    "levels": {
+                        "entry_price": mid_px,
+                        "sl": mid_lvls["sl"],
+                        "tp1": mid_lvls["tp1"],
+                        "tp2": 0.0,
+                        "invalidation_price": mid_lvls["invalidation_price"],
+                    },
+                }
+            if not limit_side_valid:
+                return {
+                    "entry_mode": "EARLY_PENDING",
+                    "sub_mode": "CONFLICT_MIDZONE_LIMIT",
+                    "order_kind": "LIMIT",
+                    "order_type": "BUY LIMIT" if demand else "SELL LIMIT",
+                    "direction": direction,
+                    "touch": touch,
+                    "triggers": triggers,
+                    "trigger_passed": False,
+                    "reason_code": REASON_PRICE_LEFT_ENTRY_RANGE,
+                    "reason_text": f"Harga ({ref_mkt_mz:.2f}) sudah melewati titik tengah zona ({mid_px:.2f}) — hindari entry di akhir zona",
+                    "levels": {
+                        "entry_price": mid_px,
+                        "sl": mid_lvls["sl"],
+                        "tp1": mid_lvls["tp1"],
+                        "tp2": 0.0,
+                        "invalidation_price": mid_lvls["invalidation_price"],
+                    },
+                }
 
     # Kasus 1: Harga sudah menyentuh zona (Market Execution Path: ADAPTIVE_ENTRY atau CONFIRMED_ENTRY)
     if touch["touched"]:
@@ -755,7 +928,8 @@ def evaluate_entry_paths_for_zone(
                 trig_ok = True
                 chosen_mode = "CONFIRMED_ENTRY"
             else:
-                trig_ok = False
+                # LOOSE MODE: zona tersentuh & masih dalam execution range -> ambil tanpa menunggu trigger M5
+                trig_ok = bool(conf.get("AUTO_LOOSE_MODE", False))
                 chosen_mode = "ADAPTIVE_ENTRY" if adaptive_en else "CONFIRMED_ENTRY"
 
         return {
@@ -791,9 +965,10 @@ def evaluate_entry_paths_for_zone(
             snr_context=snr_context,
         )
         # Validasi tambahan: zona harus fresh (touch_count == 0 / FRESH) & Grade A (>=75) untuk EARLY_PENDING
-        is_fresh_zone = str(zone.freshness or "FRESH").upper() == "FRESH" and int(zone.touch_count or 0) == 0
+        loose_ep = bool(conf.get("AUTO_LOOSE_MODE", False))
+        is_fresh_zone = loose_ep or (str(zone.freshness or "FRESH").upper() == "FRESH" and int(zone.touch_count or 0) == 0)
         ep_min_score = float(conf.get("EARLY_PENDING_MIN_SCORE", 75.0))
-        score_ok_ep = float(getattr(zone, "score", 0.0) or 0.0) >= ep_min_score
+        score_ok_ep = loose_ep or (float(getattr(zone, "score", 0.0) or 0.0) >= ep_min_score)
         tp1_mode_ep = str(conf.get("TP1_MODE", "FIXED_RR")).upper()
         force_fixed_ep = bool(conf.get("FORCE_FIXED_TP1", True))
         target_rr_ep = float(conf.get("TP1_RR", 1.0))
@@ -804,7 +979,7 @@ def evaluate_entry_paths_for_zone(
         ep_plan_valid = bool(pending_plan.get("valid"))
         if (not ep_plan_valid) and is_fresh_zone and score_ok_ep and tp1_mode_ep in ("FIXED_RR", "FIXED", "1:1") and force_fixed_ep:
             rej_ep_str = str(pending_plan.get("rejection_reason") or "")
-            recoverable_ep = any(
+            recoverable_ep = loose_ep or any(
                 k in rej_ep_str
                 for k in ("melebihi batas toleransi maksimal", "NO_TARGET", "RR_TOO_LOW")
             )

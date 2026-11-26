@@ -55,6 +55,11 @@ def calculate_snr_risk_reward(
     min_rr = safe_float(risk_cfg.get("min_rr_ratio", 1.5), 1.5)
     buf_atr_mult = safe_float(risk_cfg.get("sl_volatility_buffer_atr", 0.25), 0.25)
     min_buf_pts = safe_float(risk_cfg.get("min_sl_buffer_points", 0.60), 0.60)
+    try:
+        from modules.config import SL_JARAK_MAKS as _GLOBAL_MAX_SL
+    except Exception:
+        _GLOBAL_MAX_SL = 12.0
+    max_sl_pts = safe_float(risk_cfg.get("max_sl_distance_points", _GLOBAL_MAX_SL), float(_GLOBAL_MAX_SL))
 
     spec = symbol_spec or {}
     digits = int(spec.get("digits", risk_cfg.get("default_digits", 2)))
@@ -218,6 +223,28 @@ def calculate_snr_risk_reward(
                 "tick_value": tick_value,
                 "reason": "Jarak SL struktural terlalu sempit.",
             }
+        if max_sl_pts > 0 and risk_pts > max_sl_pts + 1e-6:
+            return {
+                "checked": True,
+                "valid": False,
+                "status": "WAIT",
+                "direction": "BUY",
+                "entry": round_to_tick(entry_ref, tick_size, digits),
+                "effective_entry": eff_entry,
+                "sl": sl_price,
+                "tp1": None,
+                "tp2": None,
+                "rr_tp1": 0.0,
+                "rr_tp2": 0.0,
+                "rr_display": "SL TOO WIDE",
+                "structural_sl_available": True,
+                "structural_tp_available": False,
+                "min_rr_required": min_rr,
+                "spread_points": spread_pts,
+                "tick_size": tick_size,
+                "tick_value": tick_value,
+                "reason": f"Jarak SL struktural ({risk_pts:.2f} USD) melebihi batas maksimal ({max_sl_pts:g} USD).",
+            }
 
         # Cari Resistance berikutnya di atas eff_entry sebagai TP struktural
         opp_candidates = []
@@ -325,6 +352,28 @@ def calculate_snr_risk_reward(
                 "tick_size": tick_size,
                 "tick_value": tick_value,
                 "reason": "Jarak SL struktural terlalu sempit.",
+            }
+        if max_sl_pts > 0 and risk_pts > max_sl_pts + 1e-6:
+            return {
+                "checked": True,
+                "valid": False,
+                "status": "WAIT",
+                "direction": "SELL",
+                "entry": round_to_tick(entry_ref, tick_size, digits),
+                "effective_entry": eff_entry,
+                "sl": sl_price,
+                "tp1": None,
+                "tp2": None,
+                "rr_tp1": 0.0,
+                "rr_tp2": 0.0,
+                "rr_display": "SL TOO WIDE",
+                "structural_sl_available": True,
+                "structural_tp_available": False,
+                "min_rr_required": min_rr,
+                "spread_points": spread_pts,
+                "tick_size": tick_size,
+                "tick_value": tick_value,
+                "reason": f"Jarak SL struktural ({risk_pts:.2f} USD) melebihi batas maksimal ({max_sl_pts:g} USD).",
             }
 
         # Cari Support berikutnya di bawah eff_entry sebagai TP struktural

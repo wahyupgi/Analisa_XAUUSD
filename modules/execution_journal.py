@@ -248,6 +248,194 @@ class ExecutionJournal:
                 _catat_error("execution_journal_read", exc)
                 return []
 
+    def export_summary(self, period: str = "weekly", output_path: str | None = None) -> None:
+        """Ekspor ringkasan statistik jurnal ke file CSV.
+
+        * ``period``: ``"weekly"`` atau ``"monthly"`` menentukan cara mengelompokkan
+          baris berdasarkan kolom ``timestamp``.
+        * ``output_path``: Jika diberikan, hasil disimpan ke file tersebut; bila ``None``
+          (default) akan dibuat file ``jurnal_eksekusi_{period}_summary.csv`` di direktori yang sama.
+
+        Ringkasan mencakup:
+        - total trade (baris ``ORDER_PLACED`` atau ``POSITION_CLOSED``)
+        - net P&L (kolom ``realized_pnl``)
+        - rata‑rata ``actual_rr``
+        - win rate (jumlah baris dengan ``actual_rr`` > 0)
+        """
+        import csv, datetime, collections, math
+        from dateutil import parser as dt_parser
+
+        # Pastikan header ada
+        with self._lock:
+            if not os.path.exists(self.journal_path):
+                print("[WARNING] Jurnal tidak ditemukan, tidak dapat membuat ringkasan.")
+                return
+
+            rows = self.read_rows()
+
+        # Filter hanya baris eksekusi
+        exec_rows = [r for r in rows if r.get("event_type") in ("ORDER_PLACED", "POSITION_CLOSED")]
+        if not exec_rows:
+            print("[INFO] Tidak ada trade yang dieksekusi untuk diringkas.")
+            return
+
+        # Fungsi bantu untuk mengubah timestamp ke period
+        def period_key(ts: str) -> str:
+            dt = dt_parser.parse(ts)
+            if period.lower() == "weekly":
+                # ISO week number
+                return f"{dt.isocalendar()[0]}-W{dt.isocalendar()[1]:02d}"
+            elif period.lower() == "monthly":
+                return f"{dt.year}-{dt.month:02d}"
+            else:  # daily
+                return dt.date().isoformat()
+
+            dt = dt_parser.parse(ts)
+            if period.lower() == "weekly":
+                # ISO week number
+                return f"{dt.isocalendar()[0]}-W{dt.isocalendar()[1]:02d}"
+            else:  # monthly
+                return f"{dt.year}-{dt.month:02d}"
+
+        groups = collections.defaultdict(list)
+        for r in exec_rows:
+            key = period_key(r.get("timestamp", ""))
+            groups[key].append(r)
+
+        # Tentukan path output
+        if output_path:
+            out_path = output_path
+        else:
+            base_dir = os.path.dirname(self.journal_path)
+            out_path = os.path.join(base_dir, f"jurnal_eksekusi_{period}_summary.csv")
+
+        # Tulis ringkasan
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            fieldnames = ["period", "trades", "net_pnl", "avg_rr", "win_rate_pct"]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for key, rows in sorted(groups.items()):
+                trades = len(rows)
+                pnl_vals = []
+                rr_vals = []
+                win_cnt = 0
+                for r in rows:
+                    # realized_pnl may be empty
+                    try:
+                        pnl = float(r.get("realized_pnl", "0") or 0)
+                    except ValueError:
+                        pnl = 0.0
+                    pnl_vals.append(pnl)
+                    try:
+                        rr = float(r.get("actual_rr", "0") or 0)
+                    except ValueError:
+                        rr = 0.0
+                    rr_vals.append(rr)
+                    if rr > 0:
+                        win_cnt += 1
+                net_pnl = sum(pnl_vals)
+                avg_rr = sum(rr_vals) / len(rr_vals) if rr_vals else 0.0
+                win_rate = (win_cnt / trades) * 100 if trades else 0.0
+                writer.writerow({
+                    "period": key,
+                    "trades": trades,
+                    "net_pnl": round(net_pnl, 2),
+                    "avg_rr": round(avg_rr, 2),
+                    "win_rate_pct": round(win_rate, 1),
+                })
+        print(f"[INFO] Ringkasan {period} selesai, disimpan ke: {out_path}")
+
+        """Menulis ulang CSV jurnal eksekusi sehingga hanya menyimpan baris yang
+        mewakili trade yang sebenarnya dieksekusi (ORDER_PLACED atau
+        POSITION_CLOSED).
+
+        Jika ``output_path`` diberikan, hasil akan ditulis ke file baru dengan
+        nama tersebut; bila ``None`` (default) file jurnal yang asli akan
+        ditimpa.
+
+        Metode ini memperoleh ``self._lock`` untuk menghindari konflik dengan
+        proses auto‑trading yang mungkin sedang menulis ke file. Jika file
+        sedang terkunci, akan ditangkap ``PermissionError`` dan fungsi akan
+        menghentikan penulisan serta mencatat error.
+        """
+        import csv
+        with self._lock:
+            if not os.path.exists(self.journal_path):
+                return
+            # Baca semua baris yang ada
+            with open(self.journal_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = [row for row in reader if row.get("event_type") in ("ORDER_PLACED", "POSITION_CLOSED")]
+            # Tentukan path tujuan
+            target_path = output_path or self.journal_path
+            # Tulis kembali hanya baris yang terfilter
+            try:
+                with open(target_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=AUTO_JOURNAL_COLUMNS)
+                    writer.writeheader()
+                    for row in rows:
+                        clean_row = {col: row.get(col, "") for col in AUTO_JOURNAL_COLUMNS}
+                        writer.writerow(clean_row)
+            except PermissionError as e:
+                # File mungkin masih dibuka oleh auto‑trading; catat dan beri tahu pengguna.
+                _catat_error("compact_executed_journal_permission", e)
+                print("[WARNING] Tidak dapat menulis ke jurnal karena file sedang dikunci."
+                      " Harap hentikan auto‑trading (auto off) dan jalankan kembali skrip.")
+                return
+        """Menulis ulang CSV jurnal eksekusi sehingga hanya menyimpan baris yang
+        mewakili trade yang sebenarnya dieksekusi (ORDER_PLACED atau
+        POSITION_CLOSED).
+
+        Metode ini memperoleh ``self._lock`` untuk menghindari konflik dengan
+        proses auto‑trading yang mungkin sedang menulis ke file. Jika file
+        sedang terkunci oleh proses lain, akan ditangkap ``PermissionError``
+        dan fungsi akan menghentikan penulisan serta mencatat error.
+        """
+        import csv
+        with self._lock:
+            if not os.path.exists(self.journal_path):
+                return
+            # Baca semua baris yang ada
+            with open(self.journal_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = [row for row in reader if row.get("event_type") in ("ORDER_PLACED", "POSITION_CLOSED")]
+            # Tulis kembali hanya baris yang terfilter
+            try:
+                with open(self.journal_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=AUTO_JOURNAL_COLUMNS)
+                    writer.writeheader()
+                    for row in rows:
+                        clean_row = {col: row.get(col, "") for col in AUTO_JOURNAL_COLUMNS}
+                        writer.writerow(clean_row)
+            except PermissionError as e:
+                # File mungkin masih dibuka oleh auto‑trading; catat dan beri tahu pengguna.
+                _catat_error("compact_executed_journal_permission", e)
+                print("[WARNING] Tidak dapat menulis ke jurnal karena file sedang dikunci."
+                      " Harap hentikan auto‑trading (auto off) dan jalankan kembali skrip.")
+                return
+        """Rewrite the execution journal CSV to keep only rows representing
+        actual executed trades.
+
+        Executed rows are those with ``event_type`` equal to ``ORDER_PLACED``
+        or ``POSITION_CLOSED``. The method acquires the internal lock to avoid
+        race conditions with the running auto‑trading process.
+        """
+        import csv
+        with self._lock:
+            if not os.path.exists(self.journal_path):
+                return
+            # Read all rows
+            with open(self.journal_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = [row for row in reader if row.get("event_type") in ("ORDER_PLACED", "POSITION_CLOSED")]
+            # Write back filtered rows
+            with open(self.journal_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=AUTO_JOURNAL_COLUMNS)
+                writer.writeheader()
+                for row in rows:
+                    clean_row = {col: row.get(col, "") for col in AUTO_JOURNAL_COLUMNS}
+                    writer.writerow(clean_row)
+
     def compute_analytics(self) -> Dict[str, Any]:
         """
         Evaluasi kuantitatif menyeluruh (Section 19):

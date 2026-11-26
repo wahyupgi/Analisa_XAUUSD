@@ -48,11 +48,14 @@ from modules.utils import (
     format_mt5_sync_short,
     format_price_distance,
     format_trade_plan_lines,
+    format_zone_relative_distance,
     refresh_trade_plan_live_state,
     resolve_entry_blocker_code,
     resolve_trade_plan_focus,
     select_best_trade_plan,
     select_relevant_invalid_zone,
+    consume_one_shot_invalid_zone,
+    zones_represent_same_level,
 )
 from modules.zone_scanner import (
     build_smc_zone_reason,
@@ -2127,11 +2130,13 @@ def _smart_monitor_context(cycle_result):
         or safe_float((((snr_scan.get("atr_diagnostics") or {}).get("H1") or {}).get("atr14")), 0.0)
         or None
     )
-    iz_best = select_relevant_invalid_zone(
+    _inv_cycle_key = f"{(cycle_result or {}).get('cycle', '')}:{snapshot.get('snapshot_time', (cycle_result or {}).get('snapshot_time', ''))}" if isinstance(cycle_result, dict) else ""
+    iz_best = consume_one_shot_invalid_zone(
         inv_candidates,
         current_price=price if price > 0 else None,
         atr=eff_atr_inv,
         direction=analysis_direction,
+        cycle_key=_inv_cycle_key,
     )
     if isinstance(iz_best, dict):
         latest_invalid_zone = iz_best
@@ -2812,16 +2817,11 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
     shown_active_z_dash = None
     if feed_st != "CLOSED" and has_live_focus:
         shown_active_z_dash = zone
-        z_id_d = str(zone.get("zone_id") or "").strip()
-        z_id_tag = f" [ID:{z_id_d}]" if z_id_d and z_id_d != "N/A" else ""
         inv_tag_d = _fmt_inv_tags(zone, lo, hi, z_type)
-        dist_v = data.get("distance")
-        if dist_v is None or feed_st in ("DISCONNECTED", "STALE"):
+        if feed_st in ("DISCONNECTED", "STALE") or price_val <= 0:
             d_short = "N/A"
-        elif dist_v <= 0.0:
-            d_short = "IN ZONE"
         else:
-            d_short = format_price_distance(dist_v, spec=u_spec_dash)
+            d_short = format_zone_relative_distance(lo, hi, price_val, spec=u_spec_dash)
         z_rel_raw = str(zone.get("zone_relevance") or zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
         mon_st_d = str(data.get("monitor_state") or "").upper()
         if str(zone.get("radar_eligibility") or "").upper() == "NOT_QUALIFIED" or str(zone.get("risk_tier") or "").upper() == "FAR_ZONE":
@@ -2833,19 +2833,19 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
             z_rel_d = z_rel_raw
         else:
             z_rel_d = f"ACTIVE/{z_rel_raw}"
-        active_radar_dash = f"{z_tf} {z_type} {lo:.2f}-{hi:.2f} | ZoneGrade:{z_grd}/{z_sc_txt} | Dist {d_short}{inv_tag_d} | {z_rel_d} [{z_src}]{z_id_tag}".replace("  ", " ")
+        active_radar_dash = f"[{z_src}] {z_tf} {z_type} {lo:.2f}-{hi:.2f} | {d_short} | Grade {z_grd}/{z_sc_txt}{inv_tag_d} | {z_rel_d}".replace("  ", " ").strip()
     elif isinstance(radar_cand_d, dict) and safe_float(radar_cand_d.get("price_low", radar_cand_d.get("low")), 0.0) > 0:
         shown_active_z_dash = radar_cand_d
         rc_lo = safe_float(radar_cand_d.get("price_low", radar_cand_d.get("low")), 0.0)
         rc_hi = safe_float(radar_cand_d.get("price_high", radar_cand_d.get("high")), 0.0)
         rc_tf = str(radar_cand_d.get("timeframe") or "").strip()
         rc_zt = str(radar_cand_d.get("zone_type") or "ZONE").upper()
+        rc_src = "SNR" if _is_snr_zone_obj(radar_cand_d) else "SMC"
         rc_grd = str(radar_cand_d.get("grade") or "-")
         rc_sc = f"/{safe_float(radar_cand_d.get('score')):.1f}" if radar_cand_d.get("score") is not None else ""
-        rc_dist = safe_float(radar_cand_d.get("distance"), max(rc_lo - price_val, price_val - rc_hi, 0.0) if price_val > 0 else 0.0)
+        rc_pos = format_zone_relative_distance(rc_lo, rc_hi, price_val, spec=u_spec_dash)
         rc_inv_s = _fmt_inv_tags(radar_cand_d, rc_lo, rc_hi, rc_zt)
-        rc_id = f" [ID:{radar_cand_d['zone_id']}]" if radar_cand_d.get("zone_id") else ""
-        active_radar_dash = f"RADAR {rc_tf} {rc_zt} {rc_lo:.2f}-{rc_hi:.2f} | G:{rc_grd}{rc_sc} | Dist {format_price_distance(rc_dist, spec=u_spec_dash)}{rc_inv_s}{rc_id}".replace("  ", " ")
+        active_radar_dash = f"[{rc_src}] {rc_tf} {rc_zt} {rc_lo:.2f}-{rc_hi:.2f} | {rc_pos} | Grade {rc_grd}{rc_sc}{rc_inv_s} | RADAR".replace("  ", " ").strip()
     elif isinstance(far_ref, dict) and safe_float(far_ref.get("price_low", far_ref.get("low")), 0.0) > 0:
         shown_active_z_dash = far_ref
         f_lo = safe_float(far_ref.get("price_low", far_ref.get("low")), 0.0)
@@ -2854,31 +2854,45 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         f_zt = str(far_ref.get("rank_label") or far_ref.get("zone_type") or "ZONE").upper()
         f_grd = str(far_ref.get("grade") or "-")
         f_sc = f"/{safe_float(far_ref.get('score')):.1f}" if far_ref.get("score") is not None else ""
-        f_dist = max(f_lo - price_val, price_val - f_hi, 0.0) if price_val > 0 else safe_float(far_ref.get("distance", far_ref.get("distance_points")), 0.0)
+        f_pos = format_zone_relative_distance(f_lo, f_hi, price_val, spec=u_spec_dash, is_far=True)
         f_zt_raw = str(far_ref.get("zone_type") or "").upper()
-        f_inv_s = _fmt_inv_tags(far_ref, f_lo, f_hi, f_zt_raw)
-        f_id = f" [ID:{far_ref['zone_id']}]" if far_ref.get("zone_id") else ""
-        active_radar_dash = f"NONE | FAR REF {f_tf} {f_zt} {f_lo:.2f}-{f_hi:.2f} | G:{f_grd}{f_sc} | Dist {format_price_distance(f_dist, spec=u_spec_dash)}{f_inv_s}{f_id}".replace("  ", " ")
+        f_sinv = resolve_smc_structure_invalidation_price(far_ref) or (f_lo if f_zt_raw in ("DEMAND", "SUPPORT") else f_hi)
+        f_inv_s = f" | StructInv {f_sinv:.2f}" if f_sinv > 0 else ""
+        active_radar_dash = f"NONE (Hanya Ref Jauh: {f_tf} {f_zt} {f_lo:.2f}-{f_hi:.2f} | {f_pos} | Grade {f_grd}{f_sc}{f_inv_s})".replace("  ", " ").strip()
 
     snr_h4_d = data.get("snr_h4_bias") or h4
     snr_h1_d_pre = str(data.get("snr_h1_bias") or "").upper()
     active_why_dash = _build_monitor_zone_why(shown_active_z_dash, smc_h4=h4, snr_h4=snr_h4_d, smc_h1=h1, snr_h1=snr_h1_d_pre)
 
-    # 1-line SNR summary
+    # 1-line SNR summary (tampilkan S1 & R1 jelas, dan hindari duplikasi WHY jika sama dengan ACTIVE/RADAR)
     snr_sup_near = data.get("snr_nearest_support")
     snr_res_near = data.get("snr_nearest_resistance")
     snr_dash_parts = []
     s1_why_dash = ""
     r1_why_dash = ""
     if isinstance(snr_sup_near, dict) and safe_float(snr_sup_near.get("low")) > 0:
-        snr_dash_parts.append(f"S1 {safe_float(snr_sup_near.get('low')):.2f}-{safe_float(snr_sup_near.get('high')):.2f}(G:{snr_sup_near.get('grade', '-')})")
-        s1_why_dash = build_snr_zone_reason(snr_sup_near, h4_bias=snr_h4_d, h1_bias=snr_h1_d_pre)
+        s1_same = zones_represent_same_level(snr_sup_near, shown_active_z_dash)
+        s1_tf = str(snr_sup_near.get("timeframe") or "").strip().upper()
+        s1_tf_p = f"{s1_tf} " if s1_tf else ""
+        s1_sfx = ", = RADAR" if s1_same else ""
+        snr_dash_parts.append(f"S1: {s1_tf_p}{safe_float(snr_sup_near.get('low')):.2f}-{safe_float(snr_sup_near.get('high')):.2f} (G:{snr_sup_near.get('grade', '-')}{s1_sfx})")
+        if not s1_same:
+            s1_why_dash = build_snr_zone_reason(snr_sup_near, h4_bias=snr_h4_d, h1_bias=snr_h1_d_pre)
+    else:
+        snr_dash_parts.append("S1: NONE")
     if isinstance(snr_res_near, dict) and safe_float(snr_res_near.get("low")) > 0:
-        snr_dash_parts.append(f"R1 {safe_float(snr_res_near.get('low')):.2f}-{safe_float(snr_res_near.get('high')):.2f}(G:{snr_res_near.get('grade', '-')})")
-        r1_why_dash = build_snr_zone_reason(snr_res_near, h4_bias=snr_h4_d, h1_bias=snr_h1_d_pre)
+        r1_same = zones_represent_same_level(snr_res_near, shown_active_z_dash)
+        r1_tf = str(snr_res_near.get("timeframe") or "").strip().upper()
+        r1_tf_p = f"{r1_tf} " if r1_tf else ""
+        r1_sfx = ", = RADAR" if r1_same else ""
+        snr_dash_parts.append(f"R1: {r1_tf_p}{safe_float(snr_res_near.get('low')):.2f}-{safe_float(snr_res_near.get('high')):.2f} (G:{snr_res_near.get('grade', '-')}{r1_sfx})")
+        if not r1_same:
+            r1_why_dash = build_snr_zone_reason(snr_res_near, h4_bias=snr_h4_d, h1_bias=snr_h1_d_pre)
+    else:
+        snr_dash_parts.append("R1: NONE")
     if data.get("confluence") == "ALIGNED":
         snr_dash_parts.append("CONFLUENCE")
-    snr_1line_dash = " | ".join(snr_dash_parts) if snr_dash_parts else "NONE"
+    snr_1line_dash = " | ".join(snr_dash_parts) if (isinstance(snr_sup_near, dict) or isinstance(snr_res_near, dict)) else "NONE"
 
     # 1-line TRACKED POSITION (if open)
     tracked_lines = []
@@ -2944,9 +2958,26 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         if _p_e > 0 and _p_s > 0 and _p_t > 0:
             _pend_txt_d = f"{_ps.get('order_type', 'PENDING')} {_p_e:.2f} | SetupSL {_p_s:.2f} | TP1 {_p_t:.2f} | RR 1:{_p_r:.1f} | {_ps.get('status', 'READY')}"
 
-    invalid_dash = str(data.get("latest_invalid_display") or "NONE")
+    iz_dash_obj = data.get("latest_invalid_zone")
+    if isinstance(iz_dash_obj, dict):
+        if _is_snr_zone_obj(iz_dash_obj):
+            _iz_bo_d = classify_snr_breakout_state(iz_dash_obj)
+            _iz_st_d = str(_iz_bo_d.get("state") or iz_dash_obj.get("lifecycle_event") or iz_dash_obj.get("lifecycle_status") or "BROKEN").upper()
+            if _iz_st_d == "NONE":
+                _iz_st_d = str(iz_dash_obj.get("lifecycle_event") or iz_dash_obj.get("lifecycle_status") or "INVALIDATED").upper()
+        else:
+            _iz_st_d = str(iz_dash_obj.get("invalidation_type") or iz_dash_obj.get("invalid_label") or iz_dash_obj.get("lifecycle_status") or INVALIDATION_ZONE_STRUCTURAL).upper()
+        invalid_dash = format_invalid_zone_compact(
+            iz_dash_obj,
+            current_price=price_val if price_val > 0 else None,
+            unit_spec=u_spec_dash,
+            status_override=_iz_st_d,
+            include_id=False,
+        )
+    else:
+        invalid_dash = str(data.get("latest_invalid_display") or "NONE")
     invalid_why_dash = (
-        _build_monitor_invalid_why(data.get("latest_invalid_zone"), smc_h4=h4, snr_h4=snr_h4_d, smc_h1=h1, snr_h1=snr_h1_d_pre)
+        _build_monitor_invalid_why(iz_dash_obj, smc_h4=h4, snr_h4=snr_h4_d, smc_h1=h1, snr_h1=snr_h1_d_pre)
         if invalid_dash != "NONE"
         else ""
     )
@@ -2964,11 +2995,11 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         f_zt_s = str(far_ref.get("zone_type") or "ZONE").upper()
         f_grd_s = str(far_ref.get("grade") or "-")
         f_sc_s = f"/{safe_float(far_ref.get('score')):.1f}" if far_ref.get("score") is not None else ""
-        f_fr_s = f" {str(far_ref.get('freshness') or 'FRESH').upper()}" if far_ref.get("freshness") else ""
-        f_dist_s = max(f_lo_s - price_val, price_val - f_hi_s, 0.0) if price_val > 0 else safe_float(far_ref.get("distance", far_ref.get("distance_points")), 0.0)
-        f_inv_s_d = _fmt_inv_tags(far_ref, f_lo_s, f_hi_s, f_zt_s)
-        f_id_s = f" [ID:{far_ref['zone_id']}]" if far_ref.get("zone_id") else ""
-        smc_far_ref_dash = f"{f_tf_s} {f_zt_s} {f_lo_s:.2f}-{f_hi_s:.2f} | G:{f_grd_s}{f_sc_s}{f_fr_s} | Dist {format_price_distance(f_dist_s, spec=u_spec_dash)}{f_inv_s_d} | FAR_REFERENCE{f_id_s}".replace("  ", " ")
+        f_fr_s = f" ({str(far_ref.get('freshness') or 'FRESH').upper()})" if far_ref.get("freshness") else ""
+        f_pos_s = format_zone_relative_distance(f_lo_s, f_hi_s, price_val, spec=u_spec_dash, is_far=True)
+        f_sinv_s = resolve_smc_structure_invalidation_price(far_ref) or (f_lo_s if f_zt_s == "DEMAND" else f_hi_s)
+        f_inv_s_d = f" | StructInv {f_sinv_s:.2f}" if f_sinv_s > 0 else ""
+        smc_far_ref_dash = f"[SMC] {f_tf_s} {f_zt_s} {f_lo_s:.2f}-{f_hi_s:.2f} | {f_pos_s} | Grade {f_grd_s}{f_sc_s}{f_fr_s}{f_inv_s_d}".replace("  ", " ").strip()
     snr_h1_d = str(data.get("snr_h1_bias") or "").upper()
     h1_dir_dash = (
         f"H1(SMC)={h1} H1(SNR)={snr_h1_d}"
@@ -2999,6 +3030,7 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         and str(best_tp_dash.get("zone_id") or "") == str(_ps.get("zone_id") or "")
         and str(best_tp_dash.get("status") or "").upper() == "READY"
     )
+    _act_zid_dash = shown_active_z_dash.get("zone_id") if isinstance(shown_active_z_dash, dict) else None
     _tp_dash_lines = format_trade_plan_lines(
         best_tp_dash,
         prefix=" TRADE PLAN  : ",
@@ -3006,8 +3038,10 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         width=term_w,
         include_source=True,
         broker_tag=(str(_ps.get("status") or "") if _pend_same_dash else None),
-        skip_why_for_zone_id=(shown_active_z_dash.get("zone_id") if isinstance(shown_active_z_dash, dict) else None),
+        skip_why_for_zone_id=_act_zid_dash,
         h4_bias=h4,
+        include_id=False,
+        active_zone_id=_act_zid_dash,
     ) if best_tp_dash else []
     body_lines = [
         dash_div,
@@ -3017,12 +3051,11 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         *(wrap_dashboard_field(" PENDING PLAN: ", _pend_txt_d, term_w, max_lines=None) if (_pend_txt_d and not _pend_same_dash) else []),
         *wrap_dashboard_field(" ACTIVE/RADAR: ", active_radar_dash, term_w, max_lines=None),
         *(wrap_dashboard_field("   WHY       : ", active_why_dash, term_w, max_lines=None) if active_why_dash else []),
-        *(wrap_dashboard_field(" SMC FAR REF : ", smc_far_ref_dash, term_w, max_lines=None) if smc_far_ref_dash else []),
-        *wrap_dashboard_field(" INVALID     : ", invalid_dash, term_w, max_lines=None),
-        *(wrap_dashboard_field("   WHY       : ", invalid_why_dash, term_w, max_lines=None) if invalid_why_dash else []),
-        *wrap_dashboard_field(" SNR         : ", snr_1line_dash, term_w, max_lines=None),
+        *wrap_dashboard_field(" SNR LEVEL   : ", snr_1line_dash, term_w, max_lines=None),
         *(wrap_dashboard_field("   WHY S1    : ", s1_why_dash, term_w, max_lines=None) if s1_why_dash else []),
         *(wrap_dashboard_field("   WHY R1    : ", r1_why_dash, term_w, max_lines=None) if r1_why_dash else []),
+        *(wrap_dashboard_field(" SMC FAR REF : ", smc_far_ref_dash, term_w, max_lines=None) if smc_far_ref_dash else []),
+        *(wrap_dashboard_field(" INVALID     : ", invalid_dash, term_w, max_lines=None) if invalid_dash != "NONE" else []),
         *wrap_dashboard_field(" RISK        : ", risk_line_dash, term_w, max_lines=None),
         *tracked_lines,
     ]
@@ -3175,6 +3208,7 @@ def format_smart_monitor_report(cycle_result):
 
     lo = safe_float(zone.get("price_low", zone.get("low")), 0.0)
     hi = safe_float(zone.get("price_high", zone.get("high")), 0.0)
+    px_rep = safe_float(data.get("price"), 0.0)
     radar_cand = data.get("radar_candidate") if isinstance(data.get("radar_candidate"), dict) else None
     far_ref_rep = data.get("far_reference_zone") if isinstance(data.get("far_reference_zone"), dict) else None
     shown_active_z_rep = None
@@ -3185,8 +3219,7 @@ def format_smart_monitor_report(cycle_result):
         z_grd = str(zone.get("grade") or "-")
         z_sc_r = f"/{safe_float(zone.get('score')):.1f}" if zone.get("score") is not None else ""
         z_inv_s = _fmt_rep_inv_tags(zone, lo, hi, z_type)
-        dist_v = data.get("distance")
-        d_s = "IN ZONE" if (dist_v is not None and dist_v <= 0) else (format_price_distance(dist_v, spec=_u_rep) if dist_v is not None else "N/A")
+        d_s = format_zone_relative_distance(lo, hi, px_rep, spec=_u_rep)
         z_rel_raw_r = str(zone.get("zone_relevance") or zone.get("lifecycle_status") or zone.get("status") or "ACTIVE").upper()
         mon_st_r = str(data.get("monitor_state") or "").upper()
         if str(zone.get("radar_eligibility") or "").upper() == "NOT_QUALIFIED" or str(zone.get("risk_tier") or "").upper() == "FAR_ZONE":
@@ -3199,37 +3232,40 @@ def format_smart_monitor_report(cycle_result):
         else:
             z_rel_r = f"ACTIVE/{z_rel_raw_r}"
         z_src_r = str(zone.get("source") or ("SNR" if _is_snr_zone_obj(zone) else "SMC")).upper()
-        z_id_s = f" [ID:{zone['zone_id']}]" if zone.get("zone_id") and zone.get("zone_id") != "N/A" else ""
-        active_line = f"{z_tf} {z_type} {lo:.2f}-{hi:.2f} | ZoneGrade:{z_grd}{z_sc_r} | Dist {d_s}{z_inv_s} | {z_rel_r} [{z_src_r}]{z_id_s}".strip()
+        active_line = f"[{z_src_r}] {z_tf} {z_type} {lo:.2f}-{hi:.2f} | {d_s} | Grade {z_grd}{z_sc_r}{z_inv_s} | {z_rel_r}".replace("  ", " ").strip()
     elif radar_cand and safe_float(radar_cand.get("price_low", radar_cand.get("low")), 0.0) > 0:
         shown_active_z_rep = radar_cand
         r_lo = safe_float(radar_cand.get("price_low", radar_cand.get("low")), 0.0)
         r_hi = safe_float(radar_cand.get("price_high", radar_cand.get("high")), 0.0)
         r_zt = str(radar_cand.get("zone_type") or "").upper()
+        r_src = "SNR" if _is_snr_zone_obj(radar_cand) else "SMC"
         r_sc = f"/{safe_float(radar_cand.get('score')):.1f}" if radar_cand.get("score") is not None else ""
-        r_d = safe_float(radar_cand.get("distance"), 0.0)
+        r_pos = format_zone_relative_distance(r_lo, r_hi, px_rep, spec=_u_rep)
         r_inv_s = _fmt_rep_inv_tags(radar_cand, r_lo, r_hi, r_zt)
-        r_id = f" [ID:{radar_cand['zone_id']}]" if radar_cand.get("zone_id") else ""
-        active_line = f"RADAR {radar_cand.get('timeframe', '')} {r_zt} {r_lo:.2f}-{r_hi:.2f} | G:{radar_cand.get('grade', '-')}{r_sc} | Dist {format_price_distance(r_d, spec=_u_rep)}{r_inv_s}{r_id}".replace("  ", " ")
+        active_line = f"[{r_src}] {radar_cand.get('timeframe', '')} {r_zt} {r_lo:.2f}-{r_hi:.2f} | {r_pos} | Grade {radar_cand.get('grade', '-')}{r_sc}{r_inv_s} | RADAR".replace("  ", " ").strip()
     elif far_ref_rep and safe_float(far_ref_rep.get("price_low", far_ref_rep.get("low")), 0.0) > 0:
         shown_active_z_rep = far_ref_rep
         fr_lo = safe_float(far_ref_rep.get("price_low", far_ref_rep.get("low")), 0.0)
         fr_hi = safe_float(far_ref_rep.get("price_high", far_ref_rep.get("high")), 0.0)
         fr_zt = str(far_ref_rep.get("zone_type") or "").upper()
         fr_sc = f"/{safe_float(far_ref_rep.get('score')):.1f}" if far_ref_rep.get("score") is not None else ""
-        fr_d = safe_float(far_ref_rep.get("distance", far_ref_rep.get("distance_points")), 0.0)
-        fr_inv_s = _fmt_rep_inv_tags(far_ref_rep, fr_lo, fr_hi, fr_zt)
-        fr_id = f" [ID:{far_ref_rep['zone_id']}]" if far_ref_rep.get("zone_id") else ""
-        active_line = f"NONE | FAR REF {far_ref_rep.get('timeframe', '')} {fr_zt} {fr_lo:.2f}-{fr_hi:.2f} | G:{far_ref_rep.get('grade', '-')}{fr_sc} | Dist {format_price_distance(fr_d, spec=_u_rep)}{fr_inv_s}{fr_id}".replace("  ", " ")
+        fr_pos = format_zone_relative_distance(fr_lo, fr_hi, px_rep, spec=_u_rep, is_far=True)
+        fr_sinv = resolve_smc_structure_invalidation_price(far_ref_rep) or (fr_lo if fr_zt in ("DEMAND", "SUPPORT") else fr_hi)
+        fr_inv_s = f" | StructInv {fr_sinv:.2f}" if fr_sinv > 0 else ""
+        active_line = f"NONE (Hanya Ref Jauh: {far_ref_rep.get('timeframe', '')} {fr_zt} {fr_lo:.2f}-{fr_hi:.2f} | {fr_pos} | Grade {far_ref_rep.get('grade', '-')}{fr_sc}{fr_inv_s})".replace("  ", " ").strip()
     else:
         active_line = "NONE"
 
     snr_h4_rep = data.get("snr_h4_bias") or h4
     snr_h1_rep = str(data.get("snr_h1_bias") or "").upper()
     active_why_rep = _build_monitor_zone_why(shown_active_z_rep, smc_h4=h4, snr_h4=snr_h4_rep, smc_h1=h1, snr_h1=snr_h1_rep)
-    inv_disp_rep = str(data.get("latest_invalid_display") or "NONE")
+    iz_rep_obj = data.get("latest_invalid_zone")
+    if isinstance(iz_rep_obj, dict):
+        inv_disp_rep = format_invalid_zone_compact(iz_rep_obj, current_price=px_rep if px_rep > 0 else None, unit_spec=_u_rep, include_id=False)
+    else:
+        inv_disp_rep = str(data.get("latest_invalid_display") or "NONE")
     invalid_why_rep = (
-        _build_monitor_invalid_why(data.get("latest_invalid_zone"), smc_h4=h4, snr_h4=snr_h4_rep, smc_h1=h1, snr_h1=snr_h1_rep)
+        _build_monitor_invalid_why(iz_rep_obj, smc_h4=h4, snr_h4=snr_h4_rep, smc_h1=h1, snr_h1=snr_h1_rep)
         if inv_disp_rep != "NONE"
         else ""
     )
@@ -3240,14 +3276,26 @@ def format_smart_monitor_report(cycle_result):
     s1_why_rep = ""
     r1_why_rep = ""
     if isinstance(snr_sup, dict) and safe_float(snr_sup.get("low")) > 0:
-        snr_parts.append(f"S1 {safe_float(snr_sup.get('low')):.2f}-{safe_float(snr_sup.get('high')):.2f}(G:{snr_sup.get('grade', '-')})")
-        s1_why_rep = build_snr_zone_reason(snr_sup, h4_bias=snr_h4_rep, h1_bias=snr_h1_rep)
+        s1_same_r = zones_represent_same_level(snr_sup, shown_active_z_rep)
+        s1_tf_r = str(snr_sup.get("timeframe") or "").strip().upper()
+        s1_tf_pr = f"{s1_tf_r} " if s1_tf_r else ""
+        snr_parts.append(f"S1: {s1_tf_pr}{safe_float(snr_sup.get('low')):.2f}-{safe_float(snr_sup.get('high')):.2f} (G:{snr_sup.get('grade', '-')}{', = RADAR' if s1_same_r else ''})")
+        if not s1_same_r:
+            s1_why_rep = build_snr_zone_reason(snr_sup, h4_bias=snr_h4_rep, h1_bias=snr_h1_rep)
+    else:
+        snr_parts.append("S1: NONE")
     if isinstance(snr_res, dict) and safe_float(snr_res.get("low")) > 0:
-        snr_parts.append(f"R1 {safe_float(snr_res.get('low')):.2f}-{safe_float(snr_res.get('high')):.2f}(G:{snr_res.get('grade', '-')})")
-        r1_why_rep = build_snr_zone_reason(snr_res, h4_bias=snr_h4_rep, h1_bias=snr_h1_rep)
+        r1_same_r = zones_represent_same_level(snr_res, shown_active_z_rep)
+        r1_tf_r = str(snr_res.get("timeframe") or "").strip().upper()
+        r1_tf_pr = f"{r1_tf_r} " if r1_tf_r else ""
+        snr_parts.append(f"R1: {r1_tf_pr}{safe_float(snr_res.get('low')):.2f}-{safe_float(snr_res.get('high')):.2f} (G:{snr_res.get('grade', '-')}{', = RADAR' if r1_same_r else ''})")
+        if not r1_same_r:
+            r1_why_rep = build_snr_zone_reason(snr_res, h4_bias=snr_h4_rep, h1_bias=snr_h1_rep)
+    else:
+        snr_parts.append("R1: NONE")
     if data.get("confluence") == "ALIGNED":
         snr_parts.append("CONFLUENCE")
-    snr_line = " | ".join(snr_parts) if snr_parts else "NONE"
+    snr_line = " | ".join(snr_parts) if (isinstance(snr_sup, dict) or isinstance(snr_res, dict)) else "NONE"
 
     pos_c = int(safe_float(acc.get("open_positions"), mt5_snap.get("symbol_positions_count", 0)))
     ord_c = int(safe_float(acc.get("pending_orders"), len(mt5_snap.get("orders") or [])))
@@ -3288,6 +3336,7 @@ def format_smart_monitor_report(cycle_result):
     )
     term_w_rep = get_terminal_width(default=100, min_width=64, max_width=120)
     div_rep = "=" * min(70, term_w_rep)
+    _act_zid_rep = shown_active_z_rep.get("zone_id") if isinstance(shown_active_z_rep, dict) else None
     _tp_rep_lines = format_trade_plan_lines(
         best_tp_rep,
         prefix="TRADE PLAN   : ",
@@ -3295,8 +3344,10 @@ def format_smart_monitor_report(cycle_result):
         width=term_w_rep,
         include_source=True,
         broker_tag=(str(pending_s.get("status") or "") if _pend_same_rep else None),
-        skip_why_for_zone_id=(shown_active_z_rep.get("zone_id") if isinstance(shown_active_z_rep, dict) else None),
+        skip_why_for_zone_id=_act_zid_rep,
         h4_bias=h4,
+        include_id=False,
+        active_zone_id=_act_zid_rep,
     ) if best_tp_rep else []
     lines = [
         div_rep,
@@ -3309,11 +3360,10 @@ def format_smart_monitor_report(cycle_result):
         *(wrap_dashboard_field("PENDING PLAN : ", pend_line, term_w_rep, max_lines=None) if (pend_line and not _pend_same_rep) else []),
         *wrap_dashboard_field("ACTIVE/RADAR : ", active_line, term_w_rep, max_lines=None),
         *(wrap_dashboard_field("  WHY        : ", active_why_rep, term_w_rep, max_lines=None) if active_why_rep else []),
-        *wrap_dashboard_field("INVALID      : ", inv_disp_rep, term_w_rep, max_lines=None),
-        *(wrap_dashboard_field("  WHY        : ", invalid_why_rep, term_w_rep, max_lines=None) if invalid_why_rep else []),
-        *wrap_dashboard_field("SNR          : ", snr_line, term_w_rep, max_lines=None),
+        *wrap_dashboard_field("SNR LEVEL    : ", snr_line, term_w_rep, max_lines=None),
         *(wrap_dashboard_field("  WHY S1     : ", s1_why_rep, term_w_rep, max_lines=None) if s1_why_rep else []),
         *(wrap_dashboard_field("  WHY R1     : ", r1_why_rep, term_w_rep, max_lines=None) if r1_why_rep else []),
+        *(wrap_dashboard_field("INVALID      : ", inv_disp_rep, term_w_rep, max_lines=None) if inv_disp_rep != "NONE" else []),
         *wrap_dashboard_field("RISK         : ", risk_line, term_w_rep, max_lines=None),
     ]
     if tracked_pos_rep:

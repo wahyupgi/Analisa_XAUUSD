@@ -1865,7 +1865,7 @@ def format_smc_monitor_section(smc_cycle_result, detailed=False):
             extract_unit_spec_from_container,
             format_invalid_zone_compact,
             resolve_entry_blocker_code,
-            select_relevant_invalid_zone,
+            consume_one_shot_invalid_zone,
         )
         from modules.zone_scanner import resolve_analysis_direction
         _u_smc_m = extract_unit_spec_from_container(scan_res_m)
@@ -1905,12 +1905,10 @@ def format_smc_monitor_section(smc_cycle_result, detailed=False):
         act_why_m = build_smc_zone_reason(act_z_m, h4_bias=s.get("h4_bias")) if (act_m != "NONE" and isinstance(act_z_m, dict)) else ""
         inv_list_m = list(decision.get("invalidated_zones") or []) + list(scan_res_m.get("invalidated_zones") or [])
         atr_m = safe_float(((decision.get("atr_diagnostics") or scan_res_m.get("atr_diagnostics") or {}).get("atr_value")), 0.0) or None
-        iz_m = select_relevant_invalid_zone(inv_list_m, current_price=px_m if px_m > 0 else None, atr=atr_m)
-        inv_why_m = ""
+        iz_m = consume_one_shot_invalid_zone(inv_list_m, current_price=px_m if px_m > 0 else None, atr=atr_m, cycle_key=f"smc:{smc_cycle_result.get('snapshot_time','')}")
         if isinstance(iz_m, dict):
             inv_t_m = str(iz_m.get("invalidation_type") or iz_m.get("invalid_label") or INVALIDATION_ZONE_STRUCTURAL).upper()
-            inv_m = format_invalid_zone_compact(iz_m, current_price=px_m if px_m > 0 else None, unit_spec=_u_smc_m, status_override=inv_t_m)
-            inv_why_m = format_smc_invalid_why(iz_m, h4_bias=s.get("h4_bias"))
+            inv_m = format_invalid_zone_compact(iz_m, current_price=px_m if px_m > 0 else None, unit_spec=_u_smc_m, status_override=inv_t_m, include_id=False)
         else:
             inv_m = "NONE"
         snr_m = str(s.get("snr_context_summary") or "Independen")
@@ -1923,8 +1921,7 @@ def format_smc_monitor_section(smc_cycle_result, detailed=False):
             f"ENTRY STATUS : {ent_m}",
             f"ACTIVE/RADAR : {act_m}",
             *([f"  WHY        : {act_why_m}"] if act_why_m else []),
-            f"INVALID      : {inv_m}",
-            *([f"  WHY        : {inv_why_m}"] if inv_why_m else []),
+            *([f"INVALID      : {inv_m}"] if inv_m != "NONE" else []),
             f"SNR          : {snr_m}",
             f"RISK         : {risk_m}",
         ])
@@ -3701,7 +3698,12 @@ class UnifiedMonitor:
                 for x in (inline_alerts + material_alerts)
             )
 
-            if prev_snr_live and prev_snr_live.get("inside"):
+            # Event KELUAR hanya sah untuk zona yang SAMA dengan fokus SNR saat ini; bila fokus berganti, state lama
+            # dibuang tanpa event (cegah "zona palsu" dari zona transien yang tidak tampil di panel).
+            if (
+                prev_snr_live and prev_snr_live.get("inside")
+                and prev_snr_live.get("zone_id") == s_zid_live
+            ):
                 p_lo_l, p_hi_l = prev_snr_live["low"], prev_snr_live["high"]
                 if price_disp < p_lo_l or price_disp > p_hi_l:
                     exit_key = (prev_snr_live["zone_id"], "EXIT")
@@ -3865,6 +3867,18 @@ class UnifiedMonitor:
             or snap_status == "MARKET_CLOSED"
         )
 
+        # Bersihkan event INVALIDATION dari siklus sebelumnya agar zona invalid hanya tampil 1x lalu hilang
+        self._recent_events = [
+            ev for ev in self._recent_events
+            if not (
+                isinstance(ev, dict)
+                and (
+                    (isinstance(ev.get("scope"), tuple) and len(ev["scope"]) >= 2 and ev["scope"][1] in ("INVALIDATION", "BREAKOUT_WATCH") and "INVALID" in str(ev.get("text") or "").upper())
+                    or "[INVALID]" in str(ev.get("text") or "").upper()
+                )
+            )
+        ]
+
         # 1. Pergantian setup / fokus zona (jangan buat event entry baru dari data historis saat market CLOSED)
         setup_state = (active_zone_src, active_zone_id, smart_view.get("direction"), active_zone_lo, active_zone_hi)
         if not is_closed_ev:
@@ -3883,7 +3897,13 @@ class UnifiedMonitor:
             # 2. Zone touch (SMC / SNR)
             _hist_tag = "[HIST/CLOSED] " if smart_view.get("data_invalid") else ""
             touch_st_ev = str(smart_view.get("touch_status") or "").upper()
-            if touch_st_ev == "IN_ZONE" and active_zone_id != "NONE":
+            # Event TOUCH hanya valid bila harga live benar-benar berada di dalam range zona aktif yang dilaporkan
+            # (cegah label zona aktif tercampur dengan status IN_ZONE dari zona lain, mis. R1 dinamis).
+            _price_in_active_zone = (
+                active_zone_lo > 0 and active_zone_hi >= active_zone_lo and price_disp > 0
+                and active_zone_lo <= price_disp <= active_zone_hi
+            )
+            if touch_st_ev == "IN_ZONE" and active_zone_id != "NONE" and _price_in_active_zone:
                 _register_event(
                     active_zone_id,
                     "ZONE_TOUCH",
@@ -3903,10 +3923,13 @@ class UnifiedMonitor:
                     f"M5 TRIGGER {active_zone_lo:.2f}-{active_zone_hi:.2f} | Conf={smart_view.get('confirmed')}",
                 )
 
-            # 4. Breakout / Breakdown / Invalidasi (SMC & SNR)
+            # 4. Breakout / Breakdown / Invalidasi (SMC & SNR — skip historis saat siklus awal #1)
             bo_watch_ev = str(smart_view.get("snr_breakout_watch") or "").strip()
             if bo_watch_ev:
-                _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"{_hist_tag}BREAKOUT: {bo_watch_ev}")
+                if self.cycle_count <= 1:
+                    self._event_state_dedup[("SNR", "BREAKOUT_WATCH")] = bo_watch_ev
+                else:
+                    _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"{_hist_tag}BREAKOUT: {bo_watch_ev}")
 
         # 5. Material & inline alerts terdeduplikasi (skip pesan risk panjang yang sudah ditangani grup RISK;
         # saat MARKET CLOSED jangan memicu event konfirmasi/touch/breakout baru dari data historis)

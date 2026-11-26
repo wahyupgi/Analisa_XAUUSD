@@ -103,9 +103,17 @@ def _is_live_active_snr_zone(zone, expected_type, current_price):
         return False
     cp = safe_float(current_price, 0.0)
     if cp > 0:
-        if expected_type == "SUPPORT" and cp < z_low:
+        # Histeresis tepi zona: harga yang hanya menembus tepi sedikit (noise/wick) TIDAK langsung menggugurkan zona,
+        # agar S1/R1 tidak berganti-ganti. Invalidasi sesungguhnya ditangani lifecycle_status di atas.
+        try:
+            from modules.config import _env_cfg
+            base_tol = float(_env_cfg("SNR_LIVE_EDGE_TOLERANCE", 1.0, float))
+        except Exception:
+            base_tol = 1.0
+        tol = max(base_tol, 0.25 * (z_high - z_low))
+        if expected_type == "SUPPORT" and cp < z_low - tol:
             return False
-        if expected_type == "RESISTANCE" and cp > z_high:
+        if expected_type == "RESISTANCE" and cp > z_high + tol:
             return False
     return True
 

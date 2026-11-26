@@ -78,7 +78,7 @@ def to_wib_datetime(dt_val: Any, source_tz: str = "WIB") -> Optional[datetime]:
 
 def format_wib_timestamp(dt_val: Any = None, default_now: bool = False, source_tz: str = "WIB") -> str:
     """
-    Memformat berbagai input waktu menjadi string standar WIB: 'YYYY-MM-DD HH:MM:SS WIB'.
+"""  """    Memformat berbagai input waktu menjadi string standar WIB: 'YYYY-MM-DD HH:MM:SS WIB'.
     Jika dt_val tidak valid/None dan default_now=True, menggunakan waktu WIB saat ini.
     """
     dt = to_wib_datetime(dt_val, source_tz=source_tz) if dt_val is not None else None
@@ -392,6 +392,57 @@ def jarak_zona(lo, hi, harga, symbol=None, spec=None):
     if float(lo) > float(harga):
         return f"{dist_txt} di atas harga"
     return f"{dist_txt} di bawah harga"
+
+
+def format_zone_relative_distance(
+    lo: float,
+    hi: float,
+    current_price: Optional[float],
+    spec: Optional[Dict[str, Any]] = None,
+    is_far: bool = False,
+) -> str:
+    """Format posisi & jarak zona relatif terhadap harga saat ini (IN ZONE / DI ATAS / DI BAWAH)."""
+    try:
+        lo_v = float(lo or 0.0)
+        hi_v = float(hi if hi is not None else lo_v)
+        cp_v = float(current_price or 0.0)
+    except (TypeError, ValueError):
+        return "N/A"
+    if cp_v <= 0.0 or lo_v <= 0.0 or hi_v < lo_v:
+        return "N/A"
+    if lo_v <= cp_v <= hi_v:
+        return "IN ZONE"
+    if lo_v > cp_v:
+        d_txt = format_price_distance(lo_v - cp_v, spec=spec, signed=True, digits=2)
+        lbl = "JAUH DI ATAS" if is_far else "DI ATAS"
+        return f"{lbl} ({d_txt})"
+    d_txt = format_price_distance(-(cp_v - hi_v), spec=spec, signed=True, digits=2)
+    lbl = "JAUH DI BAWAH" if is_far else "DI BAWAH"
+    return f"{lbl} ({d_txt})"
+
+
+def zones_represent_same_level(z1: Any, z2: Any, tol: float = 0.05) -> bool:
+    """Cek apakah dua objek zona merujuk pada level zona yang sama (via zone_id atau TF + batas harga)."""
+    if not isinstance(z1, dict) or not isinstance(z2, dict):
+        return False
+    id1 = str(z1.get("zone_id") or "").strip()
+    id2 = str(z2.get("zone_id") or "").strip()
+    if id1 and id2 and id1.upper() not in ("N/A", "NONE", "UNKNOWN") and id1 == id2:
+        return True
+    try:
+        lo1 = float(z1.get("price_low", z1.get("low", 0.0)) or 0.0)
+        hi1 = float(z1.get("price_high", z1.get("high", lo1)) or lo1)
+        lo2 = float(z2.get("price_low", z2.get("low", 0.0)) or 0.0)
+        hi2 = float(z2.get("price_high", z2.get("high", lo2)) or lo2)
+    except (TypeError, ValueError):
+        return False
+    if lo1 <= 0.0 or lo2 <= 0.0:
+        return False
+    tf1 = str(z1.get("timeframe") or "").strip().upper()
+    tf2 = str(z2.get("timeframe") or "").strip().upper()
+    if tf1 and tf2 and tf1 != tf2:
+        return False
+    return abs(lo1 - lo2) <= tol and abs(hi1 - hi2) <= tol
 
 
 def selisih_zona(z, harga):
@@ -849,10 +900,12 @@ def _extract_invalid_zone_meta(item_or_zone, current_price=None, atr=None, direc
             inner.get("invalidated_at"),
         )
     ts_epoch = 0.0
+    raw_ts_matched = None
     for cand_ts in ts_candidates:
         ep = _parse_event_timestamp_epoch(cand_ts)
         if ep > 0.0:
             ts_epoch = ep
+            raw_ts_matched = cand_ts
             break
 
     zid = str(item_or_zone.get("zone_id") or inner.get("zone_id") or "").strip()
@@ -897,6 +950,7 @@ def _extract_invalid_zone_meta(item_or_zone, current_price=None, atr=None, direc
         "dir_mismatch": dir_mismatch,
         "priority_bucket": priority_bucket,
         "ts_epoch": ts_epoch,
+        "raw_ts": raw_ts_matched,
         "zone_id": zid,
         "dedup_key": dedup_key,
     }
@@ -935,8 +989,78 @@ def select_relevant_invalid_zone(candidates, current_price=None, atr=None, direc
     return best_item
 
 
-def format_invalid_zone_compact(item_or_zone, current_price=None, unit_spec=None, status_override=None) -> str:
-    """Format zona INVALID konsisten dengan pemisahan tegas StructInv (batas zona) vs SetupSL (SL entry)."""
+def consume_one_shot_invalid_zone(
+    candidates,
+    current_price=None,
+    atr=None,
+    direction=None,
+    cycle_key: Optional[str] = None,
+):
+    """
+    Tampilkan zona yang baru saja terkena SL / menjadi INVALID tepat 1 kali (one-shot pada siklus itu),
+    lalu simpan ke daftar dismissed agar pada siklus berikutnya langsung hilang dan tidak pernah muncul lagi.
+    """
+    global _INVALID_ZONES_BASELINE_READY, _LAST_INVALID_ONCE_CYCLE_KEY, _LAST_INVALID_ONCE_ZONE
+    _load_trade_plan_state_once()
+
+    norm_ck = str(cycle_key or "").strip()
+    if norm_ck and _LAST_INVALID_ONCE_CYCLE_KEY == norm_ck:
+        return _LAST_INVALID_ONCE_ZONE
+
+    extracted = []
+    for cand in (candidates or []):
+        meta = _extract_invalid_zone_meta(cand, current_price=current_price, atr=atr, direction=direction)
+        if meta is not None and meta.get("dedup_key"):
+            extracted.append((str(meta["dedup_key"]).upper(), cand))
+
+    # Inisialisasi baseline pertama kali: tandai seluruh zona invalid historis lama sebagai sudah lewat agar tidak muncul lagi
+    if not _INVALID_ZONES_BASELINE_READY:
+        _INVALID_ZONES_BASELINE_READY = True
+        for dk, _ in extracted:
+            if dk not in _DISMISSED_INVALID_ZONES:
+                _DISMISSED_INVALID_ZONES.append(dk)
+        if len(_DISMISSED_INVALID_ZONES) > 500:
+            del _DISMISSED_INVALID_ZONES[:-500]
+        # Bersihkan juga previous_plan lama yang sudah terminal agar tidak terus menempel di layar
+        for pk, pv in list(_PREVIOUS_TRADE_PLANS.items()):
+            if isinstance(pv, dict):
+                p_sig = f"{pv.get('source','')}:{pv.get('zone_id','')}:v{pv.get('setup_version',1)}:{pv.get('archived_at','')}"
+                if p_sig not in _EMITTED_PREV_PLANS:
+                    _EMITTED_PREV_PLANS.append(p_sig)
+        _PREVIOUS_TRADE_PLANS.clear()
+        _save_trade_plan_state()
+        _LAST_INVALID_ONCE_CYCLE_KEY = norm_ck or None
+        _LAST_INVALID_ONCE_ZONE = None
+        return None
+
+    dismissed_set = set(_DISMISSED_INVALID_ZONES)
+    fresh_cands = [cand for dk, cand in extracted if dk not in dismissed_set]
+    if not fresh_cands:
+        _LAST_INVALID_ONCE_CYCLE_KEY = norm_ck or None
+        _LAST_INVALID_ONCE_ZONE = None
+        return None
+
+    chosen = select_relevant_invalid_zone(fresh_cands, current_price=current_price, atr=atr, direction=direction)
+    for dk, _ in extracted:
+        if dk not in dismissed_set:
+            _DISMISSED_INVALID_ZONES.append(dk)
+            dismissed_set.add(dk)
+    if len(_DISMISSED_INVALID_ZONES) > 500:
+        del _DISMISSED_INVALID_ZONES[:-500]
+    _save_trade_plan_state()
+    _LAST_INVALID_ONCE_CYCLE_KEY = norm_ck or None
+    _LAST_INVALID_ONCE_ZONE = chosen
+    return chosen
+
+
+def format_invalid_zone_compact(
+    item_or_zone,
+    current_price=None,
+    unit_spec=None,
+    status_override=None,
+    include_id: bool = True,
+) -> str:
+    """Format zona INVALID/BATAL tanpa jarak live (agar tidak mengecoh seolah zona aktif), disertai jam batal bila ada."""
     meta = _extract_invalid_zone_meta(item_or_zone, current_price=current_price)
     if meta is None:
         return "NONE"
@@ -969,11 +1093,20 @@ def format_invalid_zone_compact(item_or_zone, current_price=None, unit_spec=None
         else:
             g_part = f" | G:{grd}"
 
-    if math.isfinite(meta["dist"]):
-        d_txt = "IN ZONE" if meta["dist"] <= 0.0 else format_price_distance(meta["dist"], spec=unit_spec)
-        dist_part = f" | Dist {d_txt}"
-    else:
-        dist_part = ""
+    ts_part = ""
+    raw_ts_v = meta.get("raw_ts")
+    if raw_ts_v is not None:
+        raw_s = str(raw_ts_v).strip()
+        has_explicit_tz = (
+            isinstance(raw_ts_v, (int, float))
+            or "WIB" in raw_s.upper()
+            or raw_s.endswith("Z")
+            or (len(raw_s) > 19 and ("+" in raw_s[19:] or "-" in raw_s[19:]))
+        )
+        if has_explicit_tz:
+            dt_wib = to_wib_datetime(raw_ts_v)
+            if dt_wib is not None:
+                ts_part = f" @ {dt_wib.strftime('%H:%M')} WIB"
 
     # Pisahkan STRUCTURE_INV (batas invalidasi zona) dari SETUP_SL (SL entry)
     struct_inv = 0.0
@@ -1023,7 +1156,7 @@ def format_invalid_zone_compact(item_or_zone, current_price=None, unit_spec=None
     if st_txt == "SETUP_INVALID_SL_BREACHED":
         if setup_sl > 0.0:
             inv_parts.append(f"SetupSL {setup_sl:.2f}")
-        if struct_inv > 0.0:
+        elif struct_inv > 0.0:
             inv_parts.append(f"StructInv {struct_inv:.2f}")
     else:
         if struct_inv > 0.0:
@@ -1033,8 +1166,8 @@ def format_invalid_zone_compact(item_or_zone, current_price=None, unit_spec=None
     inv_part = (" | " + " | ".join(inv_parts)) if inv_parts else ""
 
     zid = meta["zone_id"]
-    id_part = f" [ID:{zid}]" if zid and zid.upper() not in ("N/A", "UNKNOWN") else ""
-    return f"{head_lbl} {lo_f:.2f}-{hi_f:.2f}{g_part}{dist_part}{inv_part} | {st_txt}{id_part}".replace("  ", " ").strip()
+    id_part = f" [ID:{zid}]" if (include_id and zid and zid.upper() not in ("N/A", "UNKNOWN")) else ""
+    return f"INVALID | {head_lbl} {lo_f:.2f}-{hi_f:.2f}{ts_part}{g_part}{inv_part} | {st_txt}{id_part}".replace("  ", " ").strip()
 
 
 _FROZEN_TRADE_PLANS: Dict[str, Dict[str, Any]] = {}
@@ -1042,6 +1175,13 @@ _ACTIVE_TRADE_PLAN_FOCUS: Dict[str, Dict[str, Any]] = {}
 _PREVIOUS_TRADE_PLANS: Dict[str, Dict[str, Any]] = {}
 _INVALIDATED_SETUP_VERSIONS: Dict[str, Dict[str, Any]] = {}
 _EMITTED_PLAN_SWITCHES: List[str] = []
+_EMITTED_PREV_PLANS: List[str] = []
+_DISMISSED_INVALID_ZONES: List[str] = []
+_INVALID_ZONES_BASELINE_READY = False
+_LAST_INVALID_ONCE_CYCLE_KEY: Optional[str] = None
+_LAST_INVALID_ONCE_ZONE: Optional[Dict[str, Any]] = None
+_LAST_PREV_PLAN_CYCLE_KEY: Optional[str] = None
+_LAST_PREV_PLAN_KEY: Optional[str] = None
 _TRADE_PLAN_STATE_LOADED = False
 _TRADE_PLAN_ATR_RECALC_RATIO = 0.20
 
@@ -1061,8 +1201,8 @@ def _get_trade_plan_state_path() -> str:
 
 
 def _load_trade_plan_state_once() -> None:
-    """Muat state Trade Plan (frozen, focus, previous, invalidated, switch) sekali dari state_zone_tracker.json."""
-    global _TRADE_PLAN_STATE_LOADED
+    """Muat state Trade Plan (frozen, focus, previous, invalidated, switch, dismissed_invalid) sekali dari state_zone_tracker.json."""
+    global _TRADE_PLAN_STATE_LOADED, _INVALID_ZONES_BASELINE_READY
     if _TRADE_PLAN_STATE_LOADED:
         return
     _TRADE_PLAN_STATE_LOADED = True
@@ -1100,6 +1240,20 @@ def _load_trade_plan_state_once() -> None:
                 _EMITTED_PLAN_SWITCHES.append(s_txt)
         if len(_EMITTED_PLAN_SWITCHES) > 60:
             del _EMITTED_PLAN_SWITCHES[:-60]
+        for pid in (tp_st.get("emitted_prev_plans") or []):
+            p_txt = str(pid or "").strip()
+            if p_txt and p_txt not in _EMITTED_PREV_PLANS:
+                _EMITTED_PREV_PLANS.append(p_txt)
+        if len(_EMITTED_PREV_PLANS) > 120:
+            del _EMITTED_PREV_PLANS[:-120]
+        if "dismissed_invalid_zones" in tp_st:
+            _INVALID_ZONES_BASELINE_READY = True
+            for izk in (tp_st.get("dismissed_invalid_zones") or []):
+                k_txt = str(izk or "").strip().upper()
+                if k_txt and k_txt not in _DISMISSED_INVALID_ZONES:
+                    _DISMISSED_INVALID_ZONES.append(k_txt)
+            if len(_DISMISSED_INVALID_ZONES) > 500:
+                del _DISMISSED_INVALID_ZONES[:-500]
     except Exception:
         pass
 
@@ -1117,14 +1271,17 @@ def _save_trade_plan_state() -> None:
                 if isinstance(rec.get("struct_sig"), tuple):
                     rec["struct_sig"] = list(rec["struct_sig"])
                 frozen_out[k] = rec
-        payload = {
+        payload: Dict[str, Any] = {
             "frozen": frozen_out,
             "focus": {k: dict(v) for k, v in _ACTIVE_TRADE_PLAN_FOCUS.items() if isinstance(v, dict)},
             "previous": {k: dict(v) for k, v in _PREVIOUS_TRADE_PLANS.items() if isinstance(v, dict)},
             "invalidated": dict(list(_INVALIDATED_SETUP_VERSIONS.items())[-200:]),
             "setup_order_links": dict(list(_SETUP_ORDER_LINKS.items())[-200:]),
             "emitted_switches": list(_EMITTED_PLAN_SWITCHES[-60:]),
+            "emitted_prev_plans": list(_EMITTED_PREV_PLANS[-120:]),
         }
+        if _INVALID_ZONES_BASELINE_READY:
+            payload["dismissed_invalid_zones"] = list(_DISMISSED_INVALID_ZONES[-500:])
         data: Dict[str, Any] = {}
         if os.path.exists(path):
             try:
@@ -1515,6 +1672,7 @@ def evaluate_trade_plan_lifecycle(
     htf_conflict: bool = False,
     breakdown_state: Optional[str] = None,
     breakdown_reason: Optional[str] = None,
+    is_midzone_limit: bool = False,
 ) -> Dict[str, Any]:
     """Evaluasi status lifecycle aktual & LIVE_ENTRY/Market RR tanpa menggeser PLANNED_ENTRY/SL/TP."""
     d = str(direction or "").strip().upper()
@@ -1535,7 +1693,8 @@ def evaluate_trade_plan_lifecycle(
             touched_now = (lp <= planned_entry) or (mkt_entry > 0 and mkt_entry <= planned_entry)
         else:
             touched_now = (lp >= planned_entry) or (mkt_entry > 0 and mkt_entry >= planned_entry)
-    touched_now = bool(touched_now or inside_zone_now)
+    if not is_midzone_limit:
+        touched_now = bool(touched_now or inside_zone_now)
 
     exited_far_edge = False
     if lp > 0 and lo > 0 and hi >= lo:
@@ -1691,8 +1850,8 @@ def evaluate_trade_plan_lifecycle(
             is_suspended=True,
         )
 
-    # 5. MISSED — harga mencapai TP1 ATAU bergerak menjauh melampaui jendela validitas existing tanpa konfirmasi/MT5 fill
-    if lp > 0 and tp1 > 0:
+    # 5. MISSED — harga mencapai TP1 setelah menyentuh zona ATAU bergerak menjauh melampaui jendela validitas existing tanpa konfirmasi/MT5 fill
+    if eff_was_touched and lp > 0 and tp1 > 0:
         if (demand and lp >= tp1) or ((not demand) and lp <= tp1):
             return _base(
                 status="MISSED",
@@ -1740,13 +1899,13 @@ def evaluate_trade_plan_lifecycle(
             touched_flag=True,
         )
 
-    # 7. PENDING_LIMIT READY (diblokir oleh HTF_CONFLICT dan M5 UNCONFIRMED; tetap tampil sebagai CONDITIONAL)
-    if (not is_closed) and (not blocked_by_htf_or_m5) and early_pending_ready:
+    # 7. PENDING_LIMIT READY (standar diblokir oleh HTF_CONFLICT; mode Mid-Zone 50% Limit tetap READY saat konflik/sideways)
+    if (not is_closed) and early_pending_ready and (is_midzone_limit or not blocked_by_htf_or_m5):
         return _base(
             status="READY",
             zone_status="ACTIVE",
             setup_status="READY",
-            reason="PENDING_READY",
+            reason="MIDZONE_50PCT_LIMIT" if is_midzone_limit else "PENDING_READY",
             transition_reason="PENDING_LIMIT_READY",
             is_executable=True,
             touched_flag=False,
@@ -1947,6 +2106,7 @@ def refresh_trade_plan_live_state(
         htf_conflict=htf_conflict,
         breakdown_state=reval.get("breakdown_state"),
         breakdown_reason=reval.get("breakdown_reason"),
+        is_midzone_limit=bool(out.get("is_midzone_limit")),
     )
     eff_h4 = str(h4_bias or out.get("h4_bias") or "").strip().upper()
     if eff_h4 in ("BULLISH", "BEARISH"):
@@ -2345,6 +2505,7 @@ def build_shared_trade_plan(
     conf_e = float((confirmed_plan or {}).get("entry") or 0.0) if isinstance(confirmed_plan, dict) else 0.0
     early_ready = bool(isinstance(early_pending_plan, dict) and early_pending_plan.get("ready"))
     early_exp = bool(isinstance(early_pending_plan, dict) and early_pending_plan.get("is_expired"))
+    is_mz_lim = bool(isinstance(early_pending_plan, dict) and early_pending_plan.get("is_midzone_limit"))
     mt5_fill = verify_mt5_fill_for_plan(
         d, lo, hi, planned_entry, mt5_orders_snapshot,
         source=src, timeframe=tf, zone_id=zid, setup_version=cur_ver,
@@ -2406,6 +2567,7 @@ def build_shared_trade_plan(
             max_bars_after_touch=max_bars_after_touch,
             verified_mt5_fill=mt5_fill,
             sl_breached_hist=sl_breached_hist,
+            is_midzone_limit=is_mz_lim,
         )
         if lc["status"] in ("INVALID", "SL_BREACHED", "EXPIRED", "MISSED") or lc["setup_status"] in ("SL_BREACHED", "EXPIRED", "MISSED") or lc["zone_status"] == "STRUCTURALLY_INVALID":
             _record_invalidated_setup_version(
@@ -2458,6 +2620,7 @@ def build_shared_trade_plan(
         "zone_high": round(hi, digits),
         "digits": digits,
         "direction": d,
+        "is_midzone_limit": is_mz_lim,
         "entry_method": lc["entry_method"],
         "entry": entry_compat,
         "planned_entry": planned_entry,
@@ -2813,7 +2976,7 @@ def resolve_trade_plan_focus(
     ]
     dir_qualified_pool = [
         p for p in qualified_pool
-        if (not norm_dir or str(p.get("direction") or "").strip().upper() == norm_dir)
+        if (not norm_dir or p.get("is_midzone_limit") or str(p.get("direction") or "").strip().upper() == norm_dir)
     ]
     active_pool = [
         p for p in valid_plans
@@ -3078,7 +3241,12 @@ def resolve_trade_plan_focus(
     }
 
 
-def _format_previous_plan_compact(prev: Optional[Dict[str, Any]], include_source: bool = False, h4_bias: Optional[str] = None) -> str:
+def _format_previous_plan_compact(
+    prev: Optional[Dict[str, Any]],
+    include_source: bool = False,
+    h4_bias: Optional[str] = None,
+    include_id: bool = True,
+) -> str:
     """Format 1 baris ringkas untuk PREVIOUS PLAN yang diarsipkan beserta alasan & timestamp."""
     if not isinstance(prev, dict) or not prev:
         return ""
@@ -3096,21 +3264,23 @@ def _format_previous_plan_compact(prev: Optional[Dict[str, Any]], include_source
     arch_ts = str(prev.get("archived_at") or "").strip()
     ts_short = arch_ts[11:19] + " WIB" if len(arch_ts) >= 19 else arch_ts
     src_part = f" [{src}]" if (include_source and src) else ""
-    id_part = f" [ID:{zid}]" if zid else ""
-    lvl_part = f"PLAN ENTRY {pe:.2f} | SetupSL {sl:.2f} | TP1 {tp1:.2f} | " if (pe > 0 and sl > 0 and tp1 > 0) else ""
-    ts_part = f" @ {ts_short}" if ts_short else ""
-    return f"{p_dir_disp} | {lvl_part}{arch_rsn}{ts_part}{src_part} [v{ver}]{id_part}".strip()
+    ver_part = f" [v{ver}]" if include_id else ""
+    id_part = f" [ID:{zid}]" if (include_id and zid) else ""
+    lvl_part = f"Entry {pe:.2f} | SL {sl:.2f} | TP1 {tp1:.2f} | " if (pe > 0 and sl > 0 and tp1 > 0) else ""
+    ts_short_hm = arch_ts[11:16] + " WIB" if len(arch_ts) >= 16 else ts_short
+    ts_part = f" @ {ts_short if include_id else ts_short_hm}" if ts_short else ""
+    return f"[RIWAYAT] {p_dir_disp} | {lvl_part}{arch_rsn}{ts_part}{src_part}{ver_part}{id_part}".strip()
 
 
-def format_trade_plan_compact(plan, include_source=False, broker_tag=None) -> str:
-    """Format ringkas satu Trade Plan dengan Zone ID, setup version, PLAN ENTRY, LIVE PRICE, SetupSL, TP1, TP2, RR, dan status."""
+def format_trade_plan_compact(plan, include_source=False, broker_tag=None, include_id=True) -> str:
+    """Format ringkas satu Trade Plan dengan Zone ID (opsional), PLAN ENTRY, SetupSL, TP1, TP2, RR, dan status."""
     if not isinstance(plan, dict) or not plan:
         return ""
     st = str(plan.get("status") or "REJECTED").strip().upper()
     zid = str(plan.get("zone_id") or "").strip()
-    id_part = f" [ID:{zid}]" if zid and zid.upper() not in ("N/A", "NONE", "UNKNOWN") else ""
+    id_part = f" [ID:{zid}]" if (include_id and zid and zid.upper() not in ("N/A", "NONE", "UNKNOWN")) else ""
     ver = int(plan.get("setup_version") or 1)
-    ver_part = f" [v{ver}]"
+    ver_part = f" [v{ver}]" if include_id else ""
     src = str(plan.get("source") or "").strip().upper()
     src_part = f" [{src}]" if (include_source and src) else ""
     rsn = str(plan.get("reason") or "").strip()
@@ -3119,10 +3289,14 @@ def format_trade_plan_compact(plan, include_source=False, broker_tag=None) -> st
 
     if st == "NO_ACTIVE_PLAN":
         rsn_txt = rsn or "NO_QUALIFIED_SETUP"
+        if not include_id:
+            return f"NONE ({rsn_txt})"
         return f"NONE | {rsn_txt} | {lp_str}".strip()
 
     if st == "REJECTED":
         rsn_txt = rsn or "UNQUALIFIED"
+        if not include_id:
+            return f"REJECTED ({rsn_txt}){src_part}".strip()
         return f"REJECTED (DIAG) | {rsn_txt} | {lp_str}{src_part}{ver_part}{id_part}".strip()
 
     p_dir = str(plan.get("direction") or "N/A").strip().upper()
@@ -3212,12 +3386,14 @@ def format_trade_plan_lines(
     broker_tag=None,
     skip_why_for_zone_id=None,
     h4_bias=None,
+    include_id=True,
+    active_zone_id=None,
 ):
-    """Susun baris PLAN SWITCH (one-shot) + TRADE PLAN + WHY PLAN + PREV PLAN / DIAG PLAN ter-wrap rapi tanpa truncation `...`."""
+    """Susun baris PLAN SWITCH (one-shot) + TRADE PLAN + WHY PLAN + PREV PLAN / DIAG PLAN ter-wrap rapi tanpa duplikasi."""
     if not isinstance(plan, dict) or not plan:
         return []
     from modules.terminal_ui import wrap_dashboard_field
-    txt = format_trade_plan_compact(plan, include_source=include_source, broker_tag=broker_tag)
+    txt = format_trade_plan_compact(plan, include_source=include_source, broker_tag=broker_tag, include_id=include_id)
     if not txt:
         return []
     lines = []
@@ -3247,16 +3423,50 @@ def format_trade_plan_lines(
             lines.extend(wrap_dashboard_field(why_prefix, why_txt, width, max_lines=None))
     prev_plan = plan.get("previous_plan") if isinstance(plan.get("previous_plan"), dict) else None
     if prev_plan:
-        prev_txt = _format_previous_plan_compact(prev_plan, include_source=include_source, h4_bias=h4_bias or plan.get("h4_bias"))
-        if prev_txt:
-            prev_prefix = "   PREV PLAN : " if prefix.startswith(" ") else "PREV PLAN    : "
-            lines.extend(wrap_dashboard_field(prev_prefix, prev_txt, width, max_lines=None))
+        global _LAST_PREV_PLAN_CYCLE_KEY, _LAST_PREV_PLAN_KEY
+        _load_trade_plan_state_once()
+        p_sig = f"{prev_plan.get('source','')}:{prev_plan.get('zone_id','')}:v{prev_plan.get('setup_version',1)}:{prev_plan.get('archived_at','')}"
+        cur_ck = str(_LAST_INVALID_ONCE_CYCLE_KEY or "").strip()
+        show_prev_once = False
+        if p_sig and p_sig not in _EMITTED_PREV_PLANS:
+            _EMITTED_PREV_PLANS.append(p_sig)
+            if len(_EMITTED_PREV_PLANS) > 120:
+                del _EMITTED_PREV_PLANS[:-120]
+            for sc_k, sc_v in list(_PREVIOUS_TRADE_PLANS.items()):
+                if isinstance(sc_v, dict) and str(sc_v.get("zone_id") or "") == str(prev_plan.get("zone_id") or ""):
+                    _PREVIOUS_TRADE_PLANS.pop(sc_k, None)
+            _LAST_PREV_PLAN_CYCLE_KEY = cur_ck or None
+            _LAST_PREV_PLAN_KEY = p_sig
+            _save_trade_plan_state()
+            show_prev_once = True
+        elif cur_ck and _LAST_PREV_PLAN_CYCLE_KEY == cur_ck and _LAST_PREV_PLAN_KEY == p_sig:
+            show_prev_once = True
+        if show_prev_once:
+            prev_txt = _format_previous_plan_compact(
+                prev_plan,
+                include_source=include_source,
+                h4_bias=h4_bias or plan.get("h4_bias"),
+                include_id=include_id,
+            )
+            if prev_txt:
+                prev_prefix = "   PREV PLAN : " if prefix.startswith(" ") else "PREV PLAN    : "
+                lines.extend(wrap_dashboard_field(prev_prefix, prev_txt, width, max_lines=None))
     if st == "NO_ACTIVE_PLAN":
         diag_rej = plan.get("rejected_diagnostic") if isinstance(plan.get("rejected_diagnostic"), dict) else None
         if diag_rej:
-            diag_txt = format_trade_plan_compact(diag_rej, include_source=include_source)
-            if diag_txt:
-                diag_prefix = "   DIAG PLAN : " if prefix.startswith(" ") else "DIAG PLAN    : "
-                lines.extend(wrap_dashboard_field(diag_prefix, diag_txt, width, max_lines=None))
+            plan_rsn = str(plan.get("reason") or "").strip().upper()
+            diag_rsn = str(diag_rej.get("reason") or "").strip().upper()
+            diag_zid = str(diag_rej.get("zone_id") or "").strip()
+            ref_act_zid = str(active_zone_id or skip_why_for_zone_id or "").strip()
+            # Jangan ulangi DIAG PLAN bila alasannya sudah tertulis di TRADE PLAN atau merujuk ke zona ACTIVE/RADAR yang sama
+            is_dup_diag = bool(
+                (plan_rsn and diag_rsn == plan_rsn)
+                or (ref_act_zid and ref_act_zid != "N/A" and diag_zid == ref_act_zid)
+            )
+            if not is_dup_diag:
+                diag_txt = format_trade_plan_compact(diag_rej, include_source=include_source, include_id=include_id)
+                if diag_txt:
+                    diag_prefix = "   DIAG PLAN : " if prefix.startswith(" ") else "DIAG PLAN    : "
+                    lines.extend(wrap_dashboard_field(diag_prefix, diag_txt, width, max_lines=None))
     return lines
 

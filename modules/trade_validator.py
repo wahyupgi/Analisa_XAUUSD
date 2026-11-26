@@ -163,6 +163,7 @@ def evaluate_directional_alignment(
     h1_bias: str,
     m30_status: str,
     has_explicit_htf_conflict: bool = False,
+    allow_conflict_midzone: bool = False,
     cfg: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str, str]:
     """
@@ -176,6 +177,9 @@ def evaluate_directional_alignment(
       * Konflik H4 vs H1 yang berlawanan langsung (mis. H4 BULLISH vs H1 BEARISH) tetap BLOCK (HTF_CONFLICT).
     """
     conf = cfg or get_auto_trading_config()
+    if bool(conf.get("AUTO_LOOSE_MODE", False)):
+        # LOOSE MODE: abaikan konflik HTF / bias arah (zona tetap wajib lolos validasi struktural & SL/TP)
+        return True, REASON_OK, "LOOSE MODE: validasi arah HTF dilewati"
     dir_u = str(direction or "").upper()
     want_bias = "BULLISH" if dir_u == "BUY" else "BEARISH"
     opp_bias = "BEARISH" if dir_u == "BUY" else "BULLISH"
@@ -195,6 +199,13 @@ def evaluate_directional_alignment(
     m30_is_supportive = (not m30_is_opposing) and any(
         tok in m30_u for tok in ("CONFIRMED", "ALIGNED", "STRONG", "SUPPORT", want_bias)
     )
+
+    if allow_conflict_midzone and bool(conf.get("CONFLICT_MIDZONE_LIMIT_ENABLED", False)):
+        return (
+            True,
+            REASON_OK,
+            f"Mode Mid-Zone 50% Limit aktif saat market konflik/sideways (H4={h4_u}, H1={h1_u}, M30={m30_u})",
+        )
 
     if h4_u == opp_bias or h1_is_opposing or has_explicit_htf_conflict:
         return (
@@ -274,6 +285,7 @@ def validate_zone_quality_layer(
         or z_status in ("INVALIDATED", "BROKEN", "REJECTED")
         or z_fresh == "INVALIDATED"
     ):
+        # Zona invalid/broken/rejected TIDAK PERNAH dieksekusi, termasuk pada LOOSE MODE.
         # Bedakan invalidasi struktural dari sekadar skor rendah
         if (not zone.is_broken) and z_fresh not in ("INVALIDATED", "MITIGATED") and float(zone.score or 0.0) < min_score and "invalid" not in str(zone.rejection_reason or "").lower():
             return (
@@ -282,12 +294,13 @@ def validate_zone_quality_layer(
                 REASON_ZONE_LOW_SCORE,
                 f"Zona {zone.zone_id} tidak memenuhi kualitas minimum ({zone.rejection_reason or f'score={zone.score:.1f}'})",
             )
-        return (
-            False,
-            STATE_INVALIDATED,
-            REASON_ZONE_INVALIDATED,
-            f"Zona {zone.zone_id} sudah INVALIDATED ({zone.rejection_reason or z_status})",
-        )
+        else:
+            return (
+                False,
+                STATE_INVALIDATED,
+                REASON_ZONE_INVALIDATED,
+                f"Zona {zone.zone_id} sudah INVALIDATED ({zone.rejection_reason or z_status})",
+            )
 
     if z_fresh == "MITIGATED" or z_touches > 2:
         return (
@@ -328,7 +341,7 @@ def validate_zone_quality_layer(
             f"Score zona ({zone.score:.1f}) di bawah minimum {min_score:.1f}",
         )
 
-    if is_far_reference_zone(zone, current_price=current_price):
+    if is_far_reference_zone(zone, current_price=current_price) and not bool(conf.get("AUTO_LOOSE_MODE", False)):
         return (
             False,
             STATE_RADAR,
@@ -450,13 +463,52 @@ def select_candidate_zones(
         _add(z)
 
     # Hybrid SMC + SNR: sertakan zona SNR aktif tervalidasi sebagai kandidat pengganti / pelengkap
-    snr_scan = snr_r.get("scan_result") if isinstance(snr_r.get("scan_result"), dict) else snr_r
+    snr_scan = (
+        snr_r.get("scan_result")
+        if isinstance(snr_r.get("scan_result"), dict)
+        else (snr_r.get("scan") if isinstance(snr_r.get("scan"), dict) else snr_r)
+    )
     snr_dec = snr_r.get("decision") if isinstance(snr_r.get("decision"), dict) else {}
     sym_ref = str(sc.get("symbol") or snr_scan.get("symbol") or SYMBOL)
-    if isinstance(snr_dec.get("target_zone"), dict):
+    live_px_sel = float(sc.get("current_price") or sc.get("mid") or 0.0)
+    from modules.snr.entry_validator import _is_live_active_snr_zone
+
+    def _snr_live_ok(sz_item: Any) -> bool:
+        # Hanya zona SNR yang masih aktif secara lifecycle & valid terhadap harga live yang jadi kandidat eksekusi
+        if not isinstance(sz_item, dict):
+            return False
+        zt = str(sz_item.get("zone_type") or "").upper()
+        exp_t = "SUPPORT" if zt in ("SUPPORT", "DEMAND") else "RESISTANCE"
+        return _is_live_active_snr_zone(sz_item, exp_t, live_px_sel)
+
+    if isinstance(snr_dec.get("target_zone"), dict) and _snr_live_ok(snr_dec.get("target_zone")):
         _add(_snr_zone_to_candidate_dict(snr_dec.get("target_zone"), symbol=sym_ref))
-    for grp_key in ("supports", "resistances", "active_zones"):
-        for sz in (snr_scan.get(grp_key) or []):
+    snr_ranked = snr_scan.get("ranked_zones") if isinstance(snr_scan.get("ranked_zones"), dict) else {}
+    snr_zones_dict = snr_scan.get("zones") if isinstance(snr_scan.get("zones"), dict) else {}
+    snr_cand_lists = [
+        snr_scan.get("supports"),
+        snr_scan.get("resistances"),
+        snr_scan.get("active_zones"),
+        snr_ranked.get("active_supports"),
+        snr_ranked.get("active_resistances"),
+        snr_zones_dict.get("active_supports"),
+        snr_zones_dict.get("active_resistances"),
+        snr_zones_dict.get("supports"),
+        snr_zones_dict.get("resistances"),
+    ]
+    snr_pool_merged = []
+    for lst in snr_cand_lists:
+        for sz in (lst or []):
+            if isinstance(sz, dict):
+                snr_pool_merged.append(sz)
+    snr_pool_merged.sort(
+        key=lambda z: (
+            -float(z.get("score") or 0.0),
+            float(z.get("distance_points") or z.get("distance") or 9999.0),
+        )
+    )
+    for sz in snr_pool_merged:
+        if _snr_live_ok(sz):
             _add(_snr_zone_to_candidate_dict(sz, symbol=sym_ref))
 
     return ordered
@@ -543,6 +595,7 @@ def validate_trade_candidate(
         htf_bias=h4_bias,
         h1_bias=h1_bias,
         m30_status=m30_status,
+        has_htf_conflict=has_htf_conflict,
         server_time=snap.get("server_time"),
         opposing_zones=opposing_zones,
         snr_context=snr_ctx,
@@ -552,6 +605,8 @@ def validate_trade_candidate(
     )
 
     chosen_entry_mode = str(path_eval["entry_mode"])
+    chosen_sub_mode = str(path_eval.get("sub_mode") or "")
+    is_conflict_midzone = (chosen_sub_mode == "CONFLICT_MIDZONE_LIMIT")
     order_kind = str(path_eval["order_kind"])
     is_market_order = (order_kind == "MARKET")
     levels = path_eval["levels"]
@@ -578,6 +633,7 @@ def validate_trade_candidate(
         "direction": direction,
         "order_type": path_eval["order_type"],
         "entry_mode": chosen_entry_mode,
+        "sub_mode": chosen_sub_mode,
         "zone_timeframe": zone.timeframe,
         "zone_type": f"{zone.timeframe} {zone.zone_type}",
         "zone_low": zone.price_low,
@@ -678,6 +734,7 @@ def validate_trade_candidate(
             "touch": touch,
             "triggers": triggers,
             "entry_mode": chosen_entry_mode,
+            "sub_mode": chosen_sub_mode,
             "target_lot": t_lot,
             "final_lot": f_lot,
             "lot_reason": l_rsn or reason_code,
@@ -721,6 +778,7 @@ def validate_trade_candidate(
         h1_bias=h1_bias,
         m30_status=m30_status,
         has_explicit_htf_conflict=has_htf_conflict,
+        allow_conflict_midzone=is_conflict_midzone,
         cfg=conf,
     )
     if not dir_ok:

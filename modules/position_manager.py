@@ -209,6 +209,24 @@ class PositionManager:
                 if (is_buy and be_plus_sl > cur_sl + 1e-6) or ((not is_buy) and be_plus_sl < cur_sl - 1e-6):
                     candidate_sl = be_plus_sl
 
+            # Untuk posisi lot minimum (mis. 0.01 lot yang tidak bisa partial close):
+            # Aktifkan BE+ otomatis setelah running profit >= BE_SINGLE_LOT_TRIGGER_POINTS (default 8.0 USD = 80 pips).
+            can_partial_more = bool(
+                conf.get("PARTIAL_CLOSE_ENABLED", False)
+                and step_pts > 0
+                and step_lot > 0
+                and round(cur_vol - step_lot, 2) >= min_rem_lot - 1e-9
+            )
+            if (not can_partial_more) and stages_done == 0 and conf.get("BE_SINGLE_LOT_ENABLED", True):
+                be_single_pts = float(conf.get("BE_SINGLE_LOT_TRIGGER_POINTS", 8.0))
+                if be_single_pts > 0 and profit_pts >= be_single_pts - 1e-6:
+                    be_plus_sl = (entry_px + be_plus_pts) if is_buy else (entry_px - be_plus_pts)
+                    if candidate_sl is None:
+                        if (is_buy and be_plus_sl > cur_sl + 1e-6) or ((not is_buy) and be_plus_sl < cur_sl - 1e-6):
+                            candidate_sl = be_plus_sl
+                    else:
+                        candidate_sl = max(candidate_sl, be_plus_sl) if is_buy else min(candidate_sl, be_plus_sl)
+
             if conf.get("BREAK_EVEN_ENABLED", False) and init_risk > 0:
                 be_rr = float(conf.get("BREAK_EVEN_TRIGGER_RR", 1.0))
                 be_lock = float(conf.get("BREAK_EVEN_LOCK_POINTS", 0.30))

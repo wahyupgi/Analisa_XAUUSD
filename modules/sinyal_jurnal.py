@@ -1885,6 +1885,18 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
         return wib_s if wib_s else "-"
 
     def _apply_zone_info(row_dict, arah, harga_entry, is_pending=False, prev_row=None, raw_item=None, item_utc_ts=0.0):
+        from modules.execution_engine import is_scanner_owned_item
+        from modules.config import SCANNER_MAGIC_NUMBER
+        
+        is_bot = False
+        if raw_item is not None:
+            is_bot = is_scanner_owned_item(raw_item, SCANNER_MAGIC_NUMBER)
+        elif isinstance(prev_row, dict):
+            prev_sz = str(prev_row.get("status_zona") or "").upper()
+            prev_ket = str(prev_row.get("keterangan") or "").upper()
+            if "AUTO" in prev_sz or "ROBOT" in prev_sz or "SCANNER" in prev_ket:
+                is_bot = True
+
         matched = _cocokkan_zona_entry(arah, harga_entry, zones)
         if matched:
             ev_j = evaluate_mt5_setup_match(
@@ -1914,41 +1926,56 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
             row_dict["setup_match"] = sm_j
             lbl_z = f"{matched['timeframe']} {matched['zone_type']}" + (f" ({matched['rank_label']})" if matched.get("rank_label") else "")
             sl_note = "SL OK" if row_dict["sl"] != "-" else "SL MISSING"
-            if ev_j.get("is_existing_position") or sm_j in ("UNRELATED", "UNKNOWN"):
-                row_dict["status_zona"] = f"EXISTING POSITION (SETUP MATCH: {sm_j})"
-                row_dict["sumber_zona"] = "-"
-                row_dict["zone_id"] = "-"
-                row_dict["zona_range"] = f"{matched['low']:.2f} - {matched['high']:.2f}"
-                row_dict["grade_zona"] = matched["grade"]
-                row_dict["keterangan"] = f"EXISTING POSITION overlap {lbl_z} | SETUP MATCH: {sm_j} ({ev_j.get('reason')}) | {sl_note}"
+            
+            # Klasifikasi status zona: AUTO (oleh robot) vs MANUAL
+            if is_bot:
+                st_prefix = "PENDING AUTO" if is_pending else "ENTRY AUTO"
             else:
-                row_dict["status_zona"] = "PENDING DI ZONA" if is_pending else "ZONA DIAMBIL"
-                row_dict["sumber_zona"] = matched["source"]
-                row_dict["zone_id"] = matched["zone_id"]
-                row_dict["zona_range"] = f"{matched['low']:.2f} - {matched['high']:.2f}"
-                row_dict["grade_zona"] = matched["grade"]
+                st_prefix = "PENDING MANUAL" if is_pending else "ENTRY MANUAL"
+
+            row_dict["sumber_zona"] = matched["source"]
+            row_dict["zone_id"] = matched["zone_id"]
+            row_dict["zona_range"] = f"{matched['low']:.2f} - {matched['high']:.2f}"
+            row_dict["grade_zona"] = matched["grade"]
+
+            if is_bot:
+                row_dict["status_zona"] = f"{st_prefix} (ZONA DIAMBIL)"
                 row_dict["keterangan"] = (
-                    f"Zona {lbl_z} diambil ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
+                    f"Robot entry di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
                     if not is_pending
-                    else f"Pending di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
+                    else f"Robot pending order di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
                 )
-        elif isinstance(prev_row, dict) and str(prev_row.get("status_zona") or "").upper() in ("ZONA DIAMBIL", "PENDING DI ZONA") and prev_row.get("zone_id") not in (None, "", "-"):
+            else:
+                row_dict["status_zona"] = f"{st_prefix} (DI ZONA)"
+                row_dict["keterangan"] = (
+                    f"Manual entry di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
+                    if not is_pending
+                    else f"Manual pending order di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
+                )
+        elif isinstance(prev_row, dict) and prev_row.get("zone_id") not in (None, "", "-"):
+            prev_sz = str(prev_row.get("status_zona") or "").upper()
+            is_prev_bot = is_bot or ("AUTO" in prev_sz or "ROBOT" in prev_sz)
+            st_prefix = ("PENDING AUTO" if is_prev_bot else "PENDING MANUAL") if is_pending else ("ENTRY AUTO" if is_prev_bot else "ENTRY MANUAL")
             row_dict["setup_match"] = prev_row.get("setup_match") or "INFERRED"
-            row_dict["status_zona"] = "PENDING DI ZONA" if is_pending else "ZONA DIAMBIL"
+            row_dict["status_zona"] = f"{st_prefix} (ZONA DIAMBIL)" if is_prev_bot else f"{st_prefix} (DI ZONA)"
             row_dict["sumber_zona"] = prev_row.get("sumber_zona") or "-"
             row_dict["zone_id"] = prev_row.get("zone_id") or "-"
             row_dict["zona_range"] = prev_row.get("zona_range") or "-"
             row_dict["grade_zona"] = prev_row.get("grade_zona") or "-"
-            row_dict["keterangan"] = prev_row.get("keterangan") or "Zona scanner diambil"
+            row_dict["keterangan"] = prev_row.get("keterangan") or ("Robot eksekusi zona scanner" if is_prev_bot else "Manual entry di zona scanner")
         else:
             sl_note = "SL OK" if row_dict["sl"] != "-" else "SL MISSING"
             row_dict["setup_match"] = "UNRELATED"
-            row_dict["status_zona"] = "PENDING MANUAL (DI LUAR ZONA)" if is_pending else "ENTRY MANUAL (DI LUAR ZONA)"
+            if is_bot:
+                row_dict["status_zona"] = "PENDING AUTO (DI LUAR ZONA)" if is_pending else "ENTRY AUTO (DI LUAR ZONA)"
+                row_dict["keterangan"] = f"Robot order di luar zona scanner | {sl_note}"
+            else:
+                row_dict["status_zona"] = "PENDING MANUAL (DI LUAR ZONA)" if is_pending else "ENTRY MANUAL (DI LUAR ZONA)"
+                row_dict["keterangan"] = f"Entry manual di luar zona scanner | {sl_note}"
             row_dict["sumber_zona"] = "-"
             row_dict["zone_id"] = "-"
             row_dict["zona_range"] = "-"
             row_dict["grade_zona"] = "-"
-            row_dict["keterangan"] = f"Entry di luar zona scanner | {sl_note}"
 
     if mt5_aktif:
         now_utc = datetime.now(timezone.utc)

@@ -884,8 +884,39 @@ def evaluate_entry_paths_for_zone(
                     },
                 }
 
+    from modules.config import compute_zone_limit_entry_price, resolve_zone_limit_depth
+    eff_limit_depth = resolve_zone_limit_depth(zone=zone, cfg=conf)
+    zone_limit_px = compute_zone_limit_entry_price(
+        zone.price_low,
+        zone.price_high,
+        demand=demand,
+        depth=eff_limit_depth,
+        digits=2,
+    )
+    ref_mkt_live = float(
+        ask if (demand and ask and ask > 0) else (bid if ((not demand) and bid and bid > 0) else current_price)
+    )
+    min_lim_gap = max(0.15, float(spread or 0.0))
+    limit_still_ahead = (
+        (demand and zone_limit_px < ref_mkt_live - min_lim_gap)
+        or ((not demand) and zone_limit_px > ref_mkt_live + min_lim_gap)
+    )
+    loose_mode_active = bool(conf.get("AUTO_LOOSE_MODE", False))
+    defer_loose_edge_to_limit = (
+        loose_mode_active
+        and touch["touched"]
+        and (not touch["left_entry_range"])
+        and early_en
+        and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY")
+        and (not triggers["any_valid"])
+        and (not triggers["confirmed_valid"])
+        and limit_still_ahead
+    )
+
     # Kasus 1: Harga sudah menyentuh zona (Market Execution Path: ADAPTIVE_ENTRY atau CONFIRMED_ENTRY)
-    if touch["touched"]:
+    # Catatan: Pada LOOSE MODE bila harga baru menyentuh tepi awal zona dan belum mencapai area tengah (zone_limit_px)
+    # tanpa trigger M5, lewati market di awal zona agar Kasus 2 memasang LIMIT di area tengah zona!
+    if touch["touched"] and not defer_loose_edge_to_limit:
         if touch["left_entry_range"]:
             return {
                 "entry_mode": "ADAPTIVE_ENTRY",
@@ -928,8 +959,10 @@ def evaluate_entry_paths_for_zone(
                 trig_ok = True
                 chosen_mode = "CONFIRMED_ENTRY"
             else:
-                # LOOSE MODE: zona tersentuh & masih dalam execution range -> ambil tanpa menunggu trigger M5
-                trig_ok = bool(conf.get("AUTO_LOOSE_MODE", False))
+                # LOOSE MODE: hanya eksekusi market tanpa trigger M5 bila harga sudah masuk minimal sedalam target limit zona (25% utk Grade B/A, 50% utk HIGH_RISK/Grade < B)
+                min_in_px = zone_limit_px
+                deep_enough = (touch["exec_price"] <= min_in_px + 1e-6) if demand else (touch["exec_price"] >= min_in_px - 1e-6)
+                trig_ok = bool(loose_mode_active and deep_enough)
                 chosen_mode = "ADAPTIVE_ENTRY" if adaptive_en else "CONFIRMED_ENTRY"
 
         return {
@@ -943,13 +976,17 @@ def evaluate_entry_paths_for_zone(
             "reason_code": REASON_OK if trig_ok else REASON_WAIT_TRIGGER,
             "reason_text": (
                 f"Trigger {triggers['primary_trigger']} terkonfirmasi"
-                if trig_ok
-                else f"Zona tersentuh; menunggu minimal 1 trigger {chosen_mode} valid pada M5 close"
+                if (trig_ok and triggers["any_valid"])
+                else (
+                    f"LOOSE MODE: Harga masuk area tengah zona ({touch['exec_price']:.2f})"
+                    if trig_ok
+                    else f"Zona tersentuh; menunggu minimal 1 trigger {chosen_mode} valid pada M5 close"
+                )
             ),
             "levels": levels,
         }
 
-    # Kasus 2: Harga belum menyentuh zona -> Evaluasi EARLY_PENDING (BUY LIMIT / SELL LIMIT) bila diaktifkan
+    # Kasus 2: Harga belum menyentuh area tengah zona -> Evaluasi EARLY_PENDING (BUY LIMIT / SELL LIMIT di area tengah zona)
     if early_en and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY"):
         pending_plan = plan_pending_order(
             zone,
@@ -965,7 +1002,7 @@ def evaluate_entry_paths_for_zone(
             snr_context=snr_context,
         )
         # Validasi tambahan: zona harus fresh (touch_count == 0 / FRESH) & Grade A (>=75) untuk EARLY_PENDING
-        loose_ep = bool(conf.get("AUTO_LOOSE_MODE", False))
+        loose_ep = loose_mode_active
         is_fresh_zone = loose_ep or (str(zone.freshness or "FRESH").upper() == "FRESH" and int(zone.touch_count or 0) == 0)
         ep_min_score = float(conf.get("EARLY_PENDING_MIN_SCORE", 75.0))
         score_ok_ep = loose_ep or (float(getattr(zone, "score", 0.0) or 0.0) >= ep_min_score)
@@ -975,7 +1012,7 @@ def evaluate_entry_paths_for_zone(
         max_sl_ep = float(conf.get("SL_JARAK_MAKS", 35.0))
 
         # Jika plan_pending_order hanya gagal karena SL_JARAK_MAKS legacy (20 USD) atau NO_TARGET/RR_TOO_LOW,
-        # namun mode FIXED_RR (1:1) aktif dan jarak SL struktural masih <= max_sl_ep (mis. 35 USD), tetap izinkan EARLY_PENDING 1:1!
+        # namun mode FIXED_RR aktif dan jarak SL struktural masih <= max_sl_ep, tetap izinkan EARLY_PENDING di tengah zona!
         ep_plan_valid = bool(pending_plan.get("valid"))
         if (not ep_plan_valid) and is_fresh_zone and score_ok_ep and tp1_mode_ep in ("FIXED_RR", "FIXED", "1:1") and force_fixed_ep:
             rej_ep_str = str(pending_plan.get("rejection_reason") or "")
@@ -984,9 +1021,9 @@ def evaluate_entry_paths_for_zone(
                 for k in ("melebihi batas toleransi maksimal", "NO_TARGET", "RR_TOO_LOW")
             )
             if recoverable_ep:
-                lim_cand = round(float(zone.price_high if demand else zone.price_low), 2)
-                ref_m_ep = float(ask if (demand and ask and ask > 0) else (bid if ((not demand) and bid and bid > 0) else current_price))
-                limit_side_ok = (demand and lim_cand < ref_m_ep) or ((not demand) and lim_cand > ref_m_ep)
+                lim_cand = zone_limit_px
+                ref_m_ep = ref_mkt_live
+                limit_side_ok = (demand and lim_cand < ref_m_ep - min_lim_gap) or ((not demand) and lim_cand > ref_m_ep + min_lim_gap)
                 sl_cand_ep = float(pending_plan.get("sl") or 0.0)
                 if sl_cand_ep <= 0.0:
                     sl_cand_ep = compute_structural_sl(zone, frames, spread=float(spread or 0.0))
@@ -1014,7 +1051,11 @@ def evaluate_entry_paths_for_zone(
                     ep_plan_valid = True
 
         if ep_plan_valid and is_fresh_zone and score_ok_ep:
-            limit_entry = float(pending_plan.get("entry_price") or (zone.price_high if demand else zone.price_low))
+            limit_entry = float(pending_plan.get("entry_price") or zone_limit_px)
+            # Pastikan limit_entry tidak jatuh di tepi awal zona bila lebar zona memadai
+            if zone.price_high > zone.price_low + 0.20:
+                if (demand and abs(limit_entry - zone.price_high) < 1e-6) or ((not demand) and abs(limit_entry - zone.price_low) < 1e-6):
+                    limit_entry = zone_limit_px
             ep_sl = float(pending_plan.get("sl") or 0.0)
             ep_tp1 = float(pending_plan.get("tp1") or 0.0)
             ep_tp2 = float(pending_plan.get("tp2") or 0.0)
@@ -1036,7 +1077,7 @@ def evaluate_entry_paths_for_zone(
                 "triggers": triggers,
                 "trigger_passed": True,
                 "reason_code": REASON_OK,
-                "reason_text": "Zona fresh memenuhi syarat EARLY_PENDING (1:1 SL/TP)" if force_fixed_ep else "Zona fresh memenuhi syarat EARLY_PENDING",
+                "reason_text": f"Limit order {int(round(eff_limit_depth * 100))}% dalam zona ({limit_entry:.2f}) siap dieksekusi",
                 "pending_plan": pending_plan,
                 "levels": {
                     "sl": round(ep_sl, 2),
@@ -1050,7 +1091,7 @@ def evaluate_entry_paths_for_zone(
         # Jika zona terlalu jauh untuk pending order -> laporkan jarak / tunggu sentuhan zona untuk ADAPTIVE_ENTRY
         rej_p = str(pending_plan.get("rejection_reason") or "")
         too_far = "terlalu jauh" in rej_p.lower() or "far" in str(getattr(zone, "zone_relevance", "")).lower()
-        limit_px = float(zone.price_high if demand else zone.price_low)
+        limit_px = zone_limit_px
         levels_prov = compute_setup_sl_tp_levels(
             zone, limit_px, frames=frames, spread=spread,
             opposing_zones=opposing_zones, snr_context=snr_context, existing_plan=existing_plan, cfg=conf,
@@ -1070,7 +1111,7 @@ def evaluate_entry_paths_for_zone(
             "levels": levels_prov,
         }
 
-    limit_px = float(zone.price_high if demand else zone.price_low)
+    limit_px = zone_limit_px
     levels_prov = compute_setup_sl_tp_levels(
         zone, limit_px, frames=frames, spread=spread,
         opposing_zones=opposing_zones, snr_context=snr_context, existing_plan=existing_plan, cfg=conf,

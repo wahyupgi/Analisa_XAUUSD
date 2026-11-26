@@ -162,10 +162,18 @@ def _compute_ranking_priority(zone, current_price):
     return round(quality_part + proximity_part + fresh_part + struct_bonus, 2)
 
 
+def _is_qualified_ab_zone(zone) -> bool:
+    grd = str((zone or {}).get("grade") or "").strip().upper()
+    sc = safe_float((zone or {}).get("score"), 0.0)
+    return bool(grd.startswith(("A", "B")) or sc >= 70.0)
+
+
 def _deduplicate_overlapping_ranked_zones(sorted_zones):
     """
     Menghindari pemilihan dua zona dari timeframe berbeda yang menumpuk pada level harga
     yang sama persis sebagai S1 & S2 (atau R1 & R2), sambil menyimpan zona dengan skor/prioritas tertinggi.
+    Juga mencegah zona bayangan Grade rendah (< B / < 70) yang menempel tipis di tepi zona kuat Grade A/B
+    ikut muncul dan menutupi zona utama.
     """
     selected = []
     for z in sorted_zones:
@@ -173,17 +181,26 @@ def _deduplicate_overlapping_ranked_zones(sorted_zones):
         z_high = safe_float(z.get("high"), z_low)
         z_mid = safe_float(z.get("mid"), (z_low + z_high) / 2.0)
         z_atr = max(0.25, safe_float(z.get("ref_atr"), 2.0))
+        z_ab = _is_qualified_ab_zone(z)
 
         is_dup = False
         for ex in selected:
             e_low = safe_float(ex.get("low"), 0.0)
             e_high = safe_float(ex.get("high"), e_low)
             e_mid = safe_float(ex.get("mid"), (e_low + e_high) / 2.0)
+            e_atr = max(0.25, safe_float(ex.get("ref_atr"), 2.0))
             ov = min(z_high, e_high) - max(z_low, e_low)
             min_w = max(0.15, min(z_high - z_low, e_high - e_low))
             if ov > (0.50 * min_w) or abs(z_mid - e_mid) <= (0.20 * z_atr):
                 is_dup = True
                 break
+            # Jika zona terpilih sudah Grade A/B dan kandidat baru hanya Grade C/D yang menempel tipis di tepinya
+            # (mis. pantulan front-run 0.12 USD di depan H1 Support), serap ke zona kuat agar tidak menggeser S1/R1
+            if _is_qualified_ab_zone(ex) and (not z_ab):
+                edge_gap = max(0.0, max(z_low, e_low) - min(z_high, e_high))
+                if edge_gap <= max(1.50, 0.35 * max(z_atr, e_atr)):
+                    is_dup = True
+                    break
         if not is_dup:
             selected.append(z)
     return selected
@@ -413,9 +430,18 @@ def rank_zones(zones, current_price=None, h1_atr=None):
     dedup_sup = _deduplicate_overlapping_ranked_zones(active_sup_candidates)
     dedup_res = _deduplicate_overlapping_ranked_zones(active_res_candidates)
 
-    # Untuk penyajian S1, S2 (terdekat ke bawah dari harga saat ini di antara zona relevan teratas)
-    top_supports = sorted(dedup_sup[:6], key=lambda x: (x["distance_points"], -x["ranking_priority"], str(x.get("zone_id") or "")))
-    top_resistances = sorted(dedup_res[:6], key=lambda x: (x["distance_points"], -x["ranking_priority"], str(x.get("zone_id") or "")))
+    # Untuk penyajian S1, S2: prioritaskan zona berkualitas Grade A/B (>= 70) terlebih dahulu berdasarkan jarak terdekat,
+    # sehingga zona Grade C baru di dekat harga tidak menggeser zona utama H1/H4 Grade A/B menjadi S2/R2.
+    def _rank_slot_key(x):
+        return (
+            0 if _is_qualified_ab_zone(x) else 1,
+            x["distance_points"],
+            -x["ranking_priority"],
+            str(x.get("zone_id") or ""),
+        )
+
+    top_supports = sorted(dedup_sup[:6], key=_rank_slot_key)
+    top_resistances = sorted(dedup_res[:6], key=_rank_slot_key)
 
     for idx_s, sz in enumerate(top_supports):
         sz["rank_label"] = f"S{idx_s + 1}"

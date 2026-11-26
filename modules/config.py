@@ -4,7 +4,13 @@ modules/config.py
 Konfigurasi parameter trading, timeframe, API key, threshold risiko, status sinyal, dan model AI.
 """
 import os
+import json
+import time
+import shutil
+import threading
 import MetaTrader5 as mt5
+
+SHARED_ZONE_STATE_LOCK = threading.RLock()
 
 # Direktori root project
 _DIR_SCRIPT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -154,6 +160,94 @@ FILE_JURNAL_ENTRY_XLSX = os.path.join(_DIR_SCRIPT, "jurnal_entry_xauusd.xlsx")
 FILE_ERROR_LOG = os.path.join(_DIR_SCRIPT, "error_xauusd.log")
 FILE_STATE_SINYAL = os.path.join(_DIR_SCRIPT, "state_sinyal_xauusd.json")
 FILE_STATE_ZONE_TRACKER = os.path.join(_DIR_SCRIPT, "state_zone_tracker.json")
+
+
+def read_shared_zone_state(filepath: str = None) -> dict:
+    """
+    Baca state_zone_tracker.json secara thread-safe dengan auto-recovery bila file terpotong/corrupt:
+    1. Coba parse file utama.
+    2. Bila gagal (JSONDecodeError/corrupt), pulihkan otomatis dari `.bak` terakhir yang valid.
+    3. Bila `.bak` juga tidak ada, pindahkan file rusak ke `.corrupt.bak` dan kembalikan `{}` tanpa crash.
+    """
+    path = str(filepath or FILE_STATE_ZONE_TRACKER)
+    if not path or not os.path.exists(path):
+        return {}
+    bak_path = path + ".bak"
+    with SHARED_ZONE_STATE_LOCK:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+        # Coba pulihkan dari backup valid terakhir (.bak)
+        if os.path.exists(bak_path):
+            try:
+                with open(bak_path, "r", encoding="utf-8") as bf:
+                    bak_data = json.load(bf)
+                if isinstance(bak_data, dict):
+                    try:
+                        shutil.copyfile(path, path + ".corrupt.bak")
+                    except Exception:
+                        pass
+                    try:
+                        shutil.copyfile(bak_path, path)
+                    except Exception:
+                        pass
+                    return bak_data
+            except Exception:
+                pass
+
+        # Fallback terakhir: amankan file rusak & mulai state bersih agar pantau/scanner tidak crash
+        try:
+            shutil.replace(path, path + ".corrupt.bak")
+        except Exception:
+            pass
+        return {}
+
+
+def update_shared_zone_state(updater_fn, filepath: str = None, tag: str = "state", clean_fn=None) -> dict:
+    """
+    Read-modify-write atomik & thread-safe pada state_zone_tracker.json:
+    - Mengunci SHARED_ZONE_STATE_LOCK agar main thread `pantau` dan background `AutoExecutionMonitor` tidak tabrakan.
+    - Memakai nama file `.tmp` unik per PID + Thread ID.
+    - Menyimpan salinan `.bak` valid sebelum `os.replace` dengan retry aman di Windows.
+    """
+    path = str(filepath or FILE_STATE_ZONE_TRACKER)
+    if not path:
+        return {}
+    tmp_path = f"{path}.{tag}.{os.getpid()}.{threading.get_ident()}.tmp"
+    bak_path = path + ".bak"
+    with SHARED_ZONE_STATE_LOCK:
+        data = read_shared_zone_state(path)
+        if not isinstance(data, dict):
+            data = {}
+        updater_fn(data)
+        out_obj = clean_fn(data) if callable(clean_fn) else data
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(out_obj, f, indent=2, ensure_ascii=True, default=str)
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.03)
+            try:
+                shutil.copyfile(path, bak_path)
+            except Exception:
+                pass
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        return data
 DEFAULT_PENDING_EXPIRATION_HOURS = 8
 ZONE_APPROACH_DISTANCE_POINTS = 5.0
 PANTAU_INTERVALS_SECONDS = {
@@ -300,6 +394,95 @@ CONFIRMED_ENTRY_ENABLED = _env_cfg("CONFIRMED_ENTRY_ENABLED", True, bool)
 EARLY_PENDING_MAX_LOT = _env_cfg("EARLY_PENDING_MAX_LOT", 0.01, float)
 LTF_MAX_LOT = _env_cfg("LTF_MAX_LOT", 0.02, float)
 HTF_STRONG_MAX_LOT = _env_cfg("HTF_STRONG_MAX_LOT", 0.05, float)
+PENDING_LIMIT_ZONE_DEPTH = _env_cfg("PENDING_LIMIT_ZONE_DEPTH", 0.50, float)  # Fallback default 50%
+LIMIT_DEPTH_HIGH_RISK = _env_cfg("LIMIT_DEPTH_HIGH_RISK", 0.50, float)        # Zona HIGH_RISK atau Grade < B (C/D) -> 50% tengah zona
+LIMIT_DEPTH_GRADE_B = _env_cfg("LIMIT_DEPTH_GRADE_B", 0.25, float)            # Zona Grade B (non-HIGH_RISK) -> 25% masuk zona
+LIMIT_DEPTH_GRADE_A = _env_cfg("LIMIT_DEPTH_GRADE_A", 0.25, float)            # Zona Grade A/A+ (non-HIGH_RISK) -> 25% masuk zona
+
+
+def resolve_zone_limit_depth(
+    zone=None,
+    grade: str = None,
+    score: float = None,
+    risk_tier: str = None,
+    cfg: dict = None,
+) -> float:
+    """
+    Tentukan kedalaman harga entry LIMIT di dalam zona secara adaptif berdasarkan kualitas & risiko zona:
+    - Zona HIGH_RISK atau Grade rendah (< B, mis. C/D atau score < 70) -> 50% (tengah zona, LIMIT_DEPTH_HIGH_RISK).
+    - Zona Grade B (bukan HIGH_RISK) -> 25% masuk ke dalam zona (LIMIT_DEPTH_GRADE_B).
+    - Zona Grade A / A+ (bukan HIGH_RISK) -> 25% masuk ke dalam zona (LIMIT_DEPTH_GRADE_A).
+    Tidak pernah 0% (awal zona banget).
+    """
+    def _g(obj, key, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    c = cfg if isinstance(cfg, dict) else {}
+    d_high = float(c.get("LIMIT_DEPTH_HIGH_RISK", _env_cfg("LIMIT_DEPTH_HIGH_RISK", 0.50, float)))
+    d_b = float(c.get("LIMIT_DEPTH_GRADE_B", _env_cfg("LIMIT_DEPTH_GRADE_B", 0.25, float)))
+    d_a = float(c.get("LIMIT_DEPTH_GRADE_A", _env_cfg("LIMIT_DEPTH_GRADE_A", 0.25, float)))
+    d_def = float(c.get("PENDING_LIMIT_ZONE_DEPTH", _env_cfg("PENDING_LIMIT_ZONE_DEPTH", 0.50, float)))
+
+    rt = str(risk_tier if risk_tier is not None else (_g(zone, "risk_tier", "") or "")).strip().upper().replace(" ", "_")
+    grd = str(grade if grade is not None else (_g(zone, "grade", "") or "")).strip().upper()
+    sc_raw = score if score is not None else _g(zone, "score", None)
+    try:
+        sc_val = float(sc_raw) if sc_raw is not None and sc_raw != "" else None
+    except (TypeError, ValueError):
+        sc_val = None
+
+    if "HIGH_RISK" in rt or rt == "HIGH":
+        chosen = d_high
+    elif (grd and not grd.startswith(("A", "B")) and grd not in ("N/A", "NONE", "UNKNOWN")) or (not grd and sc_val is not None and sc_val < 70.0):
+        chosen = d_high
+    elif grd.startswith("B") or (not grd and sc_val is not None and 70.0 <= sc_val < 75.0):
+        chosen = d_b
+    elif grd.startswith("A") or (not grd and sc_val is not None and sc_val >= 75.0):
+        chosen = d_a
+    else:
+        chosen = d_def
+
+    return min(0.70, max(0.15, chosen))
+
+
+def compute_zone_limit_entry_price(
+    lo: float,
+    hi: float,
+    demand: bool,
+    depth: float = None,
+    digits: int = 2,
+    zone=None,
+    grade: str = None,
+    score: float = None,
+    risk_tier: str = None,
+    cfg: dict = None,
+) -> float:
+    """
+    Hitung harga entry untuk order LIMIT (BUY LIMIT / SELL LIMIT) di dalam zona,
+    BUKAN di tepi awal zona (proximal edge 0%).
+    - Jika zone/grade/score/risk_tier diberikan (dan depth=None): otomatis 50% untuk HIGH_RISK / Grade < B,
+      dan 25% untuk Grade B / A.
+    - Di-clamp aman sehingga tidak pernah jatuh di awal zona (0%) dan tidak terlalu mepet SL.
+    """
+    lo_f = float(lo or 0.0)
+    hi_f = float(hi or 0.0)
+    if lo_f <= 0.0 or hi_f <= lo_f:
+        return round(hi_f if demand else lo_f, digits)
+    if depth is not None:
+        raw_d = float(depth)
+        eff_d = min(0.70, raw_d if raw_d >= 0.15 else 0.25)
+    elif zone is not None or grade is not None or score is not None or risk_tier is not None:
+        eff_d = resolve_zone_limit_depth(zone=zone, grade=grade, score=score, risk_tier=risk_tier, cfg=cfg)
+    else:
+        raw_d = float((cfg or {}).get("PENDING_LIMIT_ZONE_DEPTH", _env_cfg("PENDING_LIMIT_ZONE_DEPTH", 0.50, float)))
+        eff_d = min(0.70, raw_d if raw_d >= 0.15 else 0.25)
+    width = hi_f - lo_f
+    px = (hi_f - eff_d * width) if demand else (lo_f + eff_d * width)
+    return round(px, digits)
 
 MIN_RR = _env_cfg("MIN_RR", 1.0, float)
 TP1_RR = _env_cfg("TP1_RR", 1.0, float)
@@ -444,6 +627,10 @@ def _build_auto_trading_config() -> dict:
         "ADAPTIVE_ENTRY_ENABLED": _env_cfg("ADAPTIVE_ENTRY_ENABLED", True, bool),
         "CONFIRMED_ENTRY_ENABLED": _env_cfg("CONFIRMED_ENTRY_ENABLED", True, bool),
         "EARLY_PENDING_MAX_LOT": _env_cfg("EARLY_PENDING_MAX_LOT", 0.01, float),
+        "PENDING_LIMIT_ZONE_DEPTH": _env_cfg("PENDING_LIMIT_ZONE_DEPTH", 0.50, float),
+        "LIMIT_DEPTH_HIGH_RISK": _env_cfg("LIMIT_DEPTH_HIGH_RISK", 0.50, float),
+        "LIMIT_DEPTH_GRADE_B": _env_cfg("LIMIT_DEPTH_GRADE_B", 0.25, float),
+        "LIMIT_DEPTH_GRADE_A": _env_cfg("LIMIT_DEPTH_GRADE_A", 0.25, float),
         "LTF_MAX_LOT": _env_cfg("LTF_MAX_LOT", 0.02, float),
         "HTF_STRONG_MAX_LOT": _env_cfg("HTF_STRONG_MAX_LOT", 0.05, float),
         "MIN_RR": _env_cfg("MIN_RR", 1.0, float),

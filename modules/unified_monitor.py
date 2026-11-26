@@ -115,39 +115,39 @@ class PantauFocusTracker:
         if not os.path.exists(FILE_STATE_ZONE_TRACKER):
             return
         try:
-            with open(FILE_STATE_ZONE_TRACKER, "r", encoding="utf-8") as state_file:
-                data = json.load(state_file)
+            from modules.config import read_shared_zone_state
+            data = read_shared_zone_state(FILE_STATE_ZONE_TRACKER)
             if not isinstance(data, dict):
-                raise ValueError("Shared zone state harus berupa object.")
+                return
             namespaces = data.get("pantau_focus_state", {})
             if not isinstance(namespaces, dict):
-                raise ValueError("State fokus pantau harus berupa object.")
-            saved = namespaces.get(self.symbol)
-            if saved is None:
                 return
-            if not isinstance(saved, dict) or not isinstance(saved.get("focus"), dict) or not isinstance(saved.get("completed"), dict):
-                raise ValueError("State fokus pantau tidak valid.")
+            saved = namespaces.get(self.symbol)
+            if not isinstance(saved, dict):
+                return
+            raw_focus = saved.get("focus") if isinstance(saved.get("focus"), dict) else {}
+            raw_comp = saved.get("completed") if isinstance(saved.get("completed"), dict) else {}
             for method in self.focus:
-                record = saved["focus"].get(method)
-                completed = saved["completed"].get(method)
+                record = raw_focus.get(method)
+                completed = raw_comp.get(method)
                 if record is not None:
                     if not isinstance(record, dict) or not isinstance(record.get("zone"), dict) or not all(
                         key in record for key in ("zone_id", "low", "high", "direction", "issued_at", "plan", "touched", "ticket", "ever_taken", "account_status", "uncertain")
                     ):
-                        raise ValueError(f"State fokus {method} tidak lengkap.")
-                    if not record.get("ever_taken") and not self._valid_plan(record.get("plan")):
-                        record["touched"] = False
-                    record["uncertain"] = bool(record.get("ever_taken") or record.get("touched"))
-                    record["account_status"] = str(record.get("account_status") or "")
-                    record.setdefault("pending_ticket", None)
+                        record = None
+                    else:
+                        if not record.get("ever_taken") and not self._valid_plan(record.get("plan")):
+                            record["touched"] = False
+                        record["uncertain"] = bool(record.get("ever_taken") or record.get("touched"))
+                        record["account_status"] = str(record.get("account_status") or "")
+                        record.setdefault("pending_ticket", None)
                 if completed is not None and (not isinstance(completed, dict) or "zone_id" not in completed or "left" not in completed):
-                    raise ValueError(f"State zona selesai {method} tidak valid.")
+                    completed = None
                 self.focus[method] = record
                 self.completed[method] = completed
-        except (OSError, ValueError, TypeError) as exc:
+        except Exception as exc:
             from modules.utils import _catat_error
             _catat_error("pantau_focus_load", exc)
-            raise RuntimeError("State fokus pantau tidak dapat dibaca; pemantauan dihentikan.") from exc
 
     def _save(self):
         focus = {}
@@ -176,30 +176,24 @@ class PantauFocusTracker:
             )
             focus[method] = saved
         state = {"focus": focus, "completed": self.completed}
-        temporary_path = FILE_STATE_ZONE_TRACKER + f".pantau.{os.getpid()}.tmp"
         try:
             serialized = json.dumps(state, sort_keys=True, ensure_ascii=True)
             if serialized == self._saved_state:
                 return
-            if os.path.exists(FILE_STATE_ZONE_TRACKER):
-                with open(FILE_STATE_ZONE_TRACKER, "r", encoding="utf-8") as state_file:
-                    data = json.load(state_file)
-                if not isinstance(data, dict):
-                    raise ValueError("Shared zone state harus berupa object.")
-            else:
-                data = {}
-            namespaces = data.setdefault("pantau_focus_state", {})
-            if not isinstance(namespaces, dict):
-                raise ValueError("State fokus pantau harus berupa object.")
-            namespaces[self.symbol] = state
-            with open(temporary_path, "w", encoding="utf-8") as state_file:
-                json.dump(data, state_file, indent=2, ensure_ascii=True)
-            os.replace(temporary_path, FILE_STATE_ZONE_TRACKER)
+            from modules.config import update_shared_zone_state
+
+            def _upd(data):
+                ns = data.get("pantau_focus_state")
+                if not isinstance(ns, dict):
+                    ns = {}
+                    data["pantau_focus_state"] = ns
+                ns[self.symbol] = state
+
+            update_shared_zone_state(_upd, filepath=FILE_STATE_ZONE_TRACKER, tag="pantau")
             self._saved_state = serialized
-        except (OSError, TypeError, ValueError) as exc:
+        except Exception as exc:
             from modules.utils import _catat_error
             _catat_error("pantau_focus_save", exc)
-            raise RuntimeError("State fokus pantau tidak dapat disimpan; pemantauan dihentikan.") from exc
 
     @staticmethod
     def _candidate(method, result):

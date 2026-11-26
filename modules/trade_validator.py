@@ -381,7 +381,7 @@ def _snr_zone_to_candidate_dict(snr_z: Dict[str, Any], symbol: str = SYMBOL) -> 
         return None
 
     score = float(snr_z.get("score") or 0.0)
-    grade = str(snr_z.get("grade") or ("A+" if score >= 85 else ("A" if score >= 75 else "B")))
+    grade = str(snr_z.get("grade") or ("A+" if score >= 85 else ("A" if score >= 75 else ("B" if score >= 70 else "C"))))
     tf = str(snr_z.get("timeframe") or "H1").upper()
     inval = float(snr_z.get("invalidation_price") or (lo if z_type == "DEMAND" else hi))
     touch_cnt = int(snr_z.get("touch_count") or 0)
@@ -410,6 +410,7 @@ def _snr_zone_to_candidate_dict(snr_z: Dict[str, Any], symbol: str = SYMBOL) -> 
         "bos_timeframe": tf,
         "status": "ACTIVE",
         "source": "SNR",
+        "risk_tier": str(snr_z.get("risk_tier") or ""),
         "zone_relevance": str(snr_z.get("zone_relevance") or "ACTIVE"),
         "distance": float(snr_z.get("distance_points") or snr_z.get("distance") or 0.0),
     }
@@ -613,8 +614,21 @@ def validate_trade_candidate(
     touch = path_eval["touch"]
     triggers = path_eval["triggers"]
 
+    from modules.config import compute_zone_limit_entry_price
     planned_entry = float(
-        touch["exec_price"] if is_market_order else (levels.get("entry_price") or (zone.price_high if direction == "BUY" else zone.price_low))
+        touch["exec_price"]
+        if is_market_order
+        else (
+            levels.get("entry_price")
+            or compute_zone_limit_entry_price(
+                zone.price_low,
+                zone.price_high,
+                demand=(direction == "BUY"),
+                zone=zone,
+                cfg=conf,
+                digits=2,
+            )
+        )
     )
     sl_px = float(levels.get("sl") or 0.0)
     tp1_px = float(levels.get("tp1") or 0.0)

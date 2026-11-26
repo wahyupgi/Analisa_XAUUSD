@@ -77,6 +77,8 @@ def format_command_menu_help():
         "AUTO TRADING:",
         "- auto status      : Status lengkap Adaptive Auto Trading & evaluasi zona",
         "- auto real        : Otorisasi & aktifkan FULL_AUTO pada akun REAL (konfirmasi eksplisit)",
+        "- auto loose on    : Mengaktifkan mode auto trading dengan toleransi kesalahan",
+        "- auto loose off   : Menonaktifkan mode auto trading dengan toleransi kesalahan",     
         "- auto demo        : Aktifkan FULL_AUTO pada akun DEMO",
         "- auto dryrun      : Simulasi eksekusi dengan harga live tanpa kirim order MT5",
         "- auto semi        : Mode SEMI_AUTO (persetujuan 'auto approve' / 'auto reject')",

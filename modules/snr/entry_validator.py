@@ -190,11 +190,18 @@ def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price,
     is_bearish = (h4_bias == "BEARISH") or (not h4_bias and bias_str == "BEARISH")
     is_bullish = (h4_bias == "BULLISH") or (not h4_bias and bias_str == "BULLISH")
 
+    def _is_ab(z_item):
+        if not isinstance(z_item, dict):
+            return False
+        g_u = str(z_item.get("grade") or "").strip().upper()
+        return bool(g_u.startswith(("A", "B")) or safe_float(z_item.get("score"), 0.0) >= 70.0)
+
     if is_bearish:
         trend_entry_zone = r1
         trend_entry_label = f"RESISTANCE {r1.get('rank_label', 'R1')}" if r1 else "NONE"
+        counter_s1_ok = s1_inside and (not r1_inside) and (_is_ab(s1) or not _is_ab(trend_entry_zone))
 
-        if (s1_inside and not r1_inside) or (trend_entry_zone is None and s1 is not None):
+        if counter_s1_ok or (trend_entry_zone is None and s1 is not None):
             focus_zone = s1
             focus_label = f"SUPPORT {s1.get('rank_label', 'S1')}" if s1 else nearest_label
             entry_trigger_zone = trend_entry_zone or s1
@@ -208,8 +215,9 @@ def _select_target_zone_for_monitoring(ranked_zones, market_bias, current_price,
     elif is_bullish:
         trend_entry_zone = s1
         trend_entry_label = f"SUPPORT {s1.get('rank_label', 'S1')}" if s1 else "NONE"
+        counter_r1_ok = r1_inside and (not s1_inside) and (_is_ab(r1) or not _is_ab(trend_entry_zone))
 
-        if (r1_inside and not s1_inside) or (trend_entry_zone is None and r1 is not None):
+        if counter_r1_ok or (trend_entry_zone is None and r1 is not None):
             focus_zone = r1
             focus_label = f"RESISTANCE {r1.get('rank_label', 'R1')}" if r1 else nearest_label
             entry_trigger_zone = trend_entry_zone or r1

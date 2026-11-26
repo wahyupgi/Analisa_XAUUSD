@@ -679,6 +679,8 @@ def handle_auto_cli_command(
     - auto on
     - auto off
     - auto real
+    - auto loose off
+    - auto loose on
     - auto demo
     - auto dryrun
     - auto semi (serta auto approve / auto reject)

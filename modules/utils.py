@@ -1210,8 +1210,8 @@ def _load_trade_plan_state_once() -> None:
     if not path or not os.path.exists(path):
         return
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+        from modules.config import read_shared_zone_state
+        raw = read_shared_zone_state(path)
         tp_st = raw.get("trade_plan_state") if isinstance(raw, dict) else None
         if not isinstance(tp_st, dict):
             return
@@ -1282,20 +1282,12 @@ def _save_trade_plan_state() -> None:
         }
         if _INVALID_ZONES_BASELINE_READY:
             payload["dismissed_invalid_zones"] = list(_DISMISSED_INVALID_ZONES[-500:])
-        data: Dict[str, Any] = {}
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    cur = json.load(f)
-                if isinstance(cur, dict):
-                    data = cur
-            except Exception:
-                data = {}
-        data["trade_plan_state"] = payload
-        tmp = f"{path}.plan.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=True, default=str)
-        os.replace(tmp, path)
+        from modules.config import update_shared_zone_state
+        update_shared_zone_state(
+            lambda d: d.__setitem__("trade_plan_state", payload),
+            filepath=path,
+            tag="plan",
+        )
     except Exception:
         pass
 
@@ -2173,6 +2165,7 @@ def build_shared_trade_plan(
     struct_inv: float,
     live_price: float,
     why: str = "",
+    risk_tier: str = "",
     bid: Optional[float] = None,
     ask: Optional[float] = None,
     spread: float = 0.0,
@@ -2311,8 +2304,11 @@ def build_shared_trade_plan(
         if not is_closed and max_spread > 0.0 and spread > max_spread:
             return _rej(f"SPREAD_HIGH ({spread:.2f}>{max_spread:g})", s_inv_v=s_inv)
 
-    # PLANNED_ENTRY deterministik dari proximal edge zona (bukan midpoint, bukan live tick)
-    det_planned_entry = round(hi, digits) if demand else round(lo, digits)
+    # PLANNED_ENTRY deterministik adaptif di dalam zona (50% untuk HIGH_RISK / Grade < B, 25% untuk Grade B/A; bukan di awal zona)
+    from modules.config import compute_zone_limit_entry_price
+    det_planned_entry = compute_zone_limit_entry_price(
+        lo, hi, demand=demand, digits=digits, grade=grade, score=score, risk_tier=risk_tier
+    )
     if isinstance(early_pending_plan, dict):
         ep_e = float(early_pending_plan.get("entry") or early_pending_plan.get("entry_price") or 0.0)
         if ep_e > 0 and lo - 1e-6 <= ep_e <= hi + 1e-6:

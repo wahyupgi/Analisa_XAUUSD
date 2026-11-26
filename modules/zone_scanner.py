@@ -7349,12 +7349,13 @@ def plan_pending_order(
             res["rejection_reason"] = f"Spread {format_price_distance(curr_spread, include_mt5_points=True)} melebihi batas {SPREAD_MAKS_POIN:g} USD"
             return res
 
-    # 5. Perhitungan Entry Price (Batas Proximal Edge Zona Aktual)
-    # BUY LIMIT: Batas atas zona Demand (price_high), wajib < Ask (atau current_price)
-    # SELL LIMIT: Batas bawah zona Supply (price_low), wajib > Bid (atau current_price)
+    # 5. Perhitungan Entry Price (Adaptif: 50% untuk HIGH_RISK / Grade < B, 25% untuk Grade B/A — bukan awal zona 0%)
+    from modules.config import compute_zone_limit_entry_price, resolve_zone_limit_depth
+    _depth_ratio_z = resolve_zone_limit_depth(zone=zone)
+    _depth_pct_lbl = int(round(_depth_ratio_z * 100))
     if demand:
-        entry = round(res["zone_high"], 2)
-        entry_reason = f"Batas atas (proximal edge) zona Demand {getattr(zone, 'timeframe', 'UNKNOWN')} untuk mitigasi awal"
+        entry = compute_zone_limit_entry_price(res["zone_low"], res["zone_high"], demand=True, depth=_depth_ratio_z, digits=2)
+        entry_reason = f"Kedalaman {_depth_pct_lbl}% zona Demand {getattr(zone, 'timeframe', 'UNKNOWN')} (Grade {getattr(zone, 'grade', '-')}, bukan awal zona)"
         ref_mkt = float(ask) if (ask is not None and math.isfinite(ask) and ask > 0) else float(current_price)
         if entry >= ref_mkt:
             res["status"] = "WAIT"
@@ -7365,8 +7366,8 @@ def plan_pending_order(
             )
             return res
     else:
-        entry = round(res["zone_low"], 2)
-        entry_reason = f"Batas bawah (proximal edge) zona Supply {getattr(zone, 'timeframe', 'UNKNOWN')} untuk mitigasi awal"
+        entry = compute_zone_limit_entry_price(res["zone_low"], res["zone_high"], demand=False, depth=_depth_ratio_z, digits=2)
+        entry_reason = f"Kedalaman {_depth_pct_lbl}% zona Supply {getattr(zone, 'timeframe', 'UNKNOWN')} (Grade {getattr(zone, 'grade', '-')}, bukan awal zona)"
         ref_mkt = float(bid) if (bid is not None and math.isfinite(bid) and bid > 0) else float(current_price)
         if entry <= ref_mkt:
             res["status"] = "WAIT"
@@ -8201,29 +8202,21 @@ class ZoneTracker:
         if not self.filepath:
             return
         try:
-            data = dict(self.extra_state)
-            if os.path.exists(self.filepath):
-                with open(self.filepath, "r", encoding="utf-8") as f:
-                    current = json.load(f)
-                if not isinstance(current, dict):
-                    raise ValueError("Shared zone state harus berupa object JSON.")
-                data.update({
-                    key: value for key, value in current.items()
+            from modules.config import update_shared_zone_state
+
+            def _upd(data):
+                for k, v in self.extra_state.items():
+                    if k not in data and k not in ("tracked_zones", "alerts", self.INVALID_STATE_KEY):
+                        data[k] = v
+                data["tracked_zones"] = self.tracked_zones
+                data[self.INVALID_STATE_KEY] = self.invalidated_zones
+                data["alerts"] = self.alerts[-50:]
+                self.extra_state = {
+                    key: value for key, value in data.items()
                     if key not in ("tracked_zones", "alerts", self.INVALID_STATE_KEY)
-                })
-            data.update({
-                "tracked_zones": self.tracked_zones,
-                self.INVALID_STATE_KEY: self.invalidated_zones,
-                "alerts": self.alerts[-50:],
-            })
-            self.extra_state = {
-                key: value for key, value in data.items()
-                if key not in ("tracked_zones", "alerts", self.INVALID_STATE_KEY)
-            }
-            tmp = self.filepath + ".zone.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(_clean(data), f, indent=2)
-            os.replace(tmp, self.filepath)
+                }
+
+            update_shared_zone_state(_upd, filepath=self.filepath, tag="zone", clean_fn=_clean)
         except Exception as e:
             _catat_error("zone_tracker_save", e)
 
@@ -8231,8 +8224,8 @@ class ZoneTracker:
         if not self.filepath or not os.path.exists(self.filepath):
             return
         try:
-            with open(self.filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            from modules.config import read_shared_zone_state
+            data = read_shared_zone_state(self.filepath)
             self.tracked_zones = data.get("tracked_zones", {})
             raw_inv = data.get(self.INVALID_STATE_KEY, {})
             self.invalidated_zones = raw_inv if isinstance(raw_inv, dict) else {}
@@ -9051,6 +9044,7 @@ def generate_smc_trade_plan(
         direction=direction,
         grade=grd,
         score=sc,
+        risk_tier=str(zd.get("risk_tier") or ""),
         lo=lo,
         hi=hi,
         struct_inv=struct_inv,

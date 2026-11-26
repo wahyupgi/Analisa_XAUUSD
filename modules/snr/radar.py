@@ -39,8 +39,8 @@ def _load_persisted_snr_emitted_events():
     if not os.path.exists(FILE_STATE_SNR_LIFECYCLE):
         return []
     try:
-        with open(FILE_STATE_SNR_LIFECYCLE, "r", encoding="utf-8") as state_file:
-            data = json.load(state_file)
+        from modules.config import read_shared_zone_state
+        data = read_shared_zone_state(FILE_STATE_SNR_LIFECYCLE)
         if not isinstance(data, dict):
             return []
         raw = data.get(SNR_EMITTED_EVENTS_KEY)
@@ -52,25 +52,16 @@ def _load_persisted_snr_emitted_events():
 
 
 def _save_persisted_snr_emitted_events(keys):
-    temporary_path = FILE_STATE_SNR_LIFECYCLE + f".snr_ev.{os.getpid()}.tmp"
     try:
-        if os.path.exists(FILE_STATE_SNR_LIFECYCLE):
-            with open(FILE_STATE_SNR_LIFECYCLE, "r", encoding="utf-8") as state_file:
-                data = json.load(state_file)
-            if not isinstance(data, dict):
-                return
-        else:
-            data = {}
-        data[SNR_EMITTED_EVENTS_KEY] = list(keys)[-_MAX_EMITTED_SNR_EVENTS:]
-        with open(temporary_path, "w", encoding="utf-8") as state_file:
-            json.dump(data, state_file, indent=2, ensure_ascii=True)
-        os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
+        from modules.config import update_shared_zone_state
+        val = list(keys)[-_MAX_EMITTED_SNR_EVENTS:]
+        update_shared_zone_state(
+            lambda d: d.__setitem__(SNR_EMITTED_EVENTS_KEY, val),
+            filepath=FILE_STATE_SNR_LIFECYCLE,
+            tag="snr_ev",
+        )
     except Exception:
-        try:
-            if os.path.exists(temporary_path):
-                os.remove(temporary_path)
-        except Exception:
-            pass
+        pass
 
 
 def _evaluate_zone_proximity_state(zone, current_price, radar_cfg):

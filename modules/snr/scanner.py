@@ -64,45 +64,29 @@ def _load_snr_lifecycle_state():
     if not os.path.exists(FILE_STATE_SNR_LIFECYCLE):
         return {}
     try:
-        with open(FILE_STATE_SNR_LIFECYCLE, "r", encoding="utf-8") as state_file:
-            data = json.load(state_file)
+        from modules.config import read_shared_zone_state
+        data = read_shared_zone_state(FILE_STATE_SNR_LIFECYCLE)
         if not isinstance(data, dict):
-            raise ValueError("Shared zone state harus berupa object JSON.")
+            return {}
         zones = data.get(SNR_LIFECYCLE_STATE_KEY, {})
         if not isinstance(zones, dict):
-            raise ValueError("Field lifecycle SNR pada shared state harus berupa object.")
-        if any(not isinstance(value, dict) for value in zones.values()):
-            raise ValueError("Setiap record lifecycle SNR harus berupa object.")
-        return zones
-    except (OSError, ValueError, TypeError) as exc:
+            return {}
+        return {k: v for k, v in zones.items() if isinstance(v, dict)}
+    except Exception as exc:
         log_snr_error("snr_lifecycle_load", exc)
-        raise RuntimeError("Lifecycle SNR state tidak dapat dibaca; scan dihentikan demi fail-safe.") from exc
+        return {}
 
 
 def _save_snr_lifecycle_state(zones):
-    temporary_path = FILE_STATE_SNR_LIFECYCLE + f".snr.{os.getpid()}.tmp"
     try:
-        if os.path.exists(FILE_STATE_SNR_LIFECYCLE):
-            with open(FILE_STATE_SNR_LIFECYCLE, "r", encoding="utf-8") as state_file:
-                data = json.load(state_file)
-            if not isinstance(data, dict):
-                raise ValueError("Shared zone state harus berupa object JSON.")
-        else:
-            data = {}
-        data[SNR_LIFECYCLE_STATE_KEY] = zones
-        with open(temporary_path, "w", encoding="utf-8") as state_file:
-            json.dump(data, state_file, indent=2, ensure_ascii=True)
-        for attempt in range(4):
-            try:
-                os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
-                break
-            except PermissionError:
-                if attempt == 3:
-                    raise
-                time.sleep(0.05)
-    except (OSError, TypeError, ValueError) as exc:
+        from modules.config import update_shared_zone_state
+
+        def _upd(data):
+            data[SNR_LIFECYCLE_STATE_KEY] = zones
+
+        update_shared_zone_state(_upd, filepath=FILE_STATE_SNR_LIFECYCLE, tag="snr")
+    except Exception as exc:
         log_snr_error("snr_lifecycle_save", exc)
-        raise RuntimeError("Lifecycle SNR state tidak dapat disimpan; scan dihentikan demi fail-safe.") from exc
 
 
 SNR_FOCUS_STATE_KEY = "snr_focus_state"
@@ -118,10 +102,8 @@ def _track_snr_focus(focus_zone, ranked_zones, selection_reason=None):
     if not isinstance(focus_zone, dict) or not focus_zone.get("zone_id"):
         return None
     try:
-        data = {}
-        if os.path.exists(FILE_STATE_SNR_LIFECYCLE):
-            with open(FILE_STATE_SNR_LIFECYCLE, "r", encoding="utf-8") as state_file:
-                data = json.load(state_file)
+        from modules.config import read_shared_zone_state, update_shared_zone_state
+        data = read_shared_zone_state(FILE_STATE_SNR_LIFECYCLE)
         if not isinstance(data, dict):
             return None
         saved = data.get(SNR_FOCUS_STATE_KEY) if isinstance(data.get(SNR_FOCUS_STATE_KEY), dict) else {}
@@ -153,24 +135,14 @@ def _track_snr_focus(focus_zone, ranked_zones, selection_reason=None):
                 ), None)
                 reason = "PREVIOUS ZONE REBUILT" if rebuilt is not None else "PREVIOUS ZONE NOT DETECTED"
             change = {"previous": saved.get("label", "N/A"), "reason": reason, "to": _zone_brief(focus_zone)}
-        data[SNR_FOCUS_STATE_KEY] = {
+        new_focus_rec = {
             "zone_id": current_id, "label": _zone_brief(focus_zone), "timeframe": focus_zone.get("timeframe"),
             "zone_type": focus_zone.get("zone_type"), "low": focus_zone.get("low"), "high": focus_zone.get("high"),
             "change": change,
         }
-        temporary_path = FILE_STATE_SNR_LIFECYCLE + f".snr_foc.{os.getpid()}.tmp"
-        with open(temporary_path, "w", encoding="utf-8") as state_file:
-            json.dump(data, state_file, indent=2, ensure_ascii=True)
-        for attempt in range(4):
-            try:
-                os.replace(temporary_path, FILE_STATE_SNR_LIFECYCLE)
-                break
-            except PermissionError:
-                if attempt == 3:
-                    raise
-                time.sleep(0.05)
+        update_shared_zone_state(lambda d: d.__setitem__(SNR_FOCUS_STATE_KEY, new_focus_rec), filepath=FILE_STATE_SNR_LIFECYCLE, tag="snr_foc")
         return change
-    except (OSError, TypeError, ValueError) as exc:
+    except Exception as exc:
         log_snr_error("snr_focus_state", exc)
         return None
 
@@ -525,6 +497,7 @@ def generate_snr_trade_plan(
         direction=direction,
         grade=grd,
         score=sc,
+        risk_tier=str(z.get("risk_tier") or ""),
         lo=lo,
         hi=hi,
         struct_inv=struct_inv,

@@ -1630,7 +1630,9 @@ def run_snr_scan(
             if saved_life_ev in ("BREAKOUT_INVALIDATED", "BREAKDOWN_INVALIDATED") or validated.get("lifecycle_status") == "RECLAIMED":
                 saved_life_ev = "BREAKDOWN_INVALIDATED" if z_type_cur == "SUPPORT" else "BREAKOUT_INVALIDATED"
                 validated["lifecycle_event"] = saved_life_ev
-            lifecycle_state[lifecycle_key] = {
+            prev_init_sc = safe_float((lifecycle_state.get(lifecycle_key) or {}).get("initial_score"), 0.0)
+            cur_life_st = str(validated.get("lifecycle_status", "ACTIVE")).upper()
+            new_life_rec = {
                 "lifecycle_status": validated.get("lifecycle_status", "ACTIVE"),
                 "touch_count": int(validated.get("touch_count", 0) or 0),
                 "last_side": current_side,
@@ -1641,13 +1643,15 @@ def run_snr_scan(
                 "reclaim_status": validated.get("reclaim_status", "WAIT"),
                 "invalid_label": validated.get("invalid_label", ""),
             }
+            if prev_init_sc >= 70.0 and cur_life_st not in ("BROKEN", "INVALIDATED") and not is_confirmed_broken_zone:
+                new_life_rec["initial_score"] = prev_init_sc
+            lifecycle_state[lifecycle_key] = new_life_rec
             val_tf_list.append(validated)
 
         validated_zones_by_tf[tf] = val_tf_list
 
     if len(lifecycle_state) > 2000:
         lifecycle_state = dict(list(lifecycle_state.items())[-2000:])
-    _save_snr_lifecycle_state(lifecycle_state)
 
     # Multi-Timeframe Confluence pada timeframe struktural (H4, H1, M30)
     confluence_res = evaluate_mtf_confluence(validated_zones_by_tf, config=cfg)
@@ -1674,13 +1678,19 @@ def run_snr_scan(
                 momentum_info=mom_tf,
                 config=cfg,
             )
-            # Simpan locked initial_score ke state lifecycle jika zona berkualitas >= 70
-            if float(sz.get("score") or 0.0) >= 70.0 and lifecycle_k in lifecycle_state:
-                lifecycle_state[lifecycle_k]["initial_score"] = float(sz["score"])
+            # Simpan locked initial_score ke state lifecycle jika zona aktif berkualitas >= 70
+            sz_life_st = str(sz.get("lifecycle_status") or "ACTIVE").upper()
+            if float(sz.get("score") or 0.0) >= 70.0 and sz_life_st not in ("BROKEN", "INVALIDATED") and lifecycle_k in lifecycle_state:
+                lifecycle_state[lifecycle_k]["initial_score"] = max(
+                    safe_float(lifecycle_state[lifecycle_k].get("initial_score"), 0.0),
+                    float(sz["score"]),
+                )
             tf_scored.append(sz)
             if tf in SNR_STRUCTURAL_TIMEFRAMES:
                 structural_scored_zones.append(sz)
         scored_zones_by_tf[tf] = tf_scored
+
+    _save_snr_lifecycle_state(lifecycle_state)
 
     # Jika structural timeframes kosong (misal hanya diberikan M5 pada unit test spesifik),
     # gunakan zona M5 sebagai fallback ranking

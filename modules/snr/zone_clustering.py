@@ -192,6 +192,21 @@ def _build_zone_from_cluster(cluster_items, timeframe, zone_type, zone_cfg):
     else:
         consol_struct = "STANDARD_PIVOT"
 
+    _qual_rank = {"TIGHT": 4, "MODERATE": 3, "STANDARD": 2, "": 1, "WIDE_CHOPPY": 0}
+    best_snd_item = max(
+        cluster_items,
+        key=lambda x: (
+            1 if str(x.get("snd_pattern") or "").upper() in ("RBR", "DBR", "RBD", "DBD") else 0,
+            _qual_rank.get(str(x.get("snd_base_quality") or "").upper(), 1),
+            safe_float(x.get("snd_leg_out_ratio"), 0.0),
+        ),
+    )
+    clust_snd_pat = str(best_snd_item.get("snd_pattern") or "")
+    clust_snd_fam = str(best_snd_item.get("snd_pattern_family") or "")
+    clust_snd_qual = str(best_snd_item.get("snd_base_quality") or "")
+    clust_snd_bc = int(best_snd_item.get("snd_base_candles") or 0)
+    clust_snd_rat = round(safe_float(best_snd_item.get("snd_leg_out_ratio"), 0.0), 2)
+
     freshness_ratio = max(safe_float(x.get("freshness_ratio"), 0.5) for x in cluster_items)
     min_age_bars = min(int(x.get("age_bars", 0)) for x in cluster_items)
     breakout_history = cluster_items[0].get("breakout_history", "CLEAN_HOLD")
@@ -226,6 +241,11 @@ def _build_zone_from_cluster(cluster_items, timeframe, zone_type, zone_cfg):
         "historical_reaction_count": int(hist_reactions),
         "repeated_rejections": int(rep_rejections),
         "consolidation_structure": consol_struct,
+        "snd_pattern": clust_snd_pat,
+        "snd_pattern_family": clust_snd_fam,
+        "snd_base_quality": clust_snd_qual,
+        "snd_base_candles": clust_snd_bc,
+        "snd_leg_out_ratio": clust_snd_rat,
         "age_bars": int(min_age_bars),
         "freshness_ratio": round(freshness_ratio, 3),
         "breakout_history": breakout_history,

@@ -6,6 +6,7 @@ Reaksi Harga Historis, Kekuatan Pantulan, Struktur Konsolidasi, Freshness, dan A
 from modules.snr.config import get_snr_config
 from modules.snr.data_provider import prepare_snr_frame, safe_float
 from modules.snr.swing_detection import detect_swings
+from modules.utils import evaluate_snd_base_pattern
 
 
 def _compute_dynamic_support_bounds(pivot, tf_atr, zone_cfg):
@@ -53,6 +54,7 @@ def detect_support_candidates(
     cfg = config or get_snr_config()
     tf = str(timeframe).upper()
     zone_cfg = cfg.get("zone", {}).get(tf, cfg.get("zone", {}).get("H1", {}))
+    snd_cfg = cfg.get("snd_pattern", {})
 
     clean_df, _ = prepare_snr_frame(df, has_unclosed_last_bar=has_unclosed_last_bar)
     if clean_df.empty:
@@ -97,6 +99,15 @@ def detect_support_candidates(
             consolidation_structure = "IMPULSIVE_DEPARTURE"
         else:
             consolidation_structure = "STANDARD_PIVOT"
+
+        # Evaluasi pola SND (DBR / RBR) hanya hingga conf_idx (bebas look-ahead & stabil permanen)
+        snd_eval = evaluate_snd_base_pattern(
+            opens, highs, lows, closes, atrs,
+            anchor_idx=piv_idx,
+            zone_direction="SUPPORT",
+            max_eval_idx=min(n_bars - 1, conf_idx),
+            params=snd_cfg,
+        )
 
         # Evaluasi reaksi historis setelah pivot confirmed (conf_idx + 1 .. n_bars - 1)
         reaction_count = 0
@@ -170,6 +181,11 @@ def detect_support_candidates(
             "historical_reaction_count": int(reaction_count),
             "repeated_rejections": int(repeated_rejections),
             "consolidation_structure": consolidation_structure,
+            "snd_pattern": str(snd_eval.get("pattern") or "UNCLASSIFIED"),
+            "snd_pattern_family": str(snd_eval.get("pattern_family") or "NONE"),
+            "snd_base_quality": str(snd_eval.get("base_quality") or "STANDARD"),
+            "snd_base_candles": int(snd_eval.get("base_candles") or 1),
+            "snd_leg_out_ratio": float(snd_eval.get("leg_out_to_base_ratio") or 0.0),
             "age_bars": int(age_bars),
             "freshness_ratio": round(freshness_ratio, 3),
             "freshness_state": freshness_state,

@@ -204,13 +204,26 @@ def score_zone(
     sw_strength = safe_float(zone.get("swing_strength"), 5.0)
     sw_class = str(zone.get("swing_class", "MINOR")).upper()
     consol = str(zone.get("consolidation_structure", "STANDARD_PIVOT")).upper()
+    snd_cfg = cfg.get("snd_pattern", {})
+    snd_pat = str(zone.get("snd_pattern") or "").upper()
+    snd_qual = str(zone.get("snd_base_quality") or "").upper()
 
     base_struct = min(15.0, sw_strength * 1.55)
     class_bonus = 2.5 if sw_class == "MAJOR" else 0.8
     struct_bonus = 1.5 if consol in ("IMPULSIVE_DEPARTURE", "CONSOLIDATION_BASE") else 0.5
-    comp_swing = min(20.0, round((base_struct + class_bonus + struct_bonus) * (0.82 + 0.18 * tf_weight), 2))
+    snd_bonus = 0.0
+    if snd_cfg.get("enabled", True) and snd_pat:
+        if snd_qual == "WIDE_CHOPPY":
+            snd_bonus = -abs(safe_float(snd_cfg.get("choppy_base_penalty", 1.0), 1.0))
+        elif snd_pat in ("RBR", "DBR", "RBD", "DBD"):
+            if snd_qual == "TIGHT":
+                snd_bonus = safe_float(snd_cfg.get("tight_pattern_bonus", 1.2), 1.2)
+            elif snd_qual == "MODERATE":
+                snd_bonus = safe_float(snd_cfg.get("moderate_pattern_bonus", 0.6), 0.6)
+    comp_swing = min(20.0, max(0.0, round(((base_struct + class_bonus + struct_bonus) * (0.82 + 0.18 * tf_weight)) + snd_bonus, 2)))
+    snd_desc = f", SND={snd_pat}/{snd_qual or 'STD'}({snd_bonus:+.2f})" if (snd_pat in ("RBR", "DBR", "RBD", "DBD") or snd_bonus != 0.0) else ""
     reason_swing = (
-        f"Swing {sw_class} (strength={sw_strength:.2f}/10, struktur={consol}, TF={tf}) -> {comp_swing:.2f}/20."
+        f"Swing {sw_class} (strength={sw_strength:.2f}/10, struktur={consol}{snd_desc}, TF={tf}) -> {comp_swing:.2f}/20."
     )
 
     # 2. Historical Price Reaction (0 - 20)

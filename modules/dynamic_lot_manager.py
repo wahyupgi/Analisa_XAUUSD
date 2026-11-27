@@ -95,6 +95,8 @@ def validate_strong_zone(
     disp = float(_z_attr(zone, "displacement_strength", 0.0) or 0.0)
     origin_bos = _z_attr(zone, "origin_bos", None)
     has_bos_or_disp = (disp >= min_disp) or (isinstance(origin_bos, dict) and bool(origin_bos.get("tipe")) and disp >= 1.2)
+    snd_pat = str(_z_attr(zone, "snd_pattern", "") or "").upper()
+    snd_qual = str(_z_attr(zone, "snd_base_quality", "") or "").upper()
     mode_u = str(entry_mode or "").upper()
 
     if not has_htf_sd:
@@ -109,6 +111,8 @@ def validate_strong_zone(
         reasons.append("Structural invalidation zona tidak jelas")
     if not has_bos_or_disp:
         reasons.append(f"Displacement/BOS pembentuk zona kurang kuat (disp={disp:.2f} ATR)")
+    if bool(conf.get("STRONG_ZONE_BLOCK_CHOPPY_BASE", True)) and snd_qual == "WIDE_CHOPPY":
+        reasons.append(f"Struktur base SND kurang rapi ({snd_pat or 'OB'}: {snd_qual})")
     if not htf_aligned or has_htf_conflict:
         reasons.append("Struktur HTF belum searah atau terdapat konflik HTF")
     if actual_rr < min_rr - 1e-9:
@@ -123,6 +127,8 @@ def validate_strong_zone(
         "passed": passed,
         "has_htf_supply_demand": has_htf_sd,
         "has_h4_h1_confluence": has_h4_h1_conf,
+        "snd_pattern": snd_pat or "NONE",
+        "snd_base_quality": snd_qual or "STANDARD",
         "reasons": reasons,
         "reason_summary": "STRONG_ZONE_VALIDATED" if passed else "; ".join(reasons),
     }

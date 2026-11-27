@@ -2738,10 +2738,42 @@ def _build_monitor_zone_why(z_obj, smc_h4=None, snr_h4=None, smc_h1=None, snr_h1
     if not isinstance(z_obj, dict):
         return ""
     if _is_snr_zone_obj(z_obj):
-        eff_h4 = snr_h4 if str(snr_h4 or "").upper() in ("BULLISH", "BEARISH") else smc_h4
+        # Selaraskan tag H4 pada dashboard unified dengan header H4 utama (`smc_h4`) bila tersedia
+        eff_h4 = smc_h4 if str(smc_h4 or "").upper() in ("BULLISH", "BEARISH") else snr_h4
         eff_h1 = snr_h1 if str(snr_h1 or "").upper() in ("BULLISH", "BEARISH") else smc_h1
         return build_snr_zone_reason(z_obj, h4_bias=eff_h4, h1_bias=eff_h1)
     return build_smc_zone_reason(z_obj, h4_bias=smc_h4, h1_bias=smc_h1)
+
+
+def _format_auto_exec_target_tag(ae_ev):
+    """Format ringkas zona target yang sedang dievaluasi `AUTO EXEC` agar tidak rancu dengan baris `SNR LEVEL`."""
+    if not isinstance(ae_ev, dict):
+        return ""
+    z = ae_ev.get("zone") if isinstance(ae_ev.get("zone"), dict) else {}
+    tp = ae_ev.get("trade_plan") if isinstance(ae_ev.get("trade_plan"), dict) else {}
+    zid = str(z.get("zone_id") or ae_ev.get("zone_id") or tp.get("zone_id") or "").strip()
+    lo_v = safe_float(z.get("price_low", z.get("low", tp.get("zone_low"))), 0.0)
+    hi_v = safe_float(z.get("price_high", z.get("high", tp.get("zone_high"))), 0.0)
+    if lo_v <= 0.0 and not zid:
+        return ""
+    is_snr = (
+        str(z.get("source") or "").upper() == "SNR"
+        or zid.upper().startswith(("SNR_", "TF_PB_SNR_", "TF_BR_SNR_"))
+        or str((z.get("origin_bos") or {}).get("tipe") or "").upper() == "SNR_STRUCTURE"
+    )
+    src = "SNR" if is_snr else "SMC"
+    tf = str(z.get("timeframe") or tp.get("zone_timeframe") or "").strip().upper()
+    zt_raw = str(z.get("zone_type") or "").strip().upper()
+    if is_snr:
+        zt_lbl = "SUP" if zt_raw in ("DEMAND", "SUPPORT") else ("RES" if zt_raw in ("SUPPLY", "RESISTANCE") else zt_raw)
+    else:
+        zt_lbl = zt_raw or ("DEMAND" if str(tp.get("direction") or "").upper() == "BUY" else "SUPPLY")
+    grd = str(z.get("grade") or tp.get("zone_grade") or "-").strip()
+    sc_v = safe_float(z.get("score", tp.get("zone_score")), 0.0)
+    sc_s = f"/{sc_v:.1f}" if sc_v > 0 else ""
+    rng = f"{lo_v:.2f}-{hi_v:.2f}" if (lo_v > 0 and hi_v >= lo_v) else zid
+    head = " ".join(p for p in (f"[{src}]", tf, zt_lbl, rng) if p)
+    return f"{head} (G:{grd}{sc_s})" if grd and grd != "-" else head
 
 
 def _build_monitor_invalid_why(z_obj, smc_h4=None, snr_h4=None, smc_h1=None, snr_h1=None):
@@ -2924,7 +2956,9 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         active_radar_dash = f"NONE (Hanya Ref Jauh: {f_tf} {f_zt} {f_lo:.2f}-{f_hi:.2f} | {f_pos} | Grade {f_grd}{f_sc}{f_inv_s})".replace("  ", " ").strip()
 
     snr_h4_d = data.get("snr_h4_bias") or h4
+    eff_why_h4_d = h4 if h4 in ("BULLISH", "BEARISH") else snr_h4_d
     snr_h1_d_pre = str(data.get("snr_h1_bias") or "").upper()
+    eff_why_h1_d = snr_h1_d_pre if snr_h1_d_pre in ("BULLISH", "BEARISH") else h1
     active_why_dash = _build_monitor_zone_why(shown_active_z_dash, smc_h4=h4, snr_h4=snr_h4_d, smc_h1=h1, snr_h1=snr_h1_d_pre)
 
     # 1-line SNR summary (tampilkan S1 & R1 jelas, dan hindari duplikasi WHY jika sama dengan ACTIVE/RADAR)
@@ -2940,7 +2974,7 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         s1_sfx = ", = RADAR" if s1_same else ""
         snr_dash_parts.append(f"S1: {s1_tf_p}{safe_float(snr_sup_near.get('low')):.2f}-{safe_float(snr_sup_near.get('high')):.2f} (G:{snr_sup_near.get('grade', '-')}{s1_sfx})")
         if not s1_same:
-            s1_why_dash = build_snr_zone_reason(snr_sup_near, h4_bias=snr_h4_d, h1_bias=snr_h1_d_pre)
+            s1_why_dash = build_snr_zone_reason(snr_sup_near, h4_bias=eff_why_h4_d, h1_bias=eff_why_h1_d)
     else:
         snr_dash_parts.append("S1: NONE")
     if isinstance(snr_res_near, dict) and safe_float(snr_res_near.get("low")) > 0:
@@ -2950,7 +2984,7 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         r1_sfx = ", = RADAR" if r1_same else ""
         snr_dash_parts.append(f"R1: {r1_tf_p}{safe_float(snr_res_near.get('low')):.2f}-{safe_float(snr_res_near.get('high')):.2f} (G:{snr_res_near.get('grade', '-')}{r1_sfx})")
         if not r1_same:
-            r1_why_dash = build_snr_zone_reason(snr_res_near, h4_bias=snr_h4_d, h1_bias=snr_h1_d_pre)
+            r1_why_dash = build_snr_zone_reason(snr_res_near, h4_bias=eff_why_h4_d, h1_bias=eff_why_h1_d)
     else:
         snr_dash_parts.append("R1: NONE")
     if data.get("confluence") == "ALIGNED":
@@ -3133,8 +3167,10 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         ae_mode = f"{'ON' if auto_exec_d.get('auto_trading') else 'OFF'} ({auto_exec_d.get('trading_mode', 'SCANNER_ONLY')})"
         ae_ev = auto_exec_d.get("best_evaluation") or {}
         if ae_ev:
+            ae_tgt = _format_auto_exec_target_tag(ae_ev)
+            ae_tgt_seg = f"Target={ae_tgt} | " if ae_tgt else ""
             ae_line = (
-                f"{ae_mode} | Mode={str(ae_ev.get('entry_mode', 'ADAPTIVE')).replace('_ENTRY', '')} | "
+                f"{ae_mode} | {ae_tgt_seg}Mode={str(ae_ev.get('entry_mode', 'ADAPTIVE')).replace('_ENTRY', '')} | "
                 f"Qual={ae_ev.get('zone_quality', '-')} | Lot={float(ae_ev.get('final_lot') or 0.0):.2f}/{float(ae_ev.get('target_lot') or 0.0):.2f} | "
                 f"Decision={ae_ev.get('decision', '-')} | Exec={ae_ev.get('execution_status', '-')}"
             )
@@ -3322,7 +3358,9 @@ def format_smart_monitor_report(cycle_result):
         active_line = "NONE"
 
     snr_h4_rep = data.get("snr_h4_bias") or h4
+    eff_why_h4_rep = h4 if h4 in ("BULLISH", "BEARISH") else snr_h4_rep
     snr_h1_rep = str(data.get("snr_h1_bias") or "").upper()
+    eff_why_h1_rep = snr_h1_rep if snr_h1_rep in ("BULLISH", "BEARISH") else h1
     active_why_rep = _build_monitor_zone_why(shown_active_z_rep, smc_h4=h4, snr_h4=snr_h4_rep, smc_h1=h1, snr_h1=snr_h1_rep)
     iz_rep_obj = data.get("latest_invalid_zone")
     if isinstance(iz_rep_obj, dict):
@@ -3346,7 +3384,7 @@ def format_smart_monitor_report(cycle_result):
         s1_tf_pr = f"{s1_tf_r} " if s1_tf_r else ""
         snr_parts.append(f"S1: {s1_tf_pr}{safe_float(snr_sup.get('low')):.2f}-{safe_float(snr_sup.get('high')):.2f} (G:{snr_sup.get('grade', '-')}{', = RADAR' if s1_same_r else ''})")
         if not s1_same_r:
-            s1_why_rep = build_snr_zone_reason(snr_sup, h4_bias=snr_h4_rep, h1_bias=snr_h1_rep)
+            s1_why_rep = build_snr_zone_reason(snr_sup, h4_bias=eff_why_h4_rep, h1_bias=eff_why_h1_rep)
     else:
         snr_parts.append("S1: NONE")
     if isinstance(snr_res, dict) and safe_float(snr_res.get("low")) > 0:
@@ -3355,7 +3393,7 @@ def format_smart_monitor_report(cycle_result):
         r1_tf_pr = f"{r1_tf_r} " if r1_tf_r else ""
         snr_parts.append(f"R1: {r1_tf_pr}{safe_float(snr_res.get('low')):.2f}-{safe_float(snr_res.get('high')):.2f} (G:{snr_res.get('grade', '-')}{', = RADAR' if r1_same_r else ''})")
         if not r1_same_r:
-            r1_why_rep = build_snr_zone_reason(snr_res, h4_bias=snr_h4_rep, h1_bias=snr_h1_rep)
+            r1_why_rep = build_snr_zone_reason(snr_res, h4_bias=eff_why_h4_rep, h1_bias=eff_why_h1_rep)
     else:
         snr_parts.append("R1: NONE")
     if data.get("confluence") == "ALIGNED":
@@ -3446,8 +3484,10 @@ def format_smart_monitor_report(cycle_result):
         ae_m_r = f"{'ON' if auto_exec_r.get('auto_trading') else 'OFF'} ({auto_exec_r.get('trading_mode', 'SCANNER_ONLY')})"
         ae_ev_r = auto_exec_r.get("best_evaluation") or {}
         if ae_ev_r:
+            ae_tgt_r = _format_auto_exec_target_tag(ae_ev_r)
+            ae_tgt_r_seg = f"Target={ae_tgt_r} | " if ae_tgt_r else ""
             ae_ln_r = (
-                f"{ae_m_r} | {str(ae_ev_r.get('entry_mode', 'ADAPTIVE')).replace('_ENTRY', '')} | "
+                f"{ae_m_r} | {ae_tgt_r_seg}{str(ae_ev_r.get('entry_mode', 'ADAPTIVE')).replace('_ENTRY', '')} | "
                 f"Lot {float(ae_ev_r.get('final_lot') or 0.0):.2f}/{float(ae_ev_r.get('target_lot') or 0.0):.2f} | "
                 f"{ae_ev_r.get('decision', '-')} ({ae_ev_r.get('execution_status', '-')})"
             )

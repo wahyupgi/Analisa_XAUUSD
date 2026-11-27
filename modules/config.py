@@ -262,6 +262,9 @@ PANTAU_FULL_REFRESH_SECONDS = 300.0
 PANTAU_EXPIRY_WARNING_MINUTES = 15.0
 PANTAU_TICK_POLL_SECONDS = 0.15       # Polling tick harga MT5 ringan (~150 ms) terpisah dari siklus analisis SMC/SNR
 PANTAU_TICK_STALE_SECONDS = 30.0      # Ambang stale berbasis timestamp tick MT5 saat market OPEN
+SNR_LIVE_EXIT_HYSTERESIS_USD = _env_cfg("SNR_LIVE_EXIT_HYSTERESIS_USD", 1.20, float)       # Buffer histeresis keluar zona SNR live agar pinggir zona tidak spam
+SNR_LIVE_ALERT_COOLDOWN_SECONDS = _env_cfg("SNR_LIVE_ALERT_COOLDOWN_SECONDS", 180.0, float) # Cooldown minimum alert sentuh/keluar SNR pada zona yang sama
+SNR_LIVE_ALERT_MAX_REPEATS = _env_cfg("SNR_LIVE_ALERT_MAX_REPEATS", 2, int)                 # Batas pengulangan alert inline sentuh/keluar per zona SNR aktif
 
 # Flag penanganan berita
 BLOKIR_JIKA_BERITA_GAGAL = False
@@ -340,10 +343,8 @@ KOLOM_JURNAL_SINYAL = [
 
 KOLOM_JURNAL_ENTRY = [
     "ticket", "waktu_entry", "waktu_close", "symbol", "arah", "lot",
-    "harga_entry", "sl", "tp", "harga_close", "status_posisi", "profit_usd",
+    "harga_entry", "sl", "tp", "harga_close", "status_posisi", "profit",
     "status_zona", "sumber_zona", "zone_id", "zona_range", "grade_zona", "keterangan",
-    "position_id", "order_id", "deal_id", "mt5_status", "setup_match",
-    "waktu_order_created", "waktu_executed",
 ]
 
 # Daftar model Gemini yang dicoba berurutan saat server padat / kuota habis
@@ -864,6 +865,32 @@ def _build_auto_trading_config() -> dict:
         "ADAPTIVE_DISPLACEMENT_MIN_BODY_RATIO": _env_cfg("ADAPTIVE_DISPLACEMENT_MIN_BODY_RATIO", 0.55, float),
         "ADAPTIVE_TRIGGER_MAX_AGE_BARS": _env_cfg("ADAPTIVE_TRIGGER_MAX_AGE_BARS", 8, int),
         "STRONG_ZONE_MIN_DISPLACEMENT_ATR": _env_cfg("STRONG_ZONE_MIN_DISPLACEMENT_ATR", 1.5, float),
+        "STRONG_ZONE_BLOCK_CHOPPY_BASE": _env_cfg("STRONG_ZONE_BLOCK_CHOPPY_BASE", True, bool),
+        "SND_PATTERN_ENABLED": _env_cfg("SND_PATTERN_ENABLED", True, bool),
+    }
+
+
+# =============================================================================
+# SND BASE PATTERN VALIDATOR CONFIG (RBR / DBR / RBD / DBD) — configurable via .env
+# =============================================================================
+def get_snd_pattern_config() -> dict:
+    """Konfigurasi deteksi & validasi kualitas pola RBR/DBR/RBD/DBD untuk SMC Scanner (membaca .env secara live)."""
+    return {
+        "enabled": _env_cfg("SND_PATTERN_ENABLED", True, bool),
+        "max_base_bars": _env_cfg("SND_MAX_BASE_BARS", 5, int),
+        "base_candle_max_range_atr": _env_cfg("SND_BASE_CANDLE_MAX_RANGE_ATR", 1.15, float),
+        "base_candle_max_body_ratio": _env_cfg("SND_BASE_CANDLE_MAX_BODY_RATIO", 0.68, float),
+        "tight_base_max_width_atr": _env_cfg("SND_TIGHT_BASE_MAX_WIDTH_ATR", 1.25, float),
+        "moderate_base_max_width_atr": _env_cfg("SND_MODERATE_BASE_MAX_WIDTH_ATR", 2.10, float),
+        "leg_in_lookback_bars": _env_cfg("SND_LEG_IN_LOOKBACK_BARS", 8, int),
+        "leg_in_min_move_atr": _env_cfg("SND_LEG_IN_MIN_MOVE_ATR", 0.75, float),
+        "leg_out_window_bars": _env_cfg("SND_LEG_OUT_WINDOW_BARS", 12, int),
+        "leg_out_min_move_atr": _env_cfg("SND_LEG_OUT_MIN_MOVE_ATR", 1.10, float),
+        "strong_leg_out_to_base_ratio": _env_cfg("SND_STRONG_LEG_OUT_BASE_RATIO", 1.80, float),
+        "score_max_bonus": _env_cfg("SND_SCORE_MAX_BONUS", 3.0, float),
+        "score_moderate_bonus": _env_cfg("SND_SCORE_MODERATE_BONUS", 1.5, float),
+        "score_choppy_penalty": _env_cfg("SND_SCORE_CHOPPY_PENALTY", 3.0, float),
+        "score_counter_reversal_penalty": _env_cfg("SND_SCORE_COUNTER_REVERSAL_PENALTY", 3.0, float),
     }
 
 

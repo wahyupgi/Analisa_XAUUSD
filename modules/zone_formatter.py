@@ -357,12 +357,17 @@ def build_smc_zone_reason(
 
     bos_type = str(bos.get("tipe") or ev.get("bos_type") or "").upper()
     has_ob = bool(zone.get("ob_candle_time") or ev.get("ob_candle_time"))
+    snd_pat = str(zone.get("snd_pattern") or ev.get("snd_pattern") or sb.get("snd_pattern") or "").upper()
+    snd_qual = str(zone.get("snd_base_quality") or ev.get("snd_base_quality") or sb.get("snd_base_quality") or "").upper()
     if bos_type == "CHOCH":
         keywords.append("CHoCH OB" if has_ob else "CHoCH")
     elif bos_type == "BOS":
         keywords.append("BOS OB" if has_ob else "BOS")
     elif has_ob:
         keywords.append("OB")
+
+    if snd_pat in ("RBR", "DBR", "RBD", "DBD"):
+        keywords.append(f"{snd_pat} Tight" if snd_qual == "TIGHT" else snd_pat)
 
     sw_status = str(zone.get("liquidity_sweep_status") or "").upper()
     has_sweep = bool(
@@ -544,7 +549,10 @@ def format_zone_evidence(zone: Dict[str, Any], detailed: bool = False) -> Any:
     if not detailed:
         ob_t_short = ob_t[:16] if len(ob_t) >= 16 else ob_t
         bos_t_short = bos_t[:16] if len(bos_t) >= 16 else bos_t
-        return f"{tf} | OB {ob_t_short} [{lo:.2f}-{hi:.2f}] | BOS {bos_t_short} | FVG {fvg_txt} | {fresh} ({touches}x)"
+        snd_p = str(ev.get("snd_pattern") or zone.get("snd_pattern") or "").upper()
+        snd_q = str(ev.get("snd_base_quality") or zone.get("snd_base_quality") or "").upper()
+        snd_tag = f" | SND {snd_p}/{snd_q or 'STD'}" if snd_p in ("RBR", "DBR", "RBD", "DBD") else ""
+        return f"{tf} | OB {ob_t_short} [{lo:.2f}-{hi:.2f}]{snd_tag} | BOS {bos_t_short} | FVG {fvg_txt} | {fresh} ({touches}x)"
 
     bos = zone.get("origin_bos") if isinstance(zone.get("origin_bos"), dict) else {}
     bos_type = str(ev.get("bos_type") or bos.get("tipe") or "BOS")

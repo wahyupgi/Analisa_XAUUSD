@@ -197,7 +197,11 @@ def build_snr_zone_reason(zone, h4_bias=None, max_words=None, max_keywords=5, h1
         keywords.append("Tested 3x+")
 
     consol = str(zone.get("consolidation_structure") or "").upper()
-    if consol == "IMPULSIVE_DEPARTURE":
+    snd_pat = str(zone.get("snd_pattern") or "").upper()
+    snd_qual = str(zone.get("snd_base_quality") or "").upper()
+    if snd_pat in ("RBR", "DBR", "RBD", "DBD"):
+        keywords.append(f"{snd_pat} Tight" if snd_qual == "TIGHT" else snd_pat)
+    elif consol == "IMPULSIVE_DEPARTURE":
         keywords.append("Impulsive Departure")
     elif consol == "CONSOLIDATION_BASE":
         keywords.append("Base Consolidation")
@@ -1136,9 +1140,11 @@ def format_snr_detail(scan_result, decision=None):
         sc_list = sup_cands_by_tf.get(tf) or []
         lines.append(f"  • {tf:<3} ({len(sc_list)} kandidat):")
         for sc in sc_list[-3:]:
+            sc_snd = sc.get("snd_pattern")
+            sc_snd_txt = f", snd={sc_snd}/{sc.get('snd_base_quality', 'STD')}" if sc_snd in ("RBR", "DBR", "RBD", "DBD") else ""
             lines.append(
                 f"      - {sc.get('low', 0):.2f}-{sc.get('high', 0):.2f} (w={sc.get('width', 0):.2f}, "
-                f"class={sc.get('swing_class')}, bounce={sc.get('bounce_strength_atr', 0):.2f} ATR)"
+                f"class={sc.get('swing_class')}, bounce={sc.get('bounce_strength_atr', 0):.2f} ATR{sc_snd_txt})"
             )
 
     # 5. Resistance Candidates
@@ -1148,9 +1154,11 @@ def format_snr_detail(scan_result, decision=None):
         rc_list = res_cands_by_tf.get(tf) or []
         lines.append(f"  • {tf:<3} ({len(rc_list)} kandidat):")
         for rc in rc_list[-3:]:
+            rc_snd = rc.get("snd_pattern")
+            rc_snd_txt = f", snd={rc_snd}/{rc.get('snd_base_quality', 'STD')}" if rc_snd in ("RBR", "DBR", "RBD", "DBD") else ""
             lines.append(
                 f"      - {rc.get('low', 0):.2f}-{rc.get('high', 0):.2f} (w={rc.get('width', 0):.2f}, "
-                f"class={rc.get('swing_class')}, rejection={rc.get('bounce_strength_atr', 0):.2f} ATR)"
+                f"class={rc.get('swing_class')}, rejection={rc.get('bounce_strength_atr', 0):.2f} ATR{rc_snd_txt})"
             )
 
     # 6. Zone Clustering

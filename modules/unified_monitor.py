@@ -3702,6 +3702,12 @@ class UnifiedMonitor:
             and price_disp > 0
         )
         if live_snr_trackable:
+            from modules.config import (
+                SNR_LIVE_ALERT_COOLDOWN_SECONDS,
+                SNR_LIVE_ALERT_MAX_REPEATS,
+                SNR_LIVE_EXIT_HYSTERESIS_USD,
+            )
+            from modules.execution_state import get_execution_state_manager
             from modules.utils import is_zone_sl_breached_or_invalidated
             prev_snr_live = self.last_snr_live_zone_state
             snr_live_invalid = (
@@ -3714,14 +3720,59 @@ class UnifiedMonitor:
             s_lbl_live = "" if snr_live_invalid else str(snr_zone_obj.get("rank_label") or snr_zone_obj.get("zone_type") or "SNR").strip()
             s_zid_live = "NONE" if snr_live_invalid else str(snr_zone_obj.get("zone_id") or (f"{s_lbl_live}:{s_lo_live:.2f}-{s_hi_live:.2f}" if s_lo_live > 0 else "NONE"))
 
-            # Jangan pernah tampilkan alert sentuh/keluar pada zona SNR yang sudah ketembus SL / invalid
-            if snr_live_invalid and inline_alerts:
+            # Cek apakah zona SNR ini sudah selesai dieksekusi (COMPLETED / STOPPED_OUT) di auto execution
+            snr_zone_used_up = False
+            if not snr_live_invalid and s_zid_live != "NONE":
+                try:
+                    _zt_u = str(snr_zone_obj.get("zone_type") or "").upper()
+                    _dir_u = "BUY" if _zt_u in ("SUPPORT", "DEMAND") else ("SELL" if _zt_u in ("RESISTANCE", "SUPPLY") else "")
+                    _tf_u = str(snr_zone_obj.get("timeframe") or "").upper()
+                    _is_locked, _lk_code = get_execution_state_manager().is_setup_duplicate_or_locked(
+                        "",
+                        zone_id=s_zid_live,
+                        zone_bos_time=str(snr_zone_obj.get("confirmed_time") or snr_zone_obj.get("formation_time") or ""),
+                        zone_low=s_lo_live,
+                        zone_high=s_hi_live,
+                        direction=_dir_u,
+                        zone_timeframe=_tf_u,
+                    )
+                    if _is_locked and _lk_code in ("DUPLICATE_SETUP", "STOPPED_OUT_SETUP"):
+                        snr_zone_used_up = True
+                except Exception:
+                    snr_zone_used_up = False
+
+            exit_hyst_usd = max(0.0, float(SNR_LIVE_EXIT_HYSTERESIS_USD or 1.20))
+            alert_cd_sec = max(0.0, float(SNR_LIVE_ALERT_COOLDOWN_SECONDS or 180.0))
+            alert_max_rep = max(1, int(SNR_LIVE_ALERT_MAX_REPEATS or 2))
+            now_mono_snr = time.monotonic()
+            alert_hist = getattr(self, "_snr_inline_alert_history", None)
+            if alert_hist is None:
+                alert_hist = {}
+                self._snr_inline_alert_history = alert_hist
+
+            def _claim_snr_inline_alert(zid_a: str, kind_a: str) -> bool:
+                k_a = (str(zid_a), str(kind_a))
+                rec_a = alert_hist.get(k_a)
+                if isinstance(rec_a, dict):
+                    if int(rec_a.get("count", 0)) >= alert_max_rep:
+                        return False
+                    if (now_mono_snr - float(rec_a.get("last_mono", 0.0))) < alert_cd_sec:
+                        return False
+                    rec_a["count"] = int(rec_a.get("count", 0)) + 1
+                    rec_a["last_mono"] = now_mono_snr
+                else:
+                    alert_hist[k_a] = {"count": 1, "last_mono": now_mono_snr}
+                self.last_snr_inline_event = k_a
+                return True
+
+            # Jangan tampilkan alert sentuh/keluar pada zona SNR yang sudah ketembus SL / invalid / selesai dieksekusi
+            if (snr_live_invalid or snr_zone_used_up) and inline_alerts:
                 inline_alerts = [
                     ial for ial in inline_alerts
                     if not any(tok in str(ial).upper() for tok in ("HARGA SENTUH", "HARGA DI ", "HARGA DEKAT ", "DISENTUH", "HARGA KELUAR"))
                 ]
 
-            # Deduplikasi echo antara tick-level event dan full-refresh alert untuk zona & arah transisi yang sama
+            # Deduplikasi echo + pembatas spam antara tick-level event dan full-refresh alert untuk zona & arah transisi yang sama
             if inline_alerts:
                 dedup_inline = []
                 for ial in inline_alerts:
@@ -3729,11 +3780,19 @@ class UnifiedMonitor:
                     ev_kind = "EXIT" if ("DI LUAR ZONA" in ial_up or "KELUAR" in ial_up) else (
                         "TOUCH" if ("HARGA DI " in ial_up or "HARGA SENTUH" in ial_up or "DISENTUH" in ial_up) else None
                     )
-                    if ev_kind and self.last_snr_inline_event == (s_zid_live, ev_kind):
-                        continue
-                    dedup_inline.append(ial)
                     if ev_kind:
-                        self.last_snr_inline_event = (s_zid_live, ev_kind)
+                        if self.last_snr_inline_event == (s_zid_live, ev_kind):
+                            continue
+                        # Cegah EXIT palsu ketika harga masih dalam rentang histeresis keluar zona
+                        if (
+                            ev_kind == "EXIT"
+                            and s_lo_live > 0
+                            and (s_lo_live - exit_hyst_usd) <= price_disp <= (s_hi_live + exit_hyst_usd)
+                        ):
+                            continue
+                        if not _claim_snr_inline_alert(s_zid_live, ev_kind):
+                            continue
+                    dedup_inline.append(ial)
                 inline_alerts = dedup_inline
 
             has_inline_exit = any(
@@ -3744,31 +3803,34 @@ class UnifiedMonitor:
                 for x in (inline_alerts + material_alerts)
             )
 
-            # Event KELUAR hanya sah untuk zona yang SAMA dengan fokus SNR saat ini; bila fokus berganti, state lama
-            # dibuang tanpa event (cegah "zona palsu" dari zona transien yang tidak tampil di panel).
+            # Event KELUAR hanya sah untuk zona yang SAMA dengan fokus SNR saat ini dan melewati histeresis keluar zona
             if (
                 not snr_live_invalid
+                and not snr_zone_used_up
                 and prev_snr_live and prev_snr_live.get("inside")
                 and prev_snr_live.get("zone_id") == s_zid_live
             ):
                 p_lo_l, p_hi_l = prev_snr_live["low"], prev_snr_live["high"]
-                if price_disp < p_lo_l or price_disp > p_hi_l:
+                if price_disp < (p_lo_l - exit_hyst_usd) or price_disp > (p_hi_l + exit_hyst_usd):
                     exit_key = (prev_snr_live["zone_id"], "EXIT")
-                    if not has_inline_exit and self.last_snr_inline_event != exit_key:
+                    if not has_inline_exit and self.last_snr_inline_event != exit_key and _claim_snr_inline_alert(prev_snr_live["zone_id"], "EXIT"):
                         inline_alerts.append(
                             f"[SNR] HARGA KELUAR {prev_snr_live['label']} ({p_lo_l:.2f}-{p_hi_l:.2f}) | {price_disp:.2f}"
                         )
-                        self.last_snr_inline_event = exit_key
 
             if not snr_live_invalid and s_lo_live > 0 and s_hi_live >= s_lo_live:
                 seen_touches = getattr(self, "_seen_snr_touch_zone_ids", None)
                 if seen_touches is None:
                     seen_touches = set()
                     self._seen_snr_touch_zone_ids = seen_touches
-                now_inside_snr = (s_lo_live <= price_disp <= s_hi_live)
                 was_same_inside = bool(
                     prev_snr_live and prev_snr_live.get("zone_id") == s_zid_live and prev_snr_live.get("inside")
                 )
+                if was_same_inside:
+                    # Pertahankan status inside selama belum keluar melewati histeresis
+                    now_inside_snr = ((s_lo_live - exit_hyst_usd) <= price_disp <= (s_hi_live + exit_hyst_usd))
+                else:
+                    now_inside_snr = (s_lo_live <= price_disp <= s_hi_live)
                 already_touched_before = bool(
                     s_zid_live in seen_touches
                     or int(safe_float(snr_zone_obj.get("touch_count"), 0)) >= 1
@@ -3776,14 +3838,13 @@ class UnifiedMonitor:
                 )
                 if now_inside_snr and self.cycle_count <= 1:
                     seen_touches.add(s_zid_live)
-                elif now_inside_snr and not was_same_inside and self.cycle_count > 1:
+                elif now_inside_snr and not was_same_inside and not snr_zone_used_up and self.cycle_count > 1:
                     touch_key = (s_zid_live, "TOUCH")
-                    if not has_inline_touch and self.last_snr_inline_event != touch_key:
+                    if not has_inline_touch and self.last_snr_inline_event != touch_key and _claim_snr_inline_alert(s_zid_live, "TOUCH"):
                         touch_verb = "HARGA DISENTUH KEMBALI" if already_touched_before else "HARGA SENTUH"
                         inline_alerts.append(
                             f"[SNR] {touch_verb} {s_lbl_live} ({s_lo_live:.2f}-{s_hi_live:.2f}) | {price_disp:.2f}"
                         )
-                        self.last_snr_inline_event = touch_key
                     seen_touches.add(s_zid_live)
                 self.last_snr_live_zone_state = {
                     "zone_id": s_zid_live,

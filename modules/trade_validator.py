@@ -429,6 +429,11 @@ def _snr_zone_to_candidate_dict(snr_z: Dict[str, Any], symbol: str = SYMBOL) -> 
         "risk_tier": str(snr_z.get("risk_tier") or ""),
         "zone_relevance": str(snr_z.get("zone_relevance") or "ACTIVE"),
         "distance": float(snr_z.get("distance_points") or snr_z.get("distance") or 0.0),
+        "snd_pattern": str(snr_z.get("snd_pattern") or ""),
+        "snd_pattern_family": str(snr_z.get("snd_pattern_family") or ""),
+        "snd_base_quality": str(snr_z.get("snd_base_quality") or ""),
+        "snd_base_candles": int(snr_z.get("snd_base_candles") or 0),
+        "snd_leg_out_ratio": float(snr_z.get("snd_leg_out_ratio") or 0.0),
     }
 
 
@@ -965,13 +970,18 @@ def validate_trade_candidate(
     if not news_ok:
         return _build_result(STATE_BLOCKED, news_code, news_msg, val_chk="BLOCKED")
 
-    # Cek Duplicate Setup / Stopped-out Setup
+    # Cek Duplicate Setup / Stopped-out Setup (termasuk proteksi irisan pita harga SNR bila zona ter-recluster tipis)
     if conf.get("PREVENT_DUPLICATE_ORDER", True):
         is_dup, dup_code = state_mgr.is_setup_duplicate_or_locked(
             setup_id,
             zone_id=zone.zone_id,
             zone_bos_time=str(zone.bos_candle_time or ""),
             allow_scale_in_stage2=is_stage2_scale_in,
+            zone_low=float(zone.price_low or 0.0),
+            zone_high=float(zone.price_high or 0.0),
+            direction=direction,
+            zone_timeframe=str(zone.timeframe or ""),
+            symbol=symbol,
         )
         if is_dup:
             return _build_result(

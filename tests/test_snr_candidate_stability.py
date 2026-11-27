@@ -208,11 +208,6 @@ class SnrCandidateTests(unittest.TestCase):
         self.assertEqual(ctx["active_setup"]["direction"], "BUY")
         self.assertTrue(str(ctx["active_setup"]["setup_id"]).startswith("SNR_M30_SUP_3551:BUY:"))
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_sl_breached_snr_zone_suppressed_from_touch_alerts_and_candidates_and_retouch_labeled(self):
         import modules.utils as u
         from modules.snr.radar import SnrAlertTracker, evaluate_snr_radar
@@ -240,16 +235,15 @@ if __name__ == "__main__":
                 "zone_status": "ACTIVE",
                 "reason": "SL_BREACHED",
             }
-            # 1) Zona yang sudah SL_BREACHED wajib dianggap invalid & tidak masuk kandidat Auto Exec
             self.assertTrue(u.is_zone_sl_breached_or_invalidated(r1_breached, default_source="SNR"))
             scan = {"symbol": "XAUUSDc", "current_price": 3646.80}
             snr = {"scan_result": {"symbol": "XAUUSDc", "resistances": [r1_breached]}, "decision": {"target_zone": r1_breached}}
             self.assertEqual(select_candidate_zones(scan, {}, snr_result=snr), [])
 
-            # 2) SnrAlertTracker TIDAK boleh menerbitkan alert sentuh pada R1 yang sudah SL_BREACHED
-            trk = SnrAlertTracker()
+            trk = SnrAlertTracker(persist_dedup=False)
+            trk.reset()
             rad = evaluate_snr_radar({"active_resistances": [r1_breached]}, {"signal": "WAIT", "market_status": "OPEN"}, current_price=3646.80)
-            out_al = trk.evaluate({"ranked_zones": {"active_resistances": [r1_breached]}, "radar": rad, "decision": {"signal": "WAIT", "market_status": "OPEN"}, "price_action": {}})
+            out_al = trk.evaluate_alerts(rad, {"signal": "WAIT", "market_status": "OPEN"}, {})
             self.assertFalse(any("3640.93-3646.80" in a for a in out_al["alerts"]), out_al["alerts"])
         finally:
             if old_rec is None:
@@ -257,9 +251,160 @@ if __name__ == "__main__":
             else:
                 u._INVALIDATED_SETUP_VERSIONS[vk] = old_rec
 
-        # 3) Untuk zona yang MASIH VALID tapi sudah pernah disentuh sebelumnya (touch_count >= 1), labelnya "HARGA DISENTUH KEMBALI"
         r1_retouch = dict(r1_breached, zone_id="SNR_H1_RES_VALID_RETOUCH_999", touch_count=1)
-        trk2 = SnrAlertTracker()
+        trk2 = SnrAlertTracker(persist_dedup=False)
+        trk2.reset()
         rad2 = evaluate_snr_radar({"active_resistances": [r1_retouch]}, {"signal": "WAIT", "market_status": "OPEN"}, current_price=3644.00)
-        out_al2 = trk2.evaluate({"ranked_zones": {"active_resistances": [r1_retouch]}, "radar": rad2, "decision": {"signal": "WAIT", "market_status": "OPEN"}, "price_action": {}})
+        out_al2 = trk2.evaluate_alerts(rad2, {"signal": "WAIT", "market_status": "OPEN"}, {})
         self.assertTrue(any("HARGA DISENTUH KEMBALI RESISTANCE R1" in a for a in out_al2["alerts"]), out_al2["alerts"])
+
+    def test_snr_edge_hover_hysteresis_prevents_repeated_touch_exit_spam(self):
+        from modules.snr.radar import SnrAlertTracker, evaluate_snr_radar
+
+        r1 = {
+            "zone_id": "SNR_M30_RES_2026-11-27T05:30:00_366679",
+            "zone_type": "RESISTANCE",
+            "timeframe": "M30",
+            "rank_label": "R1",
+            "low": 3659.79,
+            "high": 3666.79,
+            "score": 81.8,
+            "grade": "A",
+            "touch_count": 1,
+            "lifecycle_status": "ACTIVE",
+            "ref_atr": 5.0,
+        }
+        trk = SnrAlertTracker(persist_dedup=False)
+        trk.reset()
+
+        # Siklus 1: harga masuk tipis 3659.80 -> terbit 1x
+        r1_in = dict(r1, distance_points=0.0)
+        rad1 = evaluate_snr_radar({"active_resistances": [r1_in]}, {"signal": "WAIT", "market_status": "OPEN"}, current_price=3659.80)
+        al1 = trk.evaluate_alerts(rad1, {"signal": "WAIT", "market_status": "OPEN"}, {})
+        self.assertEqual(len(al1["alerts"]), 1)
+
+        # Siklus 2: harga bergeser tipis keluar ke 3658.98 (jarak 0.81 USD <= histeresis 1.20 USD) -> ditahan!
+        r1_edge_out = dict(r1, distance_points=0.81)
+        rad2 = evaluate_snr_radar(
+            {"active_resistances": [r1_edge_out]},
+            {"signal": "WAIT", "market_status": "OPEN"},
+            price_action={"recent_touch_zone_id": r1["zone_id"]},
+            current_price=3658.98,
+        )
+        al2 = trk.evaluate_alerts(rad2, {"signal": "WAIT", "market_status": "OPEN"}, {})
+        self.assertEqual(al2["alerts"], [])
+
+        # Siklus 3: harga kembali 3659.80 -> tidak boleh spam "HARGA DISENTUH KEMBALI" lagi!
+        rad3 = evaluate_snr_radar({"active_resistances": [r1_in]}, {"signal": "WAIT", "market_status": "OPEN"}, current_price=3659.80)
+        al3 = trk.evaluate_alerts(rad3, {"signal": "WAIT", "market_status": "OPEN"}, {})
+        self.assertEqual(al3["alerts"], [])
+
+    def test_completed_snr_band_overlap_blocks_reentry_even_if_reclustered(self):
+        from modules.execution_state import ExecutionStateManager, STATE_COMPLETED, STATE_POSITION_ACTIVE
+
+        with tempfile.TemporaryDirectory() as td:
+            sm = ExecutionStateManager(state_file=os.path.join(td, "state_auto.json"))
+            sm.update_setup_state(
+                "SETUP_XAUUSDC_SELL_OLD",
+                state=STATE_POSITION_ACTIVE,
+                zone_id="SNR_M30_RES_2026-11-27T05:30:00_366679",
+                symbol="XAUUSDc",
+                direction="SELL",
+                zone_timeframe="M30",
+                position_ticket=4553132508,
+                actual_entry=3660.26,
+                extra={"zone_low": 3659.79, "zone_high": 3666.79},
+            )
+            sm.update_setup_state("SETUP_XAUUSDC_SELL_OLD", state=STATE_COMPLETED, position_ticket=4553132508)
+
+            # Zona yang sama ter-recluster tipis jadi ID baru (3659.79-3666.95) -> WAJIB diblokir anti-reentry!
+            dup, code = sm.is_setup_duplicate_or_locked(
+                "SETUP_XAUUSDC_SELL_NEW_ID",
+                zone_id="SNR_M30_RES_2026-11-27T05:30:00_366695",
+                zone_bos_time="2026-11-27 05:30:00",
+                zone_low=3659.79,
+                zone_high=3666.95,
+                direction="SELL",
+                zone_timeframe="M30",
+                symbol="XAUUSDc",
+            )
+            self.assertTrue(dup)
+            self.assertEqual(code, "DUPLICATE_SETUP")
+
+            # Zona berbeda di atasnya (H1 3669.71-3678.34) -> TIDAK boleh ikut terblokir!
+            dup_other, _ = sm.is_setup_duplicate_or_locked(
+                "SETUP_XAUUSDC_SELL_H1_UPPER",
+                zone_id="SNR_H1_RES_2026-11-24T01:00:00_367834",
+                zone_bos_time="2026-11-24 01:00:00",
+                zone_low=3669.71,
+                zone_high=3678.34,
+                direction="SELL",
+                zone_timeframe="H1",
+                symbol="XAUUSDc",
+            )
+            self.assertFalse(dup_other)
+
+    def test_auto_exec_target_and_why_r1_consistent_with_header_h4(self):
+        from modules.smart_monitor_report import _format_auto_exec_target_tag, format_smart_monitor_dashboard
+
+        ev = {
+            "zone_id": "SNR_H1_RES_2026-11-24T01:00:00_367834",
+            "zone": {
+                "zone_id": "SNR_H1_RES_2026-11-24T01:00:00_367834",
+                "source": "SNR",
+                "timeframe": "H1",
+                "zone_type": "SUPPLY",
+                "price_low": 3669.71,
+                "price_high": 3678.34,
+                "grade": "B",
+                "score": 76.54,
+            },
+            "entry_mode": "ADAPTIVE_ENTRY",
+            "zone_quality": "STANDARD",
+            "final_lot": 0.0,
+            "target_lot": 0.0,
+            "decision": "APPROACHING",
+            "execution_status": "APPROACHING",
+            "reason_code": "AMD_COUNTER_PHASE",
+        }
+        self.assertEqual(_format_auto_exec_target_tag(ev), "[SNR] H1 RES 3669.71-3678.34 (G:B/76.5)")
+
+        cycle = {
+            "snapshot": {"bid": 3659.70, "ask": 3659.90, "price": 3659.80, "data_ok": True, "data_freshness": "FRESH", "market_status": "OPEN"},
+            "smc": {
+                "status": "OK",
+                "scan_result": {"current_price": 3659.80, "htf_context": {"H4": "BULLISH", "H1": "BULLISH", "M30": "BULLISH"}},
+                "decision": {"status": "WAIT", "direction": "BUY", "current_price": 3659.80},
+                "summary": {"direction": "BUY", "h4_bias": "BULLISH", "h1_bias": "BULLISH", "m30_bias": "BULLISH"},
+            },
+            "snr": {
+                "status": "OK",
+                "scan_result": {
+                    "market_bias": {"h4": "BEARISH", "h1": "SIDEWAYS", "m30": "SIDEWAYS", "overall_bias": "SIDEWAYS"},
+                    "ranked_zones": {
+                        "active_supports": [],
+                        "active_resistances": [{
+                            "zone_id": "SNR_M30_RES_3659",
+                            "timeframe": "M30",
+                            "zone_type": "RESISTANCE",
+                            "low": 3659.79,
+                            "high": 3666.79,
+                            "grade": "A",
+                            "score": 81.8,
+                            "swing_class": "MAJOR",
+                            "lifecycle_status": "ACTIVE",
+                        }],
+                    },
+                },
+                "decision": {"signal": "WAIT"},
+            },
+            "auto_execution": {"auto_trading": True, "trading_mode": "FULL_AUTO", "best_evaluation": ev},
+        }
+        dash = format_smart_monitor_dashboard(cycle)
+        self.assertIn("Target=[SNR] H1 RES 3669.71-3678.34 (G:B/76.5)", dash)
+        self.assertIn("Counter H4", dash)
+        self.assertNotIn("H4 Aligned", dash)
+
+
+if __name__ == "__main__":
+    unittest.main()

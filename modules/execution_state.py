@@ -572,9 +572,19 @@ class ExecutionStateManager:
         zone_id: str = "",
         zone_bos_time: str = "",
         allow_scale_in_stage2: bool = False,
+        zone_low: float = 0.0,
+        zone_high: float = 0.0,
+        direction: str = "",
+        zone_timeframe: str = "",
+        symbol: str = "",
     ) -> Tuple[bool, str]:
         sid = str(setup_id or "").strip()
         zid = canonical_zone_key(zone_id)
+        dir_u = str(direction or "").strip().upper()
+        tf_u = str(zone_timeframe or "").strip().upper()
+        sym_u = str(symbol or "").strip().upper()
+        z_lo = float(zone_low or 0.0)
+        z_hi = float(zone_high or 0.0)
         with self._lock:
             if sid in self._inflight_setups:
                 return True, REASON_DUPLICATE_SETUP
@@ -588,14 +598,18 @@ class ExecutionStateManager:
                     return True, REASON_DUPLICATE_SETUP
                 if rec.get("stopped_out"):
                     return True, REASON_STOPPED_OUT_SETUP
-            # Cek juga apakah zona yang sama sedang memiliki order/posisi aktif di setup record lain
+            # Cek juga apakah zona yang sama (atau pita harga SNR yang sama pasca-recluster) sudah punya order/posisi/selesai
             if zid:
                 active_non_scale_cnt = 0
+                is_snr_cand = zid.startswith(("SNR_", "TF_PB_SNR_", "TF_BR_SNR_"))
+                now_ep = time.time()
                 for other_sid, other_rec in setups.items():
                     if not isinstance(other_rec, dict):
                         continue
-                    if canonical_zone_key(str(other_rec.get("zone_id") or "")) == zid:
-                        o_st = str(other_rec.get("state") or "").upper()
+                    other_zid = canonical_zone_key(str(other_rec.get("zone_id") or ""))
+                    o_st = str(other_rec.get("state") or "").upper()
+                    o_filled = int(other_rec.get("position_ticket") or 0) > 0
+                    if other_zid == zid:
                         if allow_scale_in_stage2:
                             if o_st in (STATE_EXECUTING, STATE_ORDER_PLACED):
                                 return True, REASON_DUPLICATE_SETUP
@@ -608,8 +622,54 @@ class ExecutionStateManager:
                                 if active_non_scale_cnt > 1:
                                     return True, REASON_DUPLICATE_SETUP
                         else:
+                            if other_rec.get("stopped_out"):
+                                return True, REASON_STOPPED_OUT_SETUP
                             if o_st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE):
                                 return True, REASON_DUPLICATE_SETUP
+                            if o_filled and o_st in (STATE_COMPLETED, STATE_INVALIDATED):
+                                return True, REASON_DUPLICATE_SETUP
+                    elif (
+                        not allow_scale_in_stage2
+                        and is_snr_cand
+                        and other_zid.startswith(("SNR_", "TF_PB_SNR_", "TF_BR_SNR_"))
+                        and z_lo > 0.0
+                        and z_hi >= z_lo
+                    ):
+                        o_dir = str(other_rec.get("direction") or "").strip().upper()
+                        o_tf = str(other_rec.get("zone_timeframe") or "").strip().upper()
+                        o_sym = str(other_rec.get("symbol") or "").strip().upper()
+                        if dir_u and o_dir and dir_u != o_dir:
+                            continue
+                        if tf_u and o_tf and tf_u != o_tf:
+                            continue
+                        if sym_u and o_sym and sym_u != o_sym:
+                            continue
+                        o_active = o_st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE)
+                        o_recent_done = (
+                            (o_filled or bool(other_rec.get("stopped_out")))
+                            and (now_ep - float(other_rec.get("updated_epoch") or 0.0)) <= 43200.0
+                        )
+                        if not (o_active or o_recent_done):
+                            continue
+                        # Jika zona kandidat baru terbentuk SETELAH posisi lama ditutup, jangan blokir
+                        o_upd_wib = str(other_rec.get("updated_at") or "").replace(" WIB", "").strip()
+                        cand_bos = str(zone_bos_time or "").replace("T", " ").strip()
+                        if (not o_active) and cand_bos and o_upd_wib and len(cand_bos) >= 16 and len(o_upd_wib) >= 16 and cand_bos > o_upd_wib:
+                            continue
+                        o_zlo = float(other_rec.get("zone_low") or 0.0)
+                        o_zhi = float(other_rec.get("zone_high") or 0.0)
+                        band_match = False
+                        if o_zlo > 0.0 and o_zhi >= o_zlo:
+                            ov_lo = max(z_lo, o_zlo)
+                            ov_hi = min(z_hi, o_zhi)
+                            min_w = max(0.20, min(z_hi - z_lo, o_zhi - o_zlo))
+                            band_match = (ov_hi >= ov_lo) and ((ov_hi - ov_lo) / min_w >= 0.50)
+                        else:
+                            o_px = float(other_rec.get("actual_entry") or other_rec.get("planned_entry") or 0.0)
+                            band_match = (o_px > 0.0) and ((z_lo - 0.50) <= o_px <= (z_hi + 0.50))
+                        if band_match:
+                            return True, (REASON_STOPPED_OUT_SETUP if other_rec.get("stopped_out") else REASON_DUPLICATE_SETUP)
+
                 stopped_map = self.state.get("stopped_out_Zones") or {}
                 for stop_zid, prev_stop_raw in stopped_map.items():
                     if canonical_zone_key(stop_zid) == zid:

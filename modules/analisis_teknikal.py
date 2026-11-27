@@ -553,9 +553,13 @@ def deteksi_institusi_dan_ranging(df, atr):
 
 
 def supply_demand(df, atr, impuls=1.5, termasuk_tertembus=False):
-    """Zona base -> impulse (candle dorongan besar didahului candle kecil/base).
+    """Zona base -> impulse dengan klasifikasi pola RBR / DBR / RBD / DBD (closed-candle only).
     termasuk_tertembus=True: zona yang sudah ditembus close ikut dikembalikan (status 'mitigated')."""
+    from modules.config import get_snd_pattern_config
+    from modules.utils import evaluate_snd_base_pattern
+
     O, H, L, C = (df[k].values for k in ("Open", "High", "Low", "Close"))
+    snd_cfg = get_snd_pattern_config()
     zona, last_k = [], -10
     for k in range(3, len(df)):
         if k - last_k < 3:
@@ -570,12 +574,12 @@ def supply_demand(df, atr, impuls=1.5, termasuk_tertembus=False):
                 break
         if not base:
             continue
-        lo, hi = min(L[x] for x in base), max(H[x] for x in base)
+        lo, hi = float(min(L[x] for x in base)), float(max(H[x] for x in base))
         if hi - lo > 1.5 * atr[k - 1]:
             continue
+        arah = "demand" if C[k] > O[k] else "supply"
         status = "fresh"
-        if C[k] > O[k]:
-            arah = "demand"
+        if arah == "demand":
             if len(C[k + 1:]) and C[k + 1:].min() < lo:
                 if not termasuk_tertembus:
                     continue
@@ -583,14 +587,33 @@ def supply_demand(df, atr, impuls=1.5, termasuk_tertembus=False):
             elif len(L[k + 1:]) and L[k + 1:].min() <= hi:
                 status = "tested"
         else:
-            arah = "supply"
             if len(C[k + 1:]) and C[k + 1:].max() > hi:
                 if not termasuk_tertembus:
                     continue
                 status = "mitigated"
             elif len(H[k + 1:]) and H[k + 1:].max() >= lo:
                 status = "tested"
-        zona.append(dict(arah=arah, lo=lo, hi=hi, t=df.index[base[-1]], status=status))
+
+        snd_eval = evaluate_snd_base_pattern(
+            O, H, L, C, atr,
+            anchor_idx=int(base[0]),
+            zone_direction=arah,
+            max_eval_idx=min(len(df) - 1, k + 3),
+            params=snd_cfg,
+        )
+        default_pat = ("DBR" if arah == "demand" else "RBD")
+        pola = snd_eval["pattern"] if snd_eval.get("is_valid_pattern") else default_pat
+        zona.append(dict(
+            arah=arah,
+            lo=lo,
+            hi=hi,
+            t=df.index[base[-1]],
+            status=status,
+            pola=pola,
+            base_quality=snd_eval.get("base_quality", "STANDARD"),
+            base_candles=int(snd_eval.get("base_candles", len(base))),
+            leg_out_ratio=float(snd_eval.get("leg_out_to_base_ratio", 0.0)),
+        ))
         last_k = k
     return zona
 

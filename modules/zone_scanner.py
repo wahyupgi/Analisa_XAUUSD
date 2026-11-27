@@ -38,6 +38,7 @@ from modules.config import (
     SIGNAL_STATUS_NO_SETUP, SIGNAL_STATUS_SETUP_DETECTED, SIGNAL_STATUS_WAITING_PULLBACK,
     SIGNAL_STATUS_WAITING_CONFIRMATION, SIGNAL_STATUS_SIGNAL_CONFIRMED, SIGNAL_STATUS_ENTRY_MISSED,
     INVALIDATION_SETUP_SL_BREACHED, INVALIDATION_ZONE_STRUCTURAL,
+    get_snd_pattern_config,
 )
 from modules.utils import (
     _catat_error,
@@ -51,6 +52,7 @@ from modules.utils import (
     price_distance_to_mt5_points,
     price_distance_to_pips,
     format_price_distance,
+    evaluate_snd_base_pattern,
 )
 from modules.mt5_conn import MT5_IPC_LOCK, ambil_data, pastikan_mt5_aktif, tambah_indikator
 from modules.trend_following import (
@@ -163,6 +165,11 @@ class Zone:
     zone_relevance_reason: str = ""
     liquidity_sweep_evidence: Optional[Dict[str, Any]] = None
     evidence: Dict[str, Any] = field(default_factory=dict)
+    snd_pattern: str = ""                     # RBR / DBR / RBD / DBD / UNCLASSIFIED
+    snd_pattern_family: str = ""              # CONTINUATION / REVERSAL / NONE
+    snd_base_quality: str = ""                # TIGHT / MODERATE / WIDE_CHOPPY / STANDARD
+    snd_base_candles: int = 0
+    snd_leg_out_ratio: float = 0.0
 
     def __post_init__(self):
         if self.price_high > 0 and self.price_low > 0:
@@ -410,6 +417,7 @@ def detect_order_blocks(df, events, fvgs, sweeps, timeframe, max_events: int = 2
         return [], []
     O, H, L, C = (df[c].values for c in ("Open", "High", "Low", "Close"))
     atr, idx = _atr_array(df), df.index
+    snd_cfg = get_snd_pattern_config()
     ok_list: List[Zone] = []
     bad_list: List[Zone] = []
     seen_ob: set = set()
@@ -549,6 +557,18 @@ def detect_order_blocks(df, events, fvgs, sweeps, timeframe, max_events: int = 2
         ev_out = dict(ev)
         ev_out["strength_atr"] = round(float(bos_strength), 2)
         ev_out["impulse_max_body_atr"] = round(max_body, 2)
+        snd_eval = evaluate_snd_base_pattern(
+            O, H, L, C, atr,
+            anchor_idx=int(ob_idx),
+            zone_direction=zone_type,
+            max_eval_idx=int(k),
+            params=snd_cfg,
+        )
+        snd_pat = str(snd_eval.get("pattern") or "UNCLASSIFIED")
+        snd_fam = str(snd_eval.get("pattern_family") or "NONE")
+        snd_qual = str(snd_eval.get("base_quality") or "STANDARD")
+        snd_bc = int(snd_eval.get("base_candles") or 1)
+        snd_out_rat = float(snd_eval.get("leg_out_to_base_ratio") or 0.0)
         zone_evidence = {
             "timeframe": timeframe,
             "candle_closed": True,
@@ -571,8 +591,17 @@ def detect_order_blocks(df, events, fvgs, sweeps, timeframe, max_events: int = 2
             "break_candle_time": str(break_candle_time) if break_candle_time is not None else None,
             "break_close": round(break_close, 2) if break_close is not None else None,
             "sweep": sweep_ev,
+            "snd_pattern": snd_pat,
+            "snd_pattern_family": snd_fam,
+            "snd_base_quality": snd_qual,
+            "snd_base_candles": snd_bc,
+            "snd_leg_out_ratio": round(snd_out_rat, 2),
+            "snd_reason": str(snd_eval.get("reason") or ""),
             "score_reason": "",
         }
+        audit_ok = ["OB lolos seluruh hard validation"]
+        if snd_pat in ("RBR", "DBR", "RBD", "DBD"):
+            audit_ok.append(f"Validasi SND: {snd_eval.get('reason', snd_pat)}")
         z = Zone(
             zone_id=f"ZONE_{timeframe}_{zone_type}_{int(idx[ob_idx].timestamp())}", symbol=SYMBOL,
             timeframe=timeframe, zone_type=zone_type, price_low=round(ob_lo, 2), price_high=round(ob_hi, 2),
@@ -581,10 +610,15 @@ def detect_order_blocks(df, events, fvgs, sweeps, timeframe, max_events: int = 2
             liquidity_sweep_status=sweep_status, invalidation_price=round(ob_lo if bull else ob_hi, 2),
             is_valid=not reasons, rejection_reason="; ".join(reasons), ob_candle_time=idx[ob_idx],
             bos_candle_time=idx[k], bos_timeframe=timeframe, sl_recommended=sl, tp1_recommended=tp1, tp2_recommended=tp2,
-            audit=(["OB lolos seluruh hard validation"] if not reasons else list(reasons)),
+            audit=(audit_ok if not reasons else list(reasons)),
             is_broken=invalid, invalid_label=("INVALID — BROKEN" if invalid else ""),
             liquidity_sweep_evidence=sweep_ev,
             evidence=zone_evidence,
+            snd_pattern=snd_pat,
+            snd_pattern_family=snd_fam,
+            snd_base_quality=snd_qual,
+            snd_base_candles=snd_bc,
+            snd_leg_out_ratio=round(snd_out_rat, 2),
         )
         (ok_list if not reasons else bad_list).append(z)
     return ok_list, bad_list
@@ -696,9 +730,9 @@ def score_zone(
     tf_factor = 1.0 if "H4" in zone.timeframe else 0.8
     p_struct = min(25.0, base * tf_factor + min(8.0, 4.0 * float(ev.get("strength_atr", 0.0))))
 
-    # B. Zone Strength / Displacement - max 20.0
+    # B. Zone Strength / Displacement (+ Validasi Kualitas Pola SND RBR/DBR/RBD/DBD, tetap plafon max 20.0)
     d = zone.displacement_strength
-    p_disp = 20.0 if d >= 2.5 else 16.0 if d >= 2.0 else 12.0 if d >= MIN_DISPLACEMENT_ATR else 0.0
+    p_disp_raw = 20.0 if d >= 2.5 else 16.0 if d >= 2.0 else 12.0 if d >= MIN_DISPLACEMENT_ATR else 0.0
 
     # C. FVG Quality - max 20.0
     st = (zone.fvg_confirmation or {}).get("status")
@@ -717,6 +751,36 @@ def score_zone(
 
     # F. Liquidity Context (Sweep) - max 10.0
     p_sweep = 10.0 if zone.liquidity_sweep_status.startswith("CONFIRMED") else 0.0
+
+    # Validasi kontekstual pola SND (RBR/DBR/RBD/DBD) di dalam komponen Zone Strength (plafon 0..20, total tetap <= 100)
+    snd_cfg = get_snd_pattern_config()
+    snd_pat = str(getattr(zone, "snd_pattern", "") or "").upper()
+    snd_qual = str(getattr(zone, "snd_base_quality", "") or "").upper()
+    snd_adj = 0.0
+    if snd_cfg.get("enabled", True) and snd_pat and p_disp_raw > 0.0:
+        ev_type_u = str(ev.get("tipe") or "").upper()
+        is_htf_supportive = (p_htf >= 6.5)
+        is_htf_opposed = (p_htf < 3.5)
+        has_reversal_backing = (p_sweep > 0.0) or (ev_type_u == "CHOCH")
+        if snd_qual == "WIDE_CHOPPY":
+            snd_adj = -abs(float(snd_cfg.get("score_choppy_penalty", 3.0)))
+        elif snd_pat in ("RBR", "DBD"):
+            if is_htf_supportive or ev_type_u == "BOS":
+                if snd_qual == "TIGHT":
+                    snd_adj = float(snd_cfg.get("score_max_bonus", 3.0))
+                elif snd_qual == "MODERATE":
+                    snd_adj = float(snd_cfg.get("score_moderate_bonus", 1.5))
+        elif snd_pat in ("DBR", "RBD"):
+            if has_reversal_backing or is_htf_supportive:
+                if snd_qual == "TIGHT":
+                    snd_adj = float(snd_cfg.get("score_max_bonus", 3.0))
+                elif snd_qual == "MODERATE":
+                    snd_adj = float(snd_cfg.get("score_moderate_bonus", 1.5))
+            elif is_htf_opposed and not has_reversal_backing:
+                snd_adj = -abs(float(snd_cfg.get("score_counter_reversal_penalty", 3.0)))
+
+    p_disp = round(min(20.0, max(0.0, p_disp_raw + snd_adj)), 1) if p_disp_raw > 0.0 else 0.0
+    actual_snd_adj = round(p_disp - p_disp_raw, 1)
 
     total = round(p_struct + p_disp + p_fvg + p_fresh + p_htf + p_sweep, 1)
     zone.score = total
@@ -739,21 +803,29 @@ def score_zone(
         "freshness": p_fresh,
         "konteks_htf": round(p_htf, 1),
         "liquidity_sweep": p_sweep,
-        # Transparent 7-factor breakdown aliases:
+        # Transparent 7-factor breakdown aliases + SND validation:
         "market_structure": round(p_struct, 1),
         "zone_strength": p_disp,
         "fvg_quality": p_fvg,
         "htf_alignment": round(p_htf, 1),
         "liquidity_context": p_sweep,
+        "snd_pattern": snd_pat or "NONE",
+        "snd_base_quality": snd_qual or "STANDARD",
+        "snd_quality_adj": actual_snd_adj,
         "impulse_body_atr": impulse_body_atr,
         "proximity": prox_status,
         "status": "VALID",
     }
 
     # Format score_reason penjelasan transparansi:
+    snd_note = (
+        f" [SND {snd_pat}/{snd_qual or 'STD'} {actual_snd_adj:+.1f}]"
+        if snd_pat in ("RBR", "DBR", "RBD", "DBD") or actual_snd_adj != 0.0
+        else ""
+    )
     reasons_list = [
         f"Struktur BOS {ev.get('tipe', 'BOS')} (+{p_struct:.1f})",
-        f"Zone Strength / Disp {d:.2f}x (+{p_disp:.1f})",
+        f"Zone Strength / Disp {d:.2f}x (+{p_disp:.1f}){snd_note}",
         f"FVG {st or 'NONE'} (+{p_fvg:.1f})",
         f"Freshness {zone.freshness} (+{p_fresh:.1f})",
         f"HTF Alignment (+{p_htf:.1f})",
@@ -782,7 +854,7 @@ def score_zone(
                 final_grade = "B"
                 cap_reasons.append("melawan arah HTF")
             elif raw_grade == "A+":
-                if zone.freshness != "FRESH" or touch_cnt > 0 or p_disp < 16.0:
+                if zone.freshness != "FRESH" or touch_cnt > 0 or d < 2.0 or p_disp < 16.0:
                     final_grade = "A"
                     cap_reasons.append("A+ memerlukan FRESH + displacement >= 2.0 ATR")
         zone.grade = final_grade
@@ -912,6 +984,17 @@ def merge_overlapping_zones(zones: List[Zone]) -> List[Zone]:
             or getattr(last, "liquidity_sweep_evidence", None)
             or getattr(z, "liquidity_sweep_evidence", None)
         )
+        other_z = z if best is last else last
+        use_snd_src = (
+            best
+            if getattr(best, "snd_pattern", "") in ("RBR", "DBR", "RBD", "DBD")
+            else (other_z if getattr(other_z, "snd_pattern", "") in ("RBR", "DBR", "RBD", "DBD") else best)
+        )
+        merged_snd_pat = str(getattr(use_snd_src, "snd_pattern", "") or "")
+        merged_snd_fam = str(getattr(use_snd_src, "snd_pattern_family", "") or "")
+        merged_snd_qual = str(getattr(use_snd_src, "snd_base_quality", "") or "")
+        merged_snd_bc = int(getattr(use_snd_src, "snd_base_candles", 0) or 0)
+        merged_snd_rat = float(getattr(use_snd_src, "snd_leg_out_ratio", 0.0) or 0.0)
         out[merged_idx] = Zone(
             zone_id=f"ZONE_{'+'.join(tfs)}_{last.zone_type}_{identity}", symbol=last.symbol,
             timeframe="+".join(tfs), zone_type=last.zone_type, price_low=round(lo, 2), price_high=round(hi, 2),
@@ -965,9 +1048,19 @@ def merge_overlapping_zones(zones: List[Zone]) -> List[Zone]:
                 "touch_count": max(last.touch_count, z.touch_count),
                 "mitigation_status": merged_fresh,
                 "sweep": merged_sweep_ev,
+                "snd_pattern": merged_snd_pat or "UNCLASSIFIED",
+                "snd_pattern_family": merged_snd_fam or "NONE",
+                "snd_base_quality": merged_snd_qual or "STANDARD",
+                "snd_base_candles": merged_snd_bc,
+                "snd_leg_out_ratio": round(merged_snd_rat, 2),
                 "merged_from": list(constituents),
                 "score_reason": getattr(best, "score_reason", ""),
             },
+            snd_pattern=merged_snd_pat,
+            snd_pattern_family=merged_snd_fam,
+            snd_base_quality=merged_snd_qual,
+            snd_base_candles=merged_snd_bc,
+            snd_leg_out_ratio=round(merged_snd_rat, 2),
         )
     return out
 

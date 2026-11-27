@@ -188,6 +188,23 @@ SNR_RADAR_PARAMS = {
     "touch_distance_atr": 0.08,
 }
 
+SNR_SND_PATTERN_PARAMS = {
+    "enabled": True,
+    "max_base_bars": 4,
+    "base_candle_max_range_atr": 1.15,
+    "base_candle_max_body_ratio": 0.68,
+    "tight_base_max_width_atr": 1.10,
+    "moderate_base_max_width_atr": 1.85,
+    "leg_in_lookback_bars": 8,
+    "leg_in_min_move_atr": 0.65,
+    "leg_out_window_bars": 6,
+    "leg_out_min_move_atr": 0.45,
+    "strong_leg_out_to_base_ratio": 1.40,
+    "tight_pattern_bonus": 1.2,
+    "moderate_pattern_bonus": 0.6,
+    "choppy_base_penalty": 1.0,
+}
+
 DEFAULT_SNR_CONFIG = {
     "symbol": SNR_SYMBOL_DEFAULT,
     "timeframes": SNR_TIMEFRAMES,
@@ -206,6 +223,7 @@ DEFAULT_SNR_CONFIG = {
     "grades": SNR_GRADE_THRESHOLDS,
     "risk": SNR_RISK_PARAMS,
     "radar": SNR_RADAR_PARAMS,
+    "snd_pattern": SNR_SND_PATTERN_PARAMS,
 }
 
 

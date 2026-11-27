@@ -139,7 +139,7 @@ def tampilkan_rekap():
             st_p_all = str(er_all.get("status_posisi") or "").upper()
             if st_p_all.startswith("CLOSED"):
                 try:
-                    pv_all = float(str(er_all.get("profit_usd") or "0.00"))
+                    pv_all = float(str(er_all.get("profit") if er_all.get("profit") not in (None, "") else (er_all.get("profit_usd") or "0.00")))
                 except ValueError:
                     pv_all = 0.0
                 e_closed += 1
@@ -157,7 +157,7 @@ def tampilkan_rekap():
             sl_e = str(er.get("sl") or "-")[:8]
             tp_e = str(er.get("tp") or "-")[:8]
             st_p = str(er.get("status_posisi") or "-")[:15]
-            pnl_s = str(er.get("profit_usd") or "0.00")
+            pnl_s = str(er.get("profit") if er.get("profit") not in (None, "") else (er.get("profit_usd") or "0.00"))
             try:
                 pnl_v = float(pnl_s)
             except ValueError:

@@ -1629,7 +1629,8 @@ def export_jurnal_entry_xlsx(rows, filepath=FILE_JURNAL_ENTRY_XLSX, currency="UN
         sl_v = _safe_float_jurnal(r.get("sl"))
         tp_v = _safe_float_jurnal(r.get("tp"))
         cls_v = _safe_float_jurnal(r.get("harga_close"))
-        pnl_v = _safe_float_jurnal(r.get("profit_usd"))
+        pnl_raw_x = r.get("profit") if r.get("profit") not in (None, "") else r.get("profit_usd")
+        pnl_v = _safe_float_jurnal(pnl_raw_x)
         st_pos = str(r.get("status_posisi") or "-").strip()
 
         row_vals = [
@@ -1842,11 +1843,91 @@ def export_jurnal_entry_xlsx(rows, filepath=FILE_JURNAL_ENTRY_XLSX, currency="UN
                 pass
 
 
+def _muat_indeks_eksekusi_auto_jurnal():
+    """Baca metadata eksekusi scanner dari jurnal_eksekusi_auto.csv & state_auto_execution.json (read-only)
+    agar SL, TP, Zone ID, Grade, dan keterangan entry robot yang sudah CLOSED tetap lengkap & akurat."""
+    from modules.config import FILE_JURNAL_AUTO_EXECUTION, FILE_STATE_AUTO_EXECUTION
+    by_ticket = {}
+
+    def _put(tkt_val, info):
+        t_s = str(tkt_val or "").strip()
+        if not t_s or t_s in ("-", "0", "None"):
+            return
+        cur = by_ticket.get(t_s) or {}
+        merged = dict(cur)
+        for k, v in info.items():
+            if v not in (None, "", "-", "0", "0.0", "0.00", 0, 0.0):
+                merged[k] = v
+        by_ticket[t_s] = merged
+
+    if os.path.exists(FILE_STATE_AUTO_EXECUTION):
+        try:
+            with open(FILE_STATE_AUTO_EXECUTION, "r", encoding="utf-8") as f:
+                st_auto = json.load(f)
+            for rec in ((st_auto or {}).get("setups") or {}).values():
+                if not isinstance(rec, dict):
+                    continue
+                info = {
+                    "zone_id": str(rec.get("zone_id") or "").strip(),
+                    "timeframe": str(rec.get("zone_timeframe") or "").strip(),
+                    "grade": str(rec.get("zone_grade") or "").strip(),
+                    "score": rec.get("zone_score"),
+                    "entry_mode": str(rec.get("entry_mode") or "").strip(),
+                    "trigger": str(rec.get("trigger_name") or "").strip(),
+                    "sl": rec.get("actual_sl") or rec.get("sl"),
+                    "tp": rec.get("actual_tp") or rec.get("tp"),
+                }
+                _put(rec.get("position_ticket"), info)
+                _put(rec.get("order_ticket"), info)
+        except Exception:
+            pass
+
+    if os.path.exists(FILE_JURNAL_AUTO_EXECUTION):
+        try:
+            with open(FILE_JURNAL_AUTO_EXECUTION, "r", encoding="utf-8-sig", newline="") as f:
+                for r_a in csv.DictReader(f):
+                    if not isinstance(r_a, dict):
+                        continue
+                    info = {
+                        "zone_id": str(r_a.get("zone_id") or "").strip(),
+                        "timeframe": str(r_a.get("zone_timeframe") or "").strip(),
+                        "grade": str(r_a.get("zone_grade") or "").strip(),
+                        "score": r_a.get("zone_score"),
+                        "entry_mode": str(r_a.get("entry_mode") or "").strip(),
+                        "trigger": str(r_a.get("trigger") or "").strip(),
+                        "sl": r_a.get("sl"),
+                        "tp": r_a.get("tp"),
+                        "exit_reason": str(r_a.get("exit_reason") or "").strip(),
+                    }
+                    _put(r_a.get("position_ticket"), info)
+                    _put(r_a.get("order_ticket"), info)
+        except Exception:
+            pass
+
+    return by_ticket
+
+
+def _ekstrak_range_dari_zone_id(zid: str, zones_list) -> str:
+    z_s = str(zid or "").strip()
+    if not z_s or z_s == "-":
+        return "-"
+    for z in (zones_list or []):
+        if str(z.get("zone_id") or "").strip() == z_s:
+            return f"{float(z['low']):.2f} - {float(z['high']):.2f}"
+    m = re.search(r"_(\d{4}\.\d+)_(\d{4}\.\d+)$", z_s)
+    if m:
+        lo_v, hi_v = float(m.group(1)), float(m.group(2))
+        if lo_v > hi_v:
+            lo_v, hi_v = hi_v, lo_v
+        return f"{lo_v:.2f} - {hi_v:.2f}"
+    return "-"
+
+
 def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
     """
     Sinkronisasi read-only seluruh entry MT5 (open positions, pending orders, dan deal history)
     ke file CSV `jurnal_entry_xauusd.csv` dengan pencocokan otomatis terhadap zona scanner
-    (status_zona = ZONA DIAMBIL / PENDING DI ZONA / ENTRY MANUAL (DI LUAR ZONA)).
+    & jurnal eksekusi auto-trading dalam format 18 kolom bersih ramah Excel.
     """
     existing = {}
     if os.path.exists(FILE_JURNAL_ENTRY):
@@ -1855,17 +1936,18 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
                 for row in csv.DictReader(f):
                     tkt = str(row.get("ticket") or "").strip()
                     if tkt:
+                        if "profit" not in row and "profit_usd" in row:
+                            row["profit"] = row.get("profit_usd")
                         existing[tkt] = dict(row)
         except Exception as e:
             _catat_error("baca_jurnal_entry", e)
 
     mt5_aktif = pastikan_mt5_aktif()
     zones = _kumpulkan_zona_scanner_jurnal(zones_override=zones_override)
+    auto_idx = _muat_indeks_eksekusi_auto_jurnal()
     _, accepted_syms = _acceptable_trade_symbols(SYMBOL)
 
     from modules.mt5_conn import (
-        evaluate_mt5_setup_match,
-        fetch_mt5_item_history,
         format_mt5_wib,
         get_mt5_server_utc_offset_hours,
         mt5_ts_to_utc_epoch,
@@ -1874,108 +1956,135 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
 
     def _fmt_px(val):
         try:
-            v = float(val or 0.0)
-            return f"{v:.2f}" if v > 0 else "-"
+            s = str(val or "").strip()
+            if s in ("", "-"):
+                return "-"
+            v = float(s)
+            return f"{v:.2f}" if math.isfinite(v) and v > 0 else "-"
         except (TypeError, ValueError):
             return "-"
+
+    def _has_px(val):
+        return _fmt_px(val) != "-"
+
+    def _fmt_pnl(val):
+        try:
+            v = float(str(val or "0").replace("+", "").strip())
+            if not math.isfinite(v) or abs(v) < 1e-9:
+                return "0.00"
+            return f"{v:.2f}"
+        except (TypeError, ValueError):
+            return "0.00"
 
     def _fmt_ts(ts_raw, msc_raw=0):
         utc_ts = mt5_ts_to_utc_epoch(ts_raw, msc_raw, server_off_j)
         wib_s = format_mt5_wib(utc_ts, short=False)
-        return wib_s if wib_s else "-"
+        return wib_s.replace(" WIB", "").strip() if wib_s else "-"
 
-    def _apply_zone_info(row_dict, arah, harga_entry, is_pending=False, prev_row=None, raw_item=None, item_utc_ts=0.0):
+    def _clean_ts_str(s_val):
+        s = str(s_val or "").replace(" WIB", "").strip()
+        return s if s else "-"
+
+    def _apply_zone_info(row_dict, arah, harga_entry, is_pending=False, prev_row=None, raw_item=None, auto_meta=None):
         from modules.execution_engine import is_scanner_owned_item
         from modules.config import SCANNER_MAGIC_NUMBER
-        
-        is_bot = False
-        if raw_item is not None:
+
+        am = auto_meta if isinstance(auto_meta, dict) else {}
+        is_bot = bool(am)
+        if not is_bot and raw_item is not None:
             is_bot = is_scanner_owned_item(raw_item, SCANNER_MAGIC_NUMBER)
-        elif isinstance(prev_row, dict):
+        elif not is_bot and isinstance(prev_row, dict):
             prev_sz = str(prev_row.get("status_zona") or "").upper()
             prev_ket = str(prev_row.get("keterangan") or "").upper()
             if "AUTO" in prev_sz or "ROBOT" in prev_sz or "SCANNER" in prev_ket:
                 is_bot = True
 
-        matched = _cocokkan_zona_entry(arah, harga_entry, zones)
-        if matched:
-            ev_j = evaluate_mt5_setup_match(
-                raw_item if raw_item is not None else {
-                    "ticket": row_dict.get("ticket"),
-                    "position_id": row_dict.get("position_id"),
-                    "order_id": row_dict.get("order_id"),
-                    "deal_id": row_dict.get("deal_id"),
-                    "symbol": row_dict.get("symbol"),
-                    "direction": arah,
-                    "price_open": harga_entry,
-                    "mt5_status": row_dict.get("mt5_status"),
-                    "position_opened_ts": item_utc_ts if not is_pending else 0.0,
-                    "order_created_ts": item_utc_ts if is_pending else 0.0,
-                },
-                direction=arah,
-                zone_low=float(matched["low"]),
-                zone_high=float(matched["high"]),
-                zone_id=str(matched.get("zone_id") or ""),
-                zone_formation_ts=float(matched.get("zone_formation_ts") or 0.0),
-                entry_tol=2.0,
-                is_order=is_pending,
-                method=str(matched.get("source") or ""),
-                server_offset_hours=server_off_j,
-            )
-            sm_j = ev_j["setup_match"]
-            row_dict["setup_match"] = sm_j
-            lbl_z = f"{matched['timeframe']} {matched['zone_type']}" + (f" ({matched['rank_label']})" if matched.get("rank_label") else "")
-            sl_note = "SL OK" if row_dict["sl"] != "-" else "SL MISSING"
-            
-            # Klasifikasi status zona: AUTO (oleh robot) vs MANUAL
-            if is_bot:
-                st_prefix = "PENDING AUTO" if is_pending else "ENTRY AUTO"
-            else:
-                st_prefix = "PENDING MANUAL" if is_pending else "ENTRY MANUAL"
+        # Pulihkan SL & TP dari metadata auto-execution bila history deal MT5 tidak menyimpannya
+        if not _has_px(row_dict.get("sl")) and _has_px(am.get("sl")):
+            row_dict["sl"] = _fmt_px(am.get("sl"))
+        if not _has_px(row_dict.get("tp")) and _has_px(am.get("tp")):
+            row_dict["tp"] = _fmt_px(am.get("tp"))
 
+        sl_note = "SL OK" if _has_px(row_dict.get("sl")) else "Tanpa SL"
+        mode_tag = str(am.get("entry_mode") or "").replace("_ENTRY", "").strip()
+        trig_tag = str(am.get("trigger") or "").strip()
+        if trig_tag.upper() in ("", "NONE", "WAITING", "ZONE TOUCHED"):
+            trig_tag = ""
+
+        # Prioritas 1: Metadata eksak dari Auto Execution Journal / State (paling akurat untuk trade robot)
+        am_zid = str(am.get("zone_id") or "").strip()
+        matched = _cocokkan_zona_entry(arah, harga_entry, zones)
+        if am_zid and am_zid != "-":
+            src_a = "SNR" if "SNR_" in am_zid.upper() else "SMC"
+            tf_a = str(am.get("timeframe") or (matched.get("timeframe") if matched else "") or "-").strip()
+            grd_raw = str(am.get("grade") or "").strip()
+            sc_raw = _safe_float_jurnal(am.get("score"))
+            grd_a = f"{grd_raw} ({sc_raw:.1f})" if (grd_raw and sc_raw is not None and sc_raw > 0) else (grd_raw or (matched.get("grade") if matched else "-"))
+            rng_a = _ekstrak_range_dari_zone_id(am_zid, zones)
+            if rng_a == "-" and matched and str(matched.get("zone_id") or "") == am_zid:
+                rng_a = f"{matched['low']:.2f} - {matched['high']:.2f}"
+            elif rng_a == "-" and isinstance(prev_row, dict) and str(prev_row.get("zona_range") or "-") != "-":
+                rng_a = str(prev_row.get("zona_range"))
+
+            row_dict["sumber_zona"] = src_a
+            row_dict["zone_id"] = am_zid
+            row_dict["zona_range"] = rng_a
+            row_dict["grade_zona"] = grd_a
+            row_dict["status_zona"] = "PENDING AUTO (ZONA DIAMBIL)" if is_pending else "ENTRY AUTO (ZONA DIAMBIL)"
+            detail_parts = [f"Auto {mode_tag}" if mode_tag else "Auto Entry"]
+            if trig_tag:
+                detail_parts.append(trig_tag)
+            if tf_a and tf_a != "-":
+                detail_parts.append(f"{tf_a} {src_a}")
+            detail_parts.append(sl_note)
+            row_dict["keterangan"] = " | ".join(detail_parts)
+            return
+
+        # Prioritas 2: Pencocokan terhadap zona scanner aktif/historis
+        if matched:
+            lbl_z = f"{matched['timeframe']} {matched['zone_type']}" + (f" ({matched['rank_label']})" if matched.get("rank_label") else "")
             row_dict["sumber_zona"] = matched["source"]
             row_dict["zone_id"] = matched["zone_id"]
             row_dict["zona_range"] = f"{matched['low']:.2f} - {matched['high']:.2f}"
             row_dict["grade_zona"] = matched["grade"]
-
             if is_bot:
-                row_dict["status_zona"] = f"{st_prefix} (ZONA DIAMBIL)"
-                row_dict["keterangan"] = (
-                    f"Robot entry di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
-                    if not is_pending
-                    else f"Robot pending order di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
-                )
+                row_dict["status_zona"] = "PENDING AUTO (ZONA DIAMBIL)" if is_pending else "ENTRY AUTO (ZONA DIAMBIL)"
+                act_lbl = "Auto Pending" if is_pending else "Auto Entry"
             else:
-                row_dict["status_zona"] = f"{st_prefix} (DI ZONA)"
-                row_dict["keterangan"] = (
-                    f"Manual entry di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
-                    if not is_pending
-                    else f"Manual pending order di zona {lbl_z} ({matched['source']}, MATCH:{sm_j}) | {sl_note}"
-                )
-        elif isinstance(prev_row, dict) and prev_row.get("zone_id") not in (None, "", "-"):
+                row_dict["status_zona"] = "PENDING MANUAL (DI ZONA)" if is_pending else "ENTRY MANUAL (DI ZONA)"
+                act_lbl = "Manual Pending" if is_pending else "Manual Entry"
+            row_dict["keterangan"] = f"{act_lbl} | {lbl_z} ({matched['source']}) | {sl_note}"
+            return
+
+        # Prioritas 3: Pertahankan metadata zona sebelumnya jika sudah tercatat valid
+        if isinstance(prev_row, dict) and str(prev_row.get("zone_id") or "-") not in ("", "-"):
             prev_sz = str(prev_row.get("status_zona") or "").upper()
             is_prev_bot = is_bot or ("AUTO" in prev_sz or "ROBOT" in prev_sz)
-            st_prefix = ("PENDING AUTO" if is_prev_bot else "PENDING MANUAL") if is_pending else ("ENTRY AUTO" if is_prev_bot else "ENTRY MANUAL")
-            row_dict["setup_match"] = prev_row.get("setup_match") or "INFERRED"
-            row_dict["status_zona"] = f"{st_prefix} (ZONA DIAMBIL)" if is_prev_bot else f"{st_prefix} (DI ZONA)"
-            row_dict["sumber_zona"] = prev_row.get("sumber_zona") or "-"
-            row_dict["zone_id"] = prev_row.get("zone_id") or "-"
-            row_dict["zona_range"] = prev_row.get("zona_range") or "-"
-            row_dict["grade_zona"] = prev_row.get("grade_zona") or "-"
-            row_dict["keterangan"] = prev_row.get("keterangan") or ("Robot eksekusi zona scanner" if is_prev_bot else "Manual entry di zona scanner")
-        else:
-            sl_note = "SL OK" if row_dict["sl"] != "-" else "SL MISSING"
-            row_dict["setup_match"] = "UNRELATED"
-            if is_bot:
-                row_dict["status_zona"] = "PENDING AUTO (DI LUAR ZONA)" if is_pending else "ENTRY AUTO (DI LUAR ZONA)"
-                row_dict["keterangan"] = f"Robot order di luar zona scanner | {sl_note}"
+            if is_prev_bot:
+                row_dict["status_zona"] = "PENDING AUTO (ZONA DIAMBIL)" if is_pending else "ENTRY AUTO (ZONA DIAMBIL)"
+                act_lbl = "Auto Pending" if is_pending else "Auto Entry"
             else:
-                row_dict["status_zona"] = "PENDING MANUAL (DI LUAR ZONA)" if is_pending else "ENTRY MANUAL (DI LUAR ZONA)"
-                row_dict["keterangan"] = f"Entry manual di luar zona scanner | {sl_note}"
-            row_dict["sumber_zona"] = "-"
-            row_dict["zone_id"] = "-"
-            row_dict["zona_range"] = "-"
-            row_dict["grade_zona"] = "-"
+                row_dict["status_zona"] = "PENDING MANUAL (DI ZONA)" if is_pending else "ENTRY MANUAL (DI ZONA)"
+                act_lbl = "Manual Pending" if is_pending else "Manual Entry"
+            src_p = str(prev_row.get("sumber_zona") or "-")
+            row_dict["sumber_zona"] = src_p
+            row_dict["zone_id"] = str(prev_row.get("zone_id") or "-")
+            row_dict["zona_range"] = str(prev_row.get("zona_range") or "-")
+            row_dict["grade_zona"] = str(prev_row.get("grade_zona") or "-")
+            row_dict["keterangan"] = f"{act_lbl} | Zona {src_p} ({row_dict['zona_range']}) | {sl_note}"
+            return
+
+        # Prioritas 4: Di luar zona scanner
+        row_dict["sumber_zona"] = "-"
+        row_dict["zone_id"] = "-"
+        row_dict["zona_range"] = "-"
+        row_dict["grade_zona"] = "-"
+        if is_bot:
+            row_dict["status_zona"] = "PENDING AUTO (DI LUAR ZONA)" if is_pending else "ENTRY AUTO (DI LUAR ZONA)"
+            row_dict["keterangan"] = f"{'Auto Pending' if is_pending else 'Auto Entry'} | Di luar zona aktif | {sl_note}"
+        else:
+            row_dict["status_zona"] = "PENDING MANUAL (DI LUAR ZONA)" if is_pending else "ENTRY MANUAL (DI LUAR ZONA)"
+            row_dict["keterangan"] = f"{'Manual Pending' if is_pending else 'Manual Entry'} | Di luar zona scanner | {sl_note}"
 
     if mt5_aktif:
         now_utc = datetime.now(timezone.utc)
@@ -1989,9 +2098,33 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
                     datetime.now() - timedelta(days=max(1, int(days))),
                     datetime.now() + timedelta(days=2),
                 ) or ()
+            hist_orders = mt5.history_orders_get(start_utc, now_utc + timedelta(days=1)) or ()
+            if not hist_orders:
+                hist_orders = mt5.history_orders_get(
+                    datetime.now() - timedelta(days=max(1, int(days))),
+                    datetime.now() + timedelta(days=2),
+                ) or ()
 
+        # Indeks SL/TP dari history_orders_get per position_id / ticket (karena Deal MT5 sering mengosongkan sl/tp = 0.0)
+        hist_ord_sl_tp = {}
+        for ho in hist_orders:
+            ho_sl = float(getattr(ho, "sl", 0.0) or 0.0)
+            ho_tp = float(getattr(ho, "tp", 0.0) or 0.0)
+            if ho_sl <= 0.0 and ho_tp <= 0.0:
+                continue
+            for k_ho in (str(getattr(ho, "position_id", "") or ""), str(getattr(ho, "ticket", "") or "")):
+                if k_ho and k_ho != "0":
+                    cur_ho = hist_ord_sl_tp.get(k_ho) or {}
+                    if ho_sl > 0.0:
+                        cur_ho["sl"] = ho_sl
+                    if ho_tp > 0.0:
+                        cur_ho["tp"] = ho_tp
+                    hist_ord_sl_tp[k_ho] = cur_ho
+
+        live_order_ids = set()
         open_pos_ids = set()
-        # 1. Open Positions (OPEN)
+
+        # 1. Open Positions (RUNNING)
         for p in positions:
             sym_p = str(getattr(p, "symbol", "") or "").strip()
             if sym_p.upper() not in accepted_syms:
@@ -2005,17 +2138,8 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
             arah = "BUY" if getattr(p, "type", 0) == 0 else "SELL"
             h_ent = float(getattr(p, "price_open", 0.0) or 0.0)
             pnl = float(getattr(p, "profit", 0.0) or 0.0) + float(getattr(p, "swap", 0.0) or 0.0)
-            p_open_utc = mt5_ts_to_utc_epoch(getattr(p, "time", 0), getattr(p, "time_msc", 0), server_off_j)
-            hist_p = fetch_mt5_item_history(ticket=tkt, position_id=pid_p, is_order=False, server_offset_hours=server_off_j, allow_live_query=True)
             row = {
                 "ticket": tkt,
-                "position_id": pid_p,
-                "order_id": str(hist_p.get("order_id") or "-"),
-                "deal_id": str(hist_p.get("deal_id") or "-"),
-                "mt5_status": "OPEN",
-                "setup_match": "UNKNOWN",
-                "waktu_order_created": hist_p.get("order_created_wib") or "-",
-                "waktu_executed": hist_p.get("executed_wib") or "-",
                 "waktu_entry": _fmt_ts(getattr(p, "time", 0), getattr(p, "time_msc", 0)),
                 "waktu_close": "-",
                 "symbol": sym_p,
@@ -2026,12 +2150,13 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
                 "tp": _fmt_px(getattr(p, "tp", 0.0)),
                 "harga_close": "-",
                 "status_posisi": "RUNNING",
-                "profit_usd": f"{pnl:+.2f}",
+                "profit": _fmt_pnl(pnl),
             }
-            _apply_zone_info(row, arah, h_ent, is_pending=False, prev_row=existing.get(tkt), raw_item=p, item_utc_ts=p_open_utc)
+            am_p = auto_idx.get(tkt) or auto_idx.get(pid_p)
+            _apply_zone_info(row, arah, h_ent, is_pending=False, prev_row=existing.get(tkt), raw_item=p, auto_meta=am_p)
             existing[tkt] = row
 
-        # 2. Pending Orders (PENDING)
+        # 2. Pending Orders Aktif (PENDING)
         for o in orders:
             sym_o = str(getattr(o, "symbol", "") or "").strip()
             if sym_o.upper() not in accepted_syms:
@@ -2042,18 +2167,11 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
             ord_lbl, arah = _info_tipe_pending(getattr(o, "type", -1))
             if arah not in ("BUY", "SELL"):
                 continue
+            live_order_ids.add(tkt)
             h_ent = float(getattr(o, "price_open", 0.0) or 0.0)
-            o_cr_utc = mt5_ts_to_utc_epoch(getattr(o, "time_setup", 0), getattr(o, "time_setup_msc", 0), server_off_j)
             w_cr_o = _fmt_ts(getattr(o, "time_setup", 0), getattr(o, "time_setup_msc", 0))
             row = {
                 "ticket": tkt,
-                "position_id": str(getattr(o, "position_id", None) or "-"),
-                "order_id": tkt,
-                "deal_id": "-",
-                "mt5_status": "PENDING",
-                "setup_match": "UNKNOWN",
-                "waktu_order_created": w_cr_o,
-                "waktu_executed": "-",
                 "waktu_entry": w_cr_o,
                 "waktu_close": "-",
                 "symbol": sym_o,
@@ -2064,9 +2182,9 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
                 "tp": _fmt_px(getattr(o, "tp", 0.0)),
                 "harga_close": "-",
                 "status_posisi": f"PENDING ({ord_lbl})",
-                "profit_usd": "0.00",
+                "profit": "0.00",
             }
-            _apply_zone_info(row, arah, h_ent, is_pending=True, prev_row=existing.get(tkt), raw_item=o, item_utc_ts=o_cr_utc)
+            _apply_zone_info(row, arah, h_ent, is_pending=True, prev_row=existing.get(tkt), raw_item=o, auto_meta=auto_idx.get(tkt))
             existing[tkt] = row
 
         # 3. Closed Trades dari History Deals (agregasi per position_id)
@@ -2082,6 +2200,12 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
             if not pid or pid in open_pos_ids:
                 continue
             deal_groups.setdefault(pid, []).append(d)
+
+        # Bersihkan baris PENDING usang yang sudah dibatalkan di MT5 (tidak lagi di orders aktif & tidak tereksekusi jadi posisi/deal)
+        for old_tkt in list(existing.keys()):
+            st_old = str((existing.get(old_tkt) or {}).get("status_posisi") or "").upper()
+            if st_old.startswith("PENDING") and old_tkt not in live_order_ids and old_tkt not in open_pos_ids and old_tkt not in deal_groups:
+                del existing[old_tkt]
 
         for pid, dlist in deal_groups.items():
             dlist.sort(key=lambda x: int(getattr(x, "time", 0)))
@@ -2108,32 +2232,72 @@ def sinkron_jurnal_entry_mt5(days=30, zones_override=None):
                 st_pos = "CLOSED"
                 w_close = "-"
                 h_close = "-"
+
             prev_r = existing.get(pid)
-            d_in_utc = mt5_ts_to_utc_epoch(getattr(d_in, "time", 0), getattr(d_in, "time_msc", 0), server_off_j)
+            ord_in_id = str(getattr(d_in, "order", "") or "")
+            ord_out_id = str(getattr(d_out, "order", "") or "") if d_out is not None else ""
+            ho_meta = hist_ord_sl_tp.get(pid) or hist_ord_sl_tp.get(ord_in_id) or hist_ord_sl_tp.get(ord_out_id) or {}
+            am_d = auto_idx.get(pid) or auto_idx.get(ord_in_id)
+
+            sl_resolved = "-"
+            for cand_sl in (
+                prev_r.get("sl") if isinstance(prev_r, dict) else None,
+                getattr(d_out, "sl", 0.0) if d_out is not None else None,
+                getattr(d_in, "sl", 0.0),
+                ho_meta.get("sl"),
+                (am_d or {}).get("sl"),
+            ):
+                if _has_px(cand_sl):
+                    sl_resolved = _fmt_px(cand_sl)
+                    break
+
+            tp_resolved = "-"
+            for cand_tp in (
+                prev_r.get("tp") if isinstance(prev_r, dict) else None,
+                getattr(d_out, "tp", 0.0) if d_out is not None else None,
+                getattr(d_in, "tp", 0.0),
+                ho_meta.get("tp"),
+                (am_d or {}).get("tp"),
+            ):
+                if _has_px(cand_tp):
+                    tp_resolved = _fmt_px(cand_tp)
+                    break
+
             w_exec_d = _fmt_ts(getattr(d_in, "time", 0), getattr(d_in, "time_msc", 0))
             row = {
                 "ticket": pid,
-                "position_id": pid,
-                "order_id": str(getattr(d_in, "order", None) or (prev_r.get("order_id") if isinstance(prev_r, dict) else "-") or "-"),
-                "deal_id": str(getattr(d_in, "ticket", None) or "-"),
-                "mt5_status": "CLOSED",
-                "setup_match": "UNKNOWN",
-                "waktu_order_created": (prev_r.get("waktu_order_created") if isinstance(prev_r, dict) and prev_r.get("waktu_order_created") else "-"),
-                "waktu_executed": w_exec_d,
                 "waktu_entry": w_exec_d,
                 "waktu_close": w_close,
                 "symbol": str(getattr(d_in, "symbol", SYMBOL) or SYMBOL),
                 "arah": arah,
                 "lot": f"{vol_tot:.2f}",
                 "harga_entry": _fmt_px(h_ent),
-                "sl": (prev_r.get("sl") if isinstance(prev_r, dict) and prev_r.get("sl") else _fmt_px(getattr(d_in, "sl", 0.0))),
-                "tp": (prev_r.get("tp") if isinstance(prev_r, dict) and prev_r.get("tp") else _fmt_px(getattr(d_in, "tp", 0.0))),
+                "sl": sl_resolved,
+                "tp": tp_resolved,
                 "harga_close": h_close,
                 "status_posisi": st_pos,
-                "profit_usd": f"{pnl_net:+.2f}",
+                "profit": _fmt_pnl(pnl_net),
             }
-            _apply_zone_info(row, arah, h_ent, is_pending=False, prev_row=prev_r, raw_item=d_in, item_utc_ts=d_in_utc)
+            _apply_zone_info(row, arah, h_ent, is_pending=False, prev_row=prev_r, raw_item=d_in, auto_meta=am_d)
             existing[pid] = row
+    else:
+        # Saat MT5 offline, tetap rapikan dan lengkapi baris CSV lama menggunakan indeks eksekusi auto
+        for tkt_off, r_off in list(existing.items()):
+            r_off["waktu_entry"] = _clean_ts_str(r_off.get("waktu_entry"))
+            r_off["waktu_close"] = _clean_ts_str(r_off.get("waktu_close"))
+            r_off["profit"] = _fmt_pnl(r_off.get("profit") if r_off.get("profit") is not None else r_off.get("profit_usd"))
+            h_e_off = _safe_float_jurnal(r_off.get("harga_entry")) or 0.0
+            am_off = auto_idx.get(tkt_off)
+            _apply_zone_info(
+                r_off,
+                str(r_off.get("arah") or "").upper(),
+                h_e_off,
+                is_pending=str(r_off.get("status_posisi") or "").upper().startswith("PENDING"),
+                prev_row=r_off,
+                raw_item=None,
+                auto_meta=am_off,
+            )
+            existing[tkt_off] = r_off
 
     rows_sorted = sorted(existing.values(), key=lambda r: (str(r.get("waktu_entry") or ""), str(r.get("ticket") or "")))
 

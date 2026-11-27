@@ -3511,3 +3511,300 @@ def format_trade_plan_lines(
                     lines.extend(wrap_dashboard_field(diag_prefix, diag_txt, width, max_lines=None))
     return lines
 
+
+def evaluate_snd_base_pattern(
+    opens: Any,
+    highs: Any,
+    lows: Any,
+    closes: Any,
+    atrs: Any,
+    anchor_idx: int,
+    zone_direction: str,
+    max_eval_idx: Optional[int] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Evaluator deterministik pola Supply & Demand 3-fase (Leg-In -> Base -> Leg-Out):
+      - Demand / Support   : RBR (Rally-Base-Rally / Continuation) atau DBR (Drop-Base-Rally / Reversal)
+      - Supply / Resistance: DBD (Drop-Base-Drop / Continuation) atau RBD (Rally-Base-Drop / Reversal)
+
+    Aturan Keamanan (Anti-Bug & No Look-Ahead):
+      - Hanya membaca array candle CLOSED hingga `max_eval_idx` (mis. candle konfirmasi BOS atau pivot).
+      - Fail-safe penuh: tidak pernah melempar exception pada data pendek/NaN/anomali.
+    """
+    safe_idx = int(max(0, anchor_idx)) if isinstance(anchor_idx, (int, float)) and math.isfinite(anchor_idx) else 0
+
+    def _fallback(reason: str = "") -> Dict[str, Any]:
+        return {
+            "pattern": "UNCLASSIFIED",
+            "pattern_family": "NONE",
+            "is_valid_pattern": False,
+            "leg_in": "NONE",
+            "leg_out": "NONE",
+            "base_quality": "STANDARD",
+            "base_candles": 1,
+            "base_start_idx": safe_idx,
+            "base_end_idx": safe_idx,
+            "base_low": 0.0,
+            "base_high": 0.0,
+            "base_width": 0.0,
+            "base_width_atr": 0.0,
+            "avg_body_ratio": 0.0,
+            "leg_in_atr": 0.0,
+            "leg_out_atr": 0.0,
+            "leg_out_to_base_ratio": 0.0,
+            "label": "OB",
+            "reason": reason,
+        }
+
+    try:
+        import numpy as _np
+
+        cfg = params if isinstance(params, dict) else {}
+        if not bool(cfg.get("enabled", True)):
+            return _fallback("disabled")
+
+        O = _np.asarray(opens, dtype=float)
+        H = _np.asarray(highs, dtype=float)
+        L = _np.asarray(lows, dtype=float)
+        C = _np.asarray(closes, dtype=float)
+        A = _np.asarray(atrs, dtype=float)
+        n = min(len(O), len(H), len(L), len(C), len(A))
+        if n < 4:
+            return _fallback("insufficient_bars")
+
+        end_cap = (n - 1) if max_eval_idx is None else min(n - 1, int(max_eval_idx))
+        a_idx = int(anchor_idx)
+        if a_idx < 0 or a_idx >= end_cap:
+            return _fallback("anchor_out_of_eval_window")
+
+        if not (
+            math.isfinite(float(O[a_idx]))
+            and math.isfinite(float(H[a_idx]))
+            and math.isfinite(float(L[a_idx]))
+            and math.isfinite(float(C[a_idx]))
+        ):
+            return _fallback("non_finite_anchor_ohlc")
+
+        want_bull = str(zone_direction or "").strip().upper() in ("DEMAND", "SUPPORT", "BULL", "BULLISH", "BUY")
+
+        raw_atr = float(A[a_idx]) if (math.isfinite(float(A[a_idx])) and float(A[a_idx]) > 0) else 0.0
+        if raw_atr <= 0.0:
+            finite_a = A[: end_cap + 1][_np.isfinite(A[: end_cap + 1]) & (A[: end_cap + 1] > 0)]
+            raw_atr = float(_np.mean(finite_a)) if len(finite_a) > 0 else 1.0
+        ref_atr = max(0.10, raw_atr)
+
+        max_base_bars = max(1, int(cfg.get("max_base_bars", 5)))
+        c_max_rng_atr = float(cfg.get("base_candle_max_range_atr", 1.15))
+        c_max_body_ratio = float(cfg.get("base_candle_max_body_ratio", 0.68))
+        tight_w_atr = float(cfg.get("tight_base_max_width_atr", 1.25))
+        mod_w_atr = float(cfg.get("moderate_base_max_width_atr", 2.10))
+        lookback_in = max(2, int(cfg.get("leg_in_lookback_bars", 8)))
+        min_in_atr = float(cfg.get("leg_in_min_move_atr", 0.75))
+        out_win = max(1, int(cfg.get("leg_out_window_bars", 8)))
+        min_out_atr = float(cfg.get("leg_out_min_move_atr", 1.10))
+        strong_ratio = float(cfg.get("strong_leg_out_to_base_ratio", 1.80))
+
+        def _is_pause_bar(idx_b: int) -> bool:
+            rng_b = float(H[idx_b] - L[idx_b])
+            if not math.isfinite(rng_b) or rng_b < 0.0:
+                return False
+            body_b = abs(float(C[idx_b] - O[idx_b]))
+            b_rat = body_b / max(rng_b, 1e-6)
+            loc_a = float(A[idx_b]) if (math.isfinite(float(A[idx_b])) and float(A[idx_b]) > 0) else ref_atr
+            return (rng_b <= c_max_rng_atr * loc_a) and (b_rat <= c_max_body_ratio or rng_b <= 0.65 * loc_a)
+
+        b_start = a_idx
+        b_end = a_idx
+        cur_lo = float(L[a_idx])
+        cur_hi = float(H[a_idx])
+        if cur_hi < cur_lo:
+            cur_lo, cur_hi = cur_hi, cur_lo
+
+        # Ekspansi Base ke kiri (maksimal menyisakan >= 1 bar untuk evaluasi Leg-In bila tersedia)
+        min_left_idx = max(1 if a_idx >= 1 else 0, a_idx - (max_base_bars - 1))
+        for x in range(a_idx - 1, min_left_idx - 1, -1):
+            if not _is_pause_bar(x):
+                break
+            x_lo, x_hi = float(L[x]), float(H[x])
+            if min(cur_hi, x_hi) < max(cur_lo, x_lo) - 0.25 * ref_atr:
+                break
+            prop_lo = min(cur_lo, x_lo)
+            prop_hi = max(cur_hi, x_hi)
+            if (prop_hi - prop_lo) > mod_w_atr * ref_atr:
+                break
+            b_start = x
+            cur_lo, cur_hi = prop_lo, prop_hi
+
+        # Ekspansi Base maksimal 1 bar ke kanan bila belum impuls keluar & masih menyisakan >= 1 bar Leg-Out
+        if (b_end - b_start + 1) < max_base_bars and (a_idx + 1) <= (end_cap - 1):
+            xr = a_idx + 1
+            if _is_pause_bar(xr):
+                xr_lo, xr_hi, xr_c = float(L[xr]), float(H[xr]), float(C[xr])
+                not_departed = (
+                    (xr_c <= cur_hi + 0.15 * ref_atr and xr_lo >= cur_lo - 0.10 * ref_atr)
+                    if want_bull
+                    else (xr_c >= cur_lo - 0.15 * ref_atr and xr_hi <= cur_hi + 0.10 * ref_atr)
+                )
+                prop_lo_r = min(cur_lo, xr_lo)
+                prop_hi_r = max(cur_hi, xr_hi)
+                if not_departed and (prop_hi_r - prop_lo_r) <= mod_w_atr * ref_atr:
+                    b_end = xr
+                    cur_lo, cur_hi = prop_lo_r, prop_hi_r
+
+        base_candles = int(b_end - b_start + 1)
+        base_width = max(0.0, cur_hi - cur_lo)
+        base_width_atr = base_width / ref_atr
+
+        body_ratios = []
+        for xb in range(b_start, b_end + 1):
+            r_xb = max(float(H[xb] - L[xb]), 1e-6)
+            body_ratios.append(abs(float(C[xb] - O[xb])) / r_xb)
+        avg_body_ratio = float(sum(body_ratios) / max(1, len(body_ratios)))
+
+        # Deteksi kongesti berkepanjangan / choppy di sekitar base
+        cong_start = max(0, b_start - (max_base_bars + 2))
+        trapped_bars = 0
+        for xc in range(cong_start, b_end + 1):
+            if float(L[xc]) >= cur_lo - 0.30 * ref_atr and float(H[xc]) <= cur_hi + 0.30 * ref_atr:
+                trapped_bars += 1
+        is_overextended_choppy = (trapped_bars > (max_base_bars + 1)) or (base_width_atr > mod_w_atr)
+
+        # Evaluasi Leg-In [in_start .. b_start - 1]
+        leg_in = "NONE"
+        leg_in_atr = 0.0
+        if b_start > 0:
+            in_start = max(0, b_start - lookback_in)
+            in_H = H[in_start:b_start]
+            in_L = L[in_start:b_start]
+            in_O = O[in_start:b_start]
+            in_C = C[in_start:b_start]
+            if len(in_H) > 0 and _np.isfinite(in_H).all() and _np.isfinite(in_L).all():
+                rel_max_i = int(_np.argmax(in_H))
+                rel_min_i = int(_np.argmin(in_L))
+                max_h_in = float(in_H[rel_max_i])
+                min_l_in = float(in_L[rel_min_i])
+                span_in = max(0.0, max_h_in - min_l_in)
+                entry_px = float(in_C[-1])
+                start_px = float(in_O[0])
+                drop_span_atr = max(0.0, max_h_in - cur_lo) / ref_atr
+                rally_span_atr = max(0.0, cur_hi - min_l_in) / ref_atr
+
+                if want_bull:
+                    shallow_pullback = (max_h_in - cur_lo) <= max(0.45 * span_in, 0.75 * ref_atr)
+                    if (
+                        rally_span_atr >= min_in_atr
+                        and shallow_pullback
+                        and (rel_min_i <= rel_max_i or entry_px > start_px + 0.30 * ref_atr)
+                    ):
+                        leg_in = "RALLY"
+                        leg_in_atr = rally_span_atr
+                    elif drop_span_atr >= min_in_atr and (
+                        rel_max_i <= rel_min_i
+                        or entry_px < start_px - 0.25 * ref_atr
+                        or (max_h_in - entry_px) >= 0.50 * max(1e-6, max_h_in - cur_lo)
+                    ):
+                        leg_in = "DROP"
+                        leg_in_atr = drop_span_atr
+                else:
+                    shallow_bounce = (cur_hi - min_l_in) <= max(0.45 * span_in, 0.75 * ref_atr)
+                    if (
+                        drop_span_atr >= min_in_atr
+                        and shallow_bounce
+                        and (rel_max_i <= rel_min_i or entry_px < start_px - 0.30 * ref_atr)
+                    ):
+                        leg_in = "DROP"
+                        leg_in_atr = drop_span_atr
+                    elif rally_span_atr >= min_in_atr and (
+                        rel_min_i <= rel_max_i
+                        or entry_px > start_px + 0.25 * ref_atr
+                        or (entry_px - min_l_in) >= 0.50 * max(1e-6, cur_hi - min_l_in)
+                    ):
+                        leg_in = "RALLY"
+                        leg_in_atr = rally_span_atr
+
+        # Evaluasi Leg-Out [b_end + 1 .. out_end] (dibatasi <= end_cap agar bebas look-ahead)
+        leg_out = "NONE"
+        leg_out_atr = 0.0
+        out_move = 0.0
+        out_end = min(end_cap, b_end + out_win)
+        if out_end >= b_end + 1:
+            out_H = H[b_end + 1 : out_end + 1]
+            out_L = L[b_end + 1 : out_end + 1]
+            out_C = C[b_end + 1 : out_end + 1]
+            if len(out_C) > 0 and _np.isfinite(out_H).all() and _np.isfinite(out_L).all() and _np.isfinite(out_C).all():
+                if want_bull:
+                    out_move = max(0.0, float(_np.max(out_H)) - cur_lo)
+                    leg_out_atr = out_move / ref_atr
+                    if (
+                        leg_out_atr >= min_out_atr
+                        and float(_np.max(out_C)) > cur_hi
+                        and float(_np.min(out_C)) >= cur_lo - 0.08 * ref_atr
+                    ):
+                        leg_out = "RALLY"
+                else:
+                    out_move = max(0.0, cur_hi - float(_np.min(out_L)))
+                    leg_out_atr = out_move / ref_atr
+                    if (
+                        leg_out_atr >= min_out_atr
+                        and float(_np.min(out_C)) < cur_lo
+                        and float(_np.max(out_C)) <= cur_hi + 0.08 * ref_atr
+                    ):
+                        leg_out = "DROP"
+
+        pattern = "UNCLASSIFIED"
+        pattern_family = "NONE"
+        if leg_in == "RALLY" and leg_out == "RALLY":
+            pattern, pattern_family = "RBR", "CONTINUATION"
+        elif leg_in == "DROP" and leg_out == "RALLY":
+            pattern, pattern_family = "DBR", "REVERSAL"
+        elif leg_in == "RALLY" and leg_out == "DROP":
+            pattern, pattern_family = "RBD", "REVERSAL"
+        elif leg_in == "DROP" and leg_out == "DROP":
+            pattern, pattern_family = "DBD", "CONTINUATION"
+
+        eff_base_w = max(base_width, 0.15 * ref_atr)
+        leg_out_ratio = out_move / eff_base_w
+        is_valid_pat = pattern in ("RBR", "DBR", "RBD", "DBD")
+
+        if is_overextended_choppy or (base_candles >= max_base_bars and leg_out_ratio < 1.15):
+            base_quality = "WIDE_CHOPPY"
+        elif is_valid_pat and base_candles <= 3 and base_width_atr <= tight_w_atr and leg_out_ratio >= strong_ratio:
+            base_quality = "TIGHT"
+        elif is_valid_pat and base_candles <= max_base_bars and base_width_atr <= mod_w_atr:
+            base_quality = "MODERATE"
+        else:
+            base_quality = "STANDARD"
+
+        label = f"{pattern} ({base_quality}, {base_candles}c)" if is_valid_pat else f"OB ({base_quality})"
+        reason = (
+            f"{pattern} [{pattern_family}] | Base {base_candles}c ({base_width_atr:.2f} ATR, {base_quality}) | "
+            f"LegIn {leg_in_atr:.2f} ATR -> LegOut {leg_out_atr:.2f} ATR ({leg_out_ratio:.2f}x base)"
+            if is_valid_pat
+            else f"Unclassified SND ({base_quality}, base={base_candles}c/{base_width_atr:.2f} ATR, out={leg_out_atr:.2f} ATR)"
+        )
+
+        return {
+            "pattern": pattern,
+            "pattern_family": pattern_family,
+            "is_valid_pattern": is_valid_pat,
+            "leg_in": leg_in,
+            "leg_out": leg_out,
+            "base_quality": base_quality,
+            "base_candles": base_candles,
+            "base_start_idx": int(b_start),
+            "base_end_idx": int(b_end),
+            "base_low": round(cur_lo, 2),
+            "base_high": round(cur_hi, 2),
+            "base_width": round(base_width, 2),
+            "base_width_atr": round(base_width_atr, 3),
+            "avg_body_ratio": round(avg_body_ratio, 3),
+            "leg_in_atr": round(leg_in_atr, 2),
+            "leg_out_atr": round(leg_out_atr, 2),
+            "leg_out_to_base_ratio": round(leg_out_ratio, 2),
+            "label": label,
+            "reason": reason,
+        }
+    except Exception as exc:
+        return _fallback(f"eval_error:{type(exc).__name__}")
+

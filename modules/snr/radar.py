@@ -233,6 +233,8 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
             "score": s1.get("score_int") if s1 else 0,
             "strength": s1.get("strength_short") if s1 else "N/A",
             "distance_points": s1.get("distance_points") if s1 else None,
+            "touch_count": s1.get("touch_count") if s1 else 0,
+            "lifecycle_event": s1.get("lifecycle_event") if s1 else None,
             "state": s1_state,
             "price_inside": bool(s1 and cp > 0 and safe_float(s1.get("low")) <= cp <= safe_float(s1.get("high"))),
         },
@@ -245,6 +247,8 @@ def evaluate_snr_radar(ranked_zones, decision, price_action=None, current_price=
             "score": r1.get("score_int") if r1 else 0,
             "strength": r1.get("strength_short") if r1 else "N/A",
             "distance_points": r1.get("distance_points") if r1 else None,
+            "touch_count": r1.get("touch_count") if r1 else 0,
+            "lifecycle_event": r1.get("lifecycle_event") if r1 else None,
             "state": r1_state,
             "price_inside": bool(r1 and cp > 0 and safe_float(r1.get("low")) <= cp <= safe_float(r1.get("high"))),
         },
@@ -614,26 +618,73 @@ class SnrAlertTracker:
                     else:
                         _emit(f"[SNR] RETEST FAILED{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
 
-        # 5. Alert Interaksi S1 & R1 (Approaching / Touch — abaikan penuh bila zona sudah ketembus SL / invalid)
+        # 5. Alert Interaksi S1 & R1 (Approaching / Touch — histeresis pinggir zona + abaikan bila SL_BREACHED / invalid)
+        import time as _tm_rad
+        from modules.config import SNR_LIVE_ALERT_COOLDOWN_SECONDS, SNR_LIVE_EXIT_HYSTERESIS_USD
         from modules.utils import is_zone_sl_breached_or_invalidated
         s1_invalid_sl = bool(s1 and is_zone_sl_breached_or_invalidated(s1, default_source="SNR"))
         r1_invalid_sl = bool(r1 and is_zone_sl_breached_or_invalidated(r1, default_source="SNR"))
+        _exit_hyst_r = max(0.0, float(SNR_LIVE_EXIT_HYSTERESIS_USD or 1.20))
+        _ia_cd = max(0.0, float(SNR_LIVE_ALERT_COOLDOWN_SECONDS or 180.0))
+        _ia_hist = getattr(self, "_interaction_alert_ts", None)
+        if _ia_hist is None:
+            _ia_hist = {}
+            self._interaction_alert_ts = _ia_hist
+        _now_rad_m = _tm_rad.monotonic()
+
+        # Histeresis keluar zona: bila siklus sebelumnya harga sudah di dalam S1/R1 yang sama dan baru bergeser tipis <= histeresis,
+        # pertahankan state TOUCH/inside agar osilasi di bibir zona tidak memicu flip TOUCH <-> RECENT_TOUCH berulang.
+        if (
+            not s1_invalid_sl
+            and curr_state["s1_id"]
+            and curr_state["s1_id"] == self.last_state.get("s1_id")
+            and self.last_state.get("s1_inside")
+            and not curr_state["s1_inside"]
+            and s1.get("distance_points") is not None
+            and safe_float(s1.get("distance_points"), 999.0) <= _exit_hyst_r
+            and curr_state["s1_state"] in ("TOUCH", "RECENT_TOUCH", "APPROACHING")
+        ):
+            curr_state["s1_inside"] = True
+            curr_state["s1_state"] = "TOUCH"
+
+        if (
+            not r1_invalid_sl
+            and curr_state["r1_id"]
+            and curr_state["r1_id"] == self.last_state.get("r1_id")
+            and self.last_state.get("r1_inside")
+            and not curr_state["r1_inside"]
+            and r1.get("distance_points") is not None
+            and safe_float(r1.get("distance_points"), 999.0) <= _exit_hyst_r
+            and curr_state["r1_state"] in ("TOUCH", "RECENT_TOUCH", "APPROACHING")
+        ):
+            curr_state["r1_inside"] = True
+            curr_state["r1_state"] = "TOUCH"
+
+        def _allow_ia(zid_ia, st_ia, inside_ia):
+            if not zid_ia:
+                return True
+            k_ia = (str(zid_ia), str(st_ia), bool(inside_ia))
+            prev_t_ia = _ia_hist.get(k_ia)
+            if prev_t_ia is not None and (_now_rad_m - prev_t_ia) < _ia_cd:
+                return False
+            _ia_hist[k_ia] = _now_rad_m
+            return True
 
         if (not s1_invalid_sl) and (curr_state["s1_state"], curr_state["s1_id"], curr_state["s1_inside"]) != (
             self.last_state.get("s1_state"), self.last_state.get("s1_id"), self.last_state.get("s1_inside")
         ):
             s1_lbl = f"S1 {s1['low']:.2f}-{s1['high']:.2f}" if s1.get("low") is not None else None
             s1_retouch = int(safe_float(s1.get("touch_count"), 0)) >= 1 or str(s1.get("lifecycle_event") or "").upper() in ("TOUCHED", "SWEEP")
-            if curr_state["s1_state"] == "TOUCH" and s1.get("low") is not None:
+            if curr_state["s1_state"] == "TOUCH" and s1.get("low") is not None and _allow_ia(s1.get("zone_id"), "TOUCH", curr_state["s1_inside"]):
                 label = (
                     ("HARGA DISENTUH KEMBALI SUPPORT S1" if s1_retouch else "HARGA DI SUPPORT S1")
-                    if s1.get("price_inside")
+                    if curr_state["s1_inside"]
                     else "HARGA DEKAT SUPPORT S1"
                 )
                 _emit(f"[SNR] {label} ({s1['low']:.2f}-{s1['high']:.2f})", category="MARKET_ALERT", zone_id=s1.get("zone_id"), zone_label=s1_lbl)
-            elif curr_state["s1_state"] == "RECENT_TOUCH" and s1.get("low") is not None:
+            elif curr_state["s1_state"] == "RECENT_TOUCH" and s1.get("low") is not None and _allow_ia(s1.get("zone_id"), "RECENT_TOUCH", False):
                 _emit(f"[SNR] SUPPORT S1 DISENTUH M5; HARGA DI LUAR ZONA ({s1['low']:.2f}-{s1['high']:.2f})", category="MARKET_ALERT", zone_id=s1.get("zone_id"), zone_label=s1_lbl)
-            elif curr_state["s1_state"] == "APPROACHING" and s1.get("low") is not None:
+            elif curr_state["s1_state"] == "APPROACHING" and s1.get("low") is not None and _allow_ia(s1.get("zone_id"), "APPROACHING", False):
                 _emit(f"[SNR] HARGA DEKAT SUPPORT S1 ({s1['low']:.2f}-{s1['high']:.2f})", category="MARKET_ALERT", zone_id=s1.get("zone_id"), zone_label=s1_lbl)
 
         if (not r1_invalid_sl) and (curr_state["r1_state"], curr_state["r1_id"], curr_state["r1_inside"]) != (
@@ -641,16 +692,16 @@ class SnrAlertTracker:
         ):
             r1_lbl = f"R1 {r1['low']:.2f}-{r1['high']:.2f}" if r1.get("low") is not None else None
             r1_retouch = int(safe_float(r1.get("touch_count"), 0)) >= 1 or str(r1.get("lifecycle_event") or "").upper() in ("TOUCHED", "SWEEP")
-            if curr_state["r1_state"] == "TOUCH" and r1.get("low") is not None:
+            if curr_state["r1_state"] == "TOUCH" and r1.get("low") is not None and _allow_ia(r1.get("zone_id"), "TOUCH", curr_state["r1_inside"]):
                 label = (
                     ("HARGA DISENTUH KEMBALI RESISTANCE R1" if r1_retouch else "HARGA DI RESISTANCE R1")
-                    if r1.get("price_inside")
+                    if curr_state["r1_inside"]
                     else "HARGA DEKAT RESISTANCE R1"
                 )
                 _emit(f"[SNR] {label} ({r1['low']:.2f}-{r1['high']:.2f})", category="MARKET_ALERT", zone_id=r1.get("zone_id"), zone_label=r1_lbl)
-            elif curr_state["r1_state"] == "RECENT_TOUCH" and r1.get("low") is not None:
+            elif curr_state["r1_state"] == "RECENT_TOUCH" and r1.get("low") is not None and _allow_ia(r1.get("zone_id"), "RECENT_TOUCH", False):
                 _emit(f"[SNR] RESISTANCE R1 DISENTUH M5; HARGA DI LUAR ZONA ({r1['low']:.2f}-{r1['high']:.2f})", category="MARKET_ALERT", zone_id=r1.get("zone_id"), zone_label=r1_lbl)
-            elif curr_state["r1_state"] == "APPROACHING" and r1.get("low") is not None:
+            elif curr_state["r1_state"] == "APPROACHING" and r1.get("low") is not None and _allow_ia(r1.get("zone_id"), "APPROACHING", False):
                 _emit(f"[SNR] HARGA DEKAT RESISTANCE R1 ({r1['low']:.2f}-{r1['high']:.2f})", category="MARKET_ALERT", zone_id=r1.get("zone_id"), zone_label=r1_lbl)
 
         # 6. Alert Transisi Lifecycle Zona (Pending Break / Broken / Reclaim Pending / Reclaimed / Invalidated)

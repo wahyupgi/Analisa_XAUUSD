@@ -483,7 +483,11 @@ class AutoExecutionMonitor:
                         zone_quality=str(ev_item.get("zone_quality") or ""),
                         zone_timeframe=str((ev_item.get("zone") or {}).get("timeframe") or ""),
                         trigger_name=str((ev_item.get("triggers") or {}).get("primary_trigger") or ""),
-                        extra={"is_scale_in": True} if ev_item.get("is_scale_in") else None,
+                        extra={
+                            "zone_low": float((ev_item.get("zone") or {}).get("price_low") or (ev_item.get("trade_plan") or {}).get("zone_low") or 0.0),
+                            "zone_high": float((ev_item.get("zone") or {}).get("price_high") or (ev_item.get("trade_plan") or {}).get("zone_high") or 0.0),
+                            **({"is_scale_in": True} if ev_item.get("is_scale_in") else {}),
+                        },
                     )
 
             def _apply_exec_outcome(ev_item: Dict[str, Any], out_res: Dict[str, Any]) -> None:

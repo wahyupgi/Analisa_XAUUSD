@@ -753,6 +753,34 @@ def compute_midzone_scalp_levels(
     }
 
 
+def _amd_early_pending_hold(
+    zone: Zone,
+    df_m5_closed: Optional[pd.DataFrame],
+    conf: Dict[str, Any],
+    frames: Optional[Dict[str, pd.DataFrame]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Guard Session + PO3/AMD khusus EARLY_PENDING & blind loose entry tanpa trigger M5.
+    Mengembalikan dict hold (reason_code, reason, relation) atau None. Indikator opsional: data kosong/error => None.
+    """
+    try:
+        from modules.config import SERVER_UTC_OFFSET_JAM, get_amd_config
+        from modules.session_amd_engine import analyze_session_amd, evaluate_zone_amd_alignment
+        amd_cfg = dict(get_amd_config())
+        amd_cfg.update({k: v for k, v in (conf or {}).items() if str(k).startswith("AMD_")})
+        if not (amd_cfg.get("AMD_ENGINE_ENABLED", True) and amd_cfg.get("AMD_EARLY_PENDING_GUARD_ENABLED", True)):
+            return None
+        srv_off = float(conf.get("SERVER_UTC_OFFSET_JAM", SERVER_UTC_OFFSET_JAM) or 0.0)
+        amd = analyze_session_amd(df_m5_closed, cfg=amd_cfg, frames=frames, server_offset_hours=srv_off)
+        rel = evaluate_zone_amd_alignment(amd, zone.zone_type, zone.price_low, zone.price_high, cfg=amd_cfg)
+        if rel.get("hold_early_pending"):
+            return {"reason_code": rel["reason_code"], "reason": rel["reason"], "relation": rel["relation"],
+                    "phase": amd.get("phase"), "bias": amd.get("bias")}
+    except Exception:
+        return None
+    return None
+
+
 def evaluate_entry_paths_for_zone(
     zone_in: Any,
     frames: Optional[Dict[str, pd.DataFrame]],
@@ -802,6 +830,18 @@ def evaluate_entry_paths_for_zone(
     early_en = bool(conf.get("EARLY_PENDING_ENABLED", True))
     wait_confirm_only = bool(force_market_confirmation or is_grade_a_wait_confirm_zone(zone, cfg=conf))
 
+    # Guard Session + PO3/AMD: menahan EARLY_PENDING (pra-sentuh) & entry buta tanpa trigger M5 saat fase berlawanan / likuiditas terbuka.
+    # Ketika zona sudah tersentuh dan muncul minimal 1 trigger M5 valid (ADAPTIVE_ENTRY / CONFIRMED_ENTRY), eksekusi tetap langsung jalan!
+    amd_hold: Optional[Dict[str, Any]] = None
+    if (
+        (early_en or bool(conf.get("AUTO_LOOSE_MODE", False)))
+        and (not wait_confirm_only)
+        and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY")
+        and (not triggers.get("any_valid"))
+        and (not triggers.get("confirmed_valid"))
+    ):
+        amd_hold = _amd_early_pending_hold(zone, df_m5_closed, conf, frames=frames)
+
     # Kasus 0: Market sedang Konflik / Sideways (HTF_CONFLICT) & mode Mid-Zone 50% Limit diaktifkan ->
     # Pasang BUY/SELL LIMIT presisi tepat di tengah-tengah zona (50%) dengan SL & TP tipis di luar ujung zona!
     # (Zona Grade A / A+ / 80+ / 90+ dikecualikan agar menunggu harga menjemput + konfirmasi M5 untuk lot 0.02/0.03)
@@ -809,6 +849,7 @@ def evaluate_entry_paths_for_zone(
         bool(conf.get("CONFLICT_MIDZONE_LIMIT_ENABLED", False))
         and (not wait_confirm_only)
         and early_en
+        and (amd_hold is None)
         and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY")
         and is_conflict_or_sideways_market(
             direction=direction,
@@ -888,7 +929,7 @@ def evaluate_entry_paths_for_zone(
                     },
                 }
 
-    from modules.config import compute_zone_limit_entry_price, resolve_zone_limit_depth
+    from modules.config import compute_zone_limit_entry_price, is_scale_in_80plus_zone, resolve_zone_limit_depth
     eff_limit_depth = resolve_zone_limit_depth(zone=zone, cfg=conf)
     zone_limit_px = compute_zone_limit_entry_price(
         zone.price_low,
@@ -906,11 +947,20 @@ def evaluate_entry_paths_for_zone(
         or ((not demand) and zone_limit_px > ref_mkt_live + min_lim_gap)
     )
     loose_mode_active = bool(conf.get("AUTO_LOOSE_MODE", False))
+    is_two_stage_zone = bool((not force_market_confirmation) and is_scale_in_80plus_zone(zone, cfg=conf))
+    can_rearm_limit_outside_zone = bool(
+        (loose_mode_active or is_two_stage_zone)
+        and (not touch["live_inside"])
+        and touch["left_entry_range"]
+        and int(getattr(zone, "touch_count", 0) or 0) <= 1
+        and limit_still_ahead
+    )
     defer_loose_edge_to_limit = (
-        loose_mode_active
+        (loose_mode_active or is_two_stage_zone)
         and (not wait_confirm_only)
+        and (amd_hold is None)
         and touch["touched"]
-        and (not touch["left_entry_range"])
+        and ((not touch["left_entry_range"]) or can_rearm_limit_outside_zone)
         and early_en
         and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY")
         and (not triggers["any_valid"])
@@ -965,10 +1015,10 @@ def evaluate_entry_paths_for_zone(
                 chosen_mode = "CONFIRMED_ENTRY"
             else:
                 # LOOSE MODE: hanya eksekusi market tanpa trigger M5 bila harga sudah masuk minimal sedalam target limit zona
-                # KECUALI pada zona Grade A / A+ / 80+ / 90+ (`wait_confirm_only`), WAJIB menunggu konfirmasi M5 close!
+                # KECUALI pada zona Grade A / A+ / 80+ / 90+ (`wait_confirm_only`) atau saat `amd_hold` aktif, WAJIB menunggu konfirmasi M5 close!
                 min_in_px = zone_limit_px
                 deep_enough = (touch["exec_price"] <= min_in_px + 1e-6) if demand else (touch["exec_price"] >= min_in_px - 1e-6)
-                trig_ok = bool(loose_mode_active and deep_enough and (not wait_confirm_only))
+                trig_ok = bool(loose_mode_active and deep_enough and (not wait_confirm_only) and (amd_hold is None))
                 chosen_mode = "ADAPTIVE_ENTRY" if adaptive_en else "CONFIRMED_ENTRY"
 
         return {
@@ -979,7 +1029,12 @@ def evaluate_entry_paths_for_zone(
             "touch": touch,
             "triggers": triggers,
             "trigger_passed": trig_ok,
-            "reason_code": REASON_OK if trig_ok else REASON_WAIT_TRIGGER,
+            "amd_guard": amd_hold if not trig_ok else None,
+            "reason_code": (
+                REASON_OK
+                if trig_ok
+                else (amd_hold["reason_code"] if amd_hold else REASON_WAIT_TRIGGER)
+            ),
             "reason_text": (
                 f"Trigger {triggers['primary_trigger']} terkonfirmasi"
                 if (trig_ok and triggers["any_valid"])
@@ -987,9 +1042,13 @@ def evaluate_entry_paths_for_zone(
                     f"LOOSE MODE: Harga masuk area tengah zona ({touch['exec_price']:.2f})"
                     if trig_ok
                     else (
-                        f"Zona Grade {zone.grade or 'A'} ({zone.score:.1f}) tersentuh — menunggu minimal 1 konfirmasi M5 close untuk eksekusi {chosen_mode}"
-                        if wait_confirm_only
-                        else f"Zona tersentuh; menunggu minimal 1 trigger {chosen_mode} valid pada M5 close"
+                        amd_hold["reason"]
+                        if amd_hold
+                        else (
+                            f"Zona Grade {zone.grade or 'A'} ({zone.score:.1f}) tersentuh — menunggu minimal 1 konfirmasi M5 close untuk eksekusi {chosen_mode}"
+                            if wait_confirm_only
+                            else f"Zona tersentuh; menunggu minimal 1 trigger {chosen_mode} valid pada M5 close"
+                        )
                     )
                 )
             ),
@@ -998,7 +1057,7 @@ def evaluate_entry_paths_for_zone(
 
     # Kasus 2: Harga belum menyentuh area tengah zona -> Evaluasi EARLY_PENDING (BUY LIMIT / SELL LIMIT di area tengah zona)
     # Zona Grade A / A+ / 80+ / 90+ (`wait_confirm_only`) melewati Order Limit agar menunggu harga menjemput + konfirmasi M5!
-    if early_en and (not wait_confirm_only) and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY"):
+    if early_en and (not wait_confirm_only) and (amd_hold is None) and pref_u not in ("CONFIRMED", "CONFIRMED_ENTRY"):
         pending_plan = plan_pending_order(
             zone,
             current_price=current_price,
@@ -1012,9 +1071,15 @@ def evaluate_entry_paths_for_zone(
             opposing_zones=opposing_zones,
             snr_context=snr_context,
         )
-        # Validasi tambahan: zona harus fresh (touch_count == 0 / FRESH) & Grade A (>=75) untuk EARLY_PENDING
+        # Validasi tambahan: zona harus fresh (touch_count == 0 / FRESH, atau <= 1x test pada zona 2-Tahap Grade A/80+) & Grade A (>=75) untuk EARLY_PENDING
         loose_ep = loose_mode_active
-        is_fresh_zone = loose_ep or (str(zone.freshness or "FRESH").upper() == "FRESH" and int(zone.touch_count or 0) == 0)
+        z_fresh_u = str(zone.freshness or "FRESH").upper()
+        z_touch_cnt = int(zone.touch_count or 0)
+        is_fresh_zone = (
+            loose_ep
+            or (z_fresh_u == "FRESH" and z_touch_cnt == 0)
+            or (is_two_stage_zone and z_fresh_u in ("FRESH", "TESTED_1X") and z_touch_cnt <= 1)
+        )
         ep_min_score = float(conf.get("EARLY_PENDING_MIN_SCORE", 75.0))
         score_ok_ep = loose_ep or (float(getattr(zone, "score", 0.0) or 0.0) >= ep_min_score)
         tp1_mode_ep = str(conf.get("TP1_MODE", "FIXED_RR")).upper()
@@ -1148,8 +1213,12 @@ def evaluate_entry_paths_for_zone(
         "touch": touch,
         "triggers": triggers,
         "trigger_passed": False,
-        "reason_code": REASON_ZONE_TOO_FAR if is_far_z else REASON_WAIT_ZONE_TOUCH,
-        "reason_text": (
+        "reason_code": (
+            amd_hold["reason_code"] if amd_hold
+            else (REASON_ZONE_TOO_FAR if is_far_z else REASON_WAIT_ZONE_TOUCH)
+        ),
+        "amd_guard": amd_hold,
+        "reason_text": amd_hold["reason"] if amd_hold else (
             f"Zona Grade {zone.grade or 'A'} ({zone.score:.1f}) tanpa Order Limit — menunggu harga menjemput zona "
             f"{zone.price_low:.2f}-{zone.price_high:.2f} + konfirmasi M5"
             if (wait_confirm_only and not is_far_z)

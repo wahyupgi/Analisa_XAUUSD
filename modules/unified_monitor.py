@@ -2570,7 +2570,7 @@ def _is_snr_touch_or_exit_alert(msg, active_is_smc=False):
     if any(tok in up for tok in (
         "HARGA DI SUPPORT", "HARGA DEKAT SUPPORT",
         "HARGA DI RESISTANCE", "HARGA DEKAT RESISTANCE",
-        "HARGA DI ZONA", "HARGA SENTUH", "HARGA KELUAR", "HARGA MENINGGALKAN",
+        "HARGA DI ZONA", "HARGA SENTUH", "HARGA DISENTUH", "HARGA KELUAR", "HARGA MENINGGALKAN",
         "HARGA DI LUAR ZONA", "DISENTUH M5; HARGA DI LUAR ZONA",
     )):
         return True
@@ -3478,6 +3478,37 @@ class UnifiedMonitor:
         gold_news_summary = str(news_eval.get("gold_news_summary") or "").strip()
         news_alerts = list(news_eval.get("alerts") or [])
 
+        session_amd_res = {}
+        session_amd_summary = ""
+        try:
+            from modules.config import SERVER_UTC_OFFSET_JAM
+            from modules.session_amd_engine import analyze_session_amd, format_session_amd
+            from modules.utils import deteksi_offset
+            _fr_amd = (shared_snap or {}).get("frames") if isinstance(shared_snap, dict) else None
+            if isinstance(_fr_amd, dict) and (_fr_amd.get("M5") is not None or _fr_amd.get("M15") is not None):
+                _srv_off_u = float(
+                    SERVER_UTC_OFFSET_JAM
+                    if SERVER_UTC_OFFSET_JAM is not None
+                    else (
+                        deteksi_offset(shared_snap.get("tick"), _fr_amd.get("M5"))
+                        if isinstance(shared_snap, dict) and shared_snap.get("live") and shared_snap.get("tick") is not None
+                        else 0.0
+                    )
+                )
+                session_amd_res = analyze_session_amd(_fr_amd.get("M5"), frames=_fr_amd, server_offset_hours=_srv_off_u)
+                if session_amd_res.get("available"):
+                    session_amd_summary = format_session_amd(session_amd_res, detailed=False).replace("SESI & AMD: ", "", 1)
+                    _lv_amd = session_amd_res.get("levels") or []
+                    if _lv_amd:
+                        _lv_short = " ".join(
+                            f"{x['name'].replace(' High', 'H').replace(' Low', 'L')}:{x['price']:.2f}[{x['status'][0]}]"
+                            for x in _lv_amd
+                        )
+                        session_amd_summary = f"{session_amd_summary} | {_lv_short}"
+        except Exception:
+            session_amd_res = {}
+            session_amd_summary = ""
+
         price_txt = f"{price_disp:.2f}" if price_disp > 0 else "DATA UNAVAILABLE"
         report_lines = [
             "====================================================",
@@ -3487,6 +3518,7 @@ class UnifiedMonitor:
             f"SNAPSHOT ID : {snap_id_disp} | SAME={same_snap_disp} | DIFF={format_price_distance(p_diff_disp, spec=_u_cyc)}",
             f"FRESHNESS   : SMC={fresh_smc_disp} | SNR={fresh_snr_disp}",
             news_summary,
+            *([f"SESSION/AMD : {session_amd_summary}"] if session_amd_summary else []),
         ]
         if gold_news_summary:
             report_lines.append(gold_news_summary)
@@ -3569,6 +3601,8 @@ class UnifiedMonitor:
             "news_alerts": news_alerts,
             "news_summary": news_summary,
             "gold_news_summary": gold_news_summary,
+            "session_amd": session_amd_res,
+            "session_amd_summary": session_amd_summary,
             "risk_warnings": acc_res.get("risk_warnings") or [],
             "state_changed": False,
             "refresh_required": bool(
@@ -3668,11 +3702,24 @@ class UnifiedMonitor:
             and price_disp > 0
         )
         if live_snr_trackable:
+            from modules.utils import is_zone_sl_breached_or_invalidated
             prev_snr_live = self.last_snr_live_zone_state
-            s_lo_live = safe_float(snr_zone_obj.get("low", snr_zone_obj.get("price_low")), 0.0)
-            s_hi_live = safe_float(snr_zone_obj.get("high", snr_zone_obj.get("price_high")), 0.0)
-            s_lbl_live = str(snr_zone_obj.get("rank_label") or snr_zone_obj.get("zone_type") or "SNR").strip()
-            s_zid_live = str(snr_zone_obj.get("zone_id") or (f"{s_lbl_live}:{s_lo_live:.2f}-{s_hi_live:.2f}" if s_lo_live > 0 else "NONE"))
+            snr_live_invalid = (
+                not isinstance(snr_zone_obj, dict)
+                or not snr_zone_obj
+                or is_zone_sl_breached_or_invalidated(snr_zone_obj, default_source="SNR")
+            )
+            s_lo_live = 0.0 if snr_live_invalid else safe_float(snr_zone_obj.get("low", snr_zone_obj.get("price_low")), 0.0)
+            s_hi_live = 0.0 if snr_live_invalid else safe_float(snr_zone_obj.get("high", snr_zone_obj.get("price_high")), 0.0)
+            s_lbl_live = "" if snr_live_invalid else str(snr_zone_obj.get("rank_label") or snr_zone_obj.get("zone_type") or "SNR").strip()
+            s_zid_live = "NONE" if snr_live_invalid else str(snr_zone_obj.get("zone_id") or (f"{s_lbl_live}:{s_lo_live:.2f}-{s_hi_live:.2f}" if s_lo_live > 0 else "NONE"))
+
+            # Jangan pernah tampilkan alert sentuh/keluar pada zona SNR yang sudah ketembus SL / invalid
+            if snr_live_invalid and inline_alerts:
+                inline_alerts = [
+                    ial for ial in inline_alerts
+                    if not any(tok in str(ial).upper() for tok in ("HARGA SENTUH", "HARGA DI ", "HARGA DEKAT ", "DISENTUH", "HARGA KELUAR"))
+                ]
 
             # Deduplikasi echo antara tick-level event dan full-refresh alert untuk zona & arah transisi yang sama
             if inline_alerts:
@@ -3680,7 +3727,7 @@ class UnifiedMonitor:
                 for ial in inline_alerts:
                     ial_up = str(ial).upper()
                     ev_kind = "EXIT" if ("DI LUAR ZONA" in ial_up or "KELUAR" in ial_up) else (
-                        "TOUCH" if ("HARGA DI " in ial_up or "HARGA SENTUH" in ial_up) else None
+                        "TOUCH" if ("HARGA DI " in ial_up or "HARGA SENTUH" in ial_up or "DISENTUH" in ial_up) else None
                     )
                     if ev_kind and self.last_snr_inline_event == (s_zid_live, ev_kind):
                         continue
@@ -3693,14 +3740,15 @@ class UnifiedMonitor:
                 "KELUAR" in str(x).upper() or "DI LUAR ZONA" in str(x).upper() for x in inline_alerts
             )
             has_inline_touch = any(
-                "HARGA DI " in str(x).upper() or "HARGA SENTUH" in str(x).upper()
+                "HARGA DI " in str(x).upper() or "HARGA SENTUH" in str(x).upper() or "DISENTUH" in str(x).upper()
                 for x in (inline_alerts + material_alerts)
             )
 
             # Event KELUAR hanya sah untuk zona yang SAMA dengan fokus SNR saat ini; bila fokus berganti, state lama
             # dibuang tanpa event (cegah "zona palsu" dari zona transien yang tidak tampil di panel).
             if (
-                prev_snr_live and prev_snr_live.get("inside")
+                not snr_live_invalid
+                and prev_snr_live and prev_snr_live.get("inside")
                 and prev_snr_live.get("zone_id") == s_zid_live
             ):
                 p_lo_l, p_hi_l = prev_snr_live["low"], prev_snr_live["high"]
@@ -3712,18 +3760,31 @@ class UnifiedMonitor:
                         )
                         self.last_snr_inline_event = exit_key
 
-            if s_lo_live > 0 and s_hi_live >= s_lo_live:
+            if not snr_live_invalid and s_lo_live > 0 and s_hi_live >= s_lo_live:
+                seen_touches = getattr(self, "_seen_snr_touch_zone_ids", None)
+                if seen_touches is None:
+                    seen_touches = set()
+                    self._seen_snr_touch_zone_ids = seen_touches
                 now_inside_snr = (s_lo_live <= price_disp <= s_hi_live)
                 was_same_inside = bool(
                     prev_snr_live and prev_snr_live.get("zone_id") == s_zid_live and prev_snr_live.get("inside")
                 )
-                if now_inside_snr and not was_same_inside and self.cycle_count > 1:
+                already_touched_before = bool(
+                    s_zid_live in seen_touches
+                    or int(safe_float(snr_zone_obj.get("touch_count"), 0)) >= 1
+                    or str(snr_zone_obj.get("lifecycle_event") or "").upper() in ("TOUCHED", "SWEEP")
+                )
+                if now_inside_snr and self.cycle_count <= 1:
+                    seen_touches.add(s_zid_live)
+                elif now_inside_snr and not was_same_inside and self.cycle_count > 1:
                     touch_key = (s_zid_live, "TOUCH")
                     if not has_inline_touch and self.last_snr_inline_event != touch_key:
+                        touch_verb = "HARGA DISENTUH KEMBALI" if already_touched_before else "HARGA SENTUH"
                         inline_alerts.append(
-                            f"[SNR] HARGA SENTUH {s_lbl_live} ({s_lo_live:.2f}-{s_hi_live:.2f}) | {price_disp:.2f}"
+                            f"[SNR] {touch_verb} {s_lbl_live} ({s_lo_live:.2f}-{s_hi_live:.2f}) | {price_disp:.2f}"
                         )
                         self.last_snr_inline_event = touch_key
+                    seen_touches.add(s_zid_live)
                 self.last_snr_live_zone_state = {
                     "zone_id": s_zid_live,
                     "label": s_lbl_live,
@@ -3929,6 +3990,24 @@ class UnifiedMonitor:
                     self._event_state_dedup[("SNR", "BREAKOUT_WATCH")] = bo_watch_ev
                 else:
                     _register_event("SNR", "BREAKOUT_WATCH", bo_watch_ev, f"{_hist_tag}BREAKOUT: {bo_watch_ev}")
+
+            # 4b. Perubahan Fase PO3 / AMD berbasis harga aktual (skip baseline awal di siklus #1)
+            if isinstance(session_amd_res, dict) and session_amd_res.get("available"):
+                _amd_sig_ev = (
+                    str(session_amd_res.get("phase") or ""),
+                    str(session_amd_res.get("bias") or ""),
+                    str(session_amd_res.get("reference") or ""),
+                )
+                if self.cycle_count <= 1:
+                    self._event_state_dedup[("AMD", "PHASE")] = _amd_sig_ev
+                elif _amd_sig_ev[0] and _amd_sig_ev[0] != "NO_CLEAR_AMD":
+                    _b_lbl = f" ({_amd_sig_ev[1]})" if _amd_sig_ev[1] in ("BULLISH", "BEARISH") else ""
+                    _register_event(
+                        "AMD",
+                        "PHASE",
+                        _amd_sig_ev,
+                        f"PO3/AMD: {_amd_sig_ev[0]}{_b_lbl} pada {_amd_sig_ev[2]}",
+                    )
 
         # 5. Material & inline alerts terdeduplikasi (skip pesan risk panjang yang sudah ditangani grup RISK;
         # saat MARKET CLOSED jangan memicu event konfirmasi/touch/breakout baru dari data historis)

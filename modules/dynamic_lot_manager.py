@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from modules.config import SYMBOL, get_auto_trading_config, is_grade_a_wait_confirm_zone
+from modules.config import SYMBOL, get_auto_trading_config, is_grade_a_wait_confirm_zone, is_scale_in_80plus_zone
 from modules.execution_state import (
     REASON_INSUFFICIENT_MARGIN,
     REASON_INVALID_VOLUME,
@@ -141,7 +141,7 @@ def classify_zone_quality_label(zone: Any, strong_zone_validated: bool = False, 
         return "LOW_QUALITY"
     if score >= str_s and strong_zone_validated:
         return "STRONG"
-    if score >= med_s or is_grade_a_wait_confirm_zone(zone, cfg=conf):
+    if score >= med_s or is_grade_a_wait_confirm_zone(zone, cfg=conf) or is_scale_in_80plus_zone(zone, cfg=conf):
         return "MEDIUM"
     return "STANDARD"
 
@@ -195,7 +195,7 @@ def select_target_lot(
 
     if score >= strong_score and has_htf_sd and strong_zone_validated and not is_ltf_only_zone(zone):
         target = min(lot_str, htf_max)
-    elif score >= med_score or is_grade_a_wait_confirm_zone(zone, cfg=conf):
+    elif score >= med_score or is_grade_a_wait_confirm_zone(zone, cfg=conf) or is_scale_in_80plus_zone(zone, cfg=conf):
         target = lot_med
     else:
         target = lot_std

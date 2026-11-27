@@ -377,9 +377,27 @@ class AutoExecutionMonitor:
                     del _seen[_zid]
             for _zid in _present:
                 _seen.setdefault(_zid, _now_m)
+            _snr_dec_d = (eff_snr or {}).get("decision") if isinstance(eff_snr, dict) else {}
+            _locked_snr_Ids = set()
+            _tz_id = str(((_snr_dec_d or {}).get("target_zone") or {}).get("zone_id") or "")
+            if _tz_id:
+                _locked_snr_Ids.add(_tz_id)
+            try:
+                from modules.config import read_shared_zone_state
+                _ztrk = read_shared_zone_state()
+                for _fk in ("SNR", "UNIFIED"):
+                    _fz = (((_ztrk or {}).get("decision_tracker") or {}).get("focus") or {}).get(_fk) or ((_ztrk or {}).get("focus") or {}).get(_fk)
+                    if isinstance(_fz, dict) and _fz.get("zone_id"):
+                        _locked_snr_Ids.add(str(_fz["zone_id"]))
+                _sf = (_ztrk or {}).get("snr_focus_state")
+                if isinstance(_sf, dict) and _sf.get("zone_id"):
+                    _locked_snr_Ids.add(str(_sf["zone_id"]))
+            except Exception:
+                pass
             candidates = [
                 c for c in candidates
                 if str(c.get("source") or "").upper() != "SNR"
+                or str(c.get("zone_id") or "") in _locked_snr_Ids
                 or (_now_m - _seen.get(str(c.get("zone_id")), _now_m)) >= _min_stable
             ]
             best_eval: Optional[Dict[str, Any]] = None
@@ -433,7 +451,12 @@ class AutoExecutionMonitor:
                     "EXPIRED": 8,
                     "INVALIDATED": 9,
                 }
-                evaluated_list.sort(key=lambda r: (state_rank.get(str(r.get("state")), 9), -float((r.get("zone") or {}).get("score") or 0.0)))
+                evaluated_list.sort(
+                    key=lambda r: (
+                        7 if str(r.get("reason_code") or "") == "ZONE_TOO_FAR" else state_rank.get(str(r.get("state")), 9),
+                        -float((r.get("zone") or {}).get("score") or 0.0),
+                    )
+                )
                 best_eval = evaluated_list[0]
 
             def _sync_eval_to_state(ev_item: Dict[str, Any]) -> None:
@@ -629,6 +652,7 @@ def format_adaptive_execution_panel(
         f"H1           : {bias.get('H1', '-')}",
         f"M30          : {bias.get('M30', '-')}",
         f"M5           : {bias.get('M5', '-')}",
+        f"SESSION/AMD  : {bias.get('SESSION_AMD', '-')}",
         "",
         f"ZONE TYPE    : {z_tf} {z_type_raw}".strip(),
         f"ZONE STATUS  : {z_status}",

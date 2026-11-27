@@ -496,6 +496,24 @@ def _make_snapshot_and_scan(
     return snap, scan, dec
 
 
+_ENV_BACKUP: Dict[str, Optional[str]] = {}
+
+
+def setUpModule():
+    """Isolasi test dari AUTO_LOOSE_MODE di .env pengguna (mode eksperimen yang sengaja menonaktifkan news/score/risk guard).
+    Skenario di file ini menguji invarian mode ketat; perilaku loose diuji eksplisit lewat cfg / tests/test_loose_mode.py."""
+    _ENV_BACKUP["AUTO_LOOSE_MODE"] = os.environ.get("AUTO_LOOSE_MODE")
+    os.environ["AUTO_LOOSE_MODE"] = "false"
+
+
+def tearDownModule():
+    old = _ENV_BACKUP.get("AUTO_LOOSE_MODE")
+    if old is None:
+        os.environ.pop("AUTO_LOOSE_MODE", None)
+    else:
+        os.environ["AUTO_LOOSE_MODE"] = old
+
+
 class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
     """Pengujian deterministik 40 skenario wajib Section 22 + Backtest No-Lookahead."""
 
@@ -527,6 +545,7 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
             "SL_JARAK_MAKS": 20.0,
             "CONFLICT_MIDZONE_LIMIT_ENABLED": False,
             "PARTIAL_CLOSE_ENABLED": False,
+            "REAL_LOT_001_FIXED_TP_ENABLED": False,
             "GRADE_A_WAIT_CONFIRMATION_ENABLED": False,
             "AUTO_CANCEL_GRADE_A_PENDING_LIMIT": False,
             "SCALE_IN_80PLUS_ENABLED": False,
@@ -1286,7 +1305,7 @@ class TestAdaptiveAutoTrading40Scenarios(unittest.TestCase):
         )
         self.assertEqual(val_strict["reason_code"], REASON_INVALID_STOP_LOSS)
 
-        cfg_wide = {**cfg_live, "SL_JARAK_MAKS": 35.0}
+        cfg_wide = {**cfg_live, "SL_JARAK_MAKS": 35.0, "REAL_LOT_001_FIXED_TP_ENABLED": False}
         eng.cfg = cfg_wide
         val = validate_trade_candidate(
             wide_zone, mt5, sm, snapshot=snap, scan_result=scan, decision=dec,

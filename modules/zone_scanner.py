@@ -7231,7 +7231,15 @@ def plan_pending_order(
     inval = res["invalidation_price"]
     trk_pend = get_zone_tracker(auto_save=False)
     pers_inv_p, pers_rec_p = trk_pend.is_zone_invalidated(zone) if trk_pend else (False, None)
-    closed_inv_p, closed_rsn_p, _, _, _ = evaluate_smc_zone_closed_invalidation(zone, frames)
+    is_snr_origin_p = (
+        str(getattr(zone, "zone_id", "") or "").upper().startswith(("SNR_", "TF_PB_SNR_", "TF_BR_SNR_"))
+        or str((getattr(zone, "origin_bos", None) or {}).get("tipe") or "").upper() == "SNR_STRUCTURE"
+    )
+    closed_inv_p, closed_rsn_p, _, _, _ = (
+        (False, "", None, None, None)
+        if is_snr_origin_p
+        else evaluate_smc_zone_closed_invalidation(zone, frames)
+    )
     eff_spr_p = round(float(ask) - float(bid), 2) if (bid and ask and ask >= bid) else 0.0
     live_inv_p, live_rsn_p, live_px_p, live_inv_lvl_p, _ = evaluate_smc_setup_live_invalidation(
         zone, current_price=current_price, bid=bid, ask=ask,

@@ -49,6 +49,7 @@ from modules.execution_state import (
     STATE_COMPLETED,
     STATE_ORDER_PLACED,
     STATE_POSITION_ACTIVE,
+    canonical_zone_key,
     encode_order_comment,
 )
 from modules.mt5_conn import MT5_IPC_LOCK
@@ -556,6 +557,11 @@ class MT5ExecutionEngine:
                 "reason_text": msg_inv_pre, "setup_id": setup_id,
             }
 
+        sl_tp_cfg = (
+            dict(conf, MIN_RR=float(conf.get("BASE_MIN_RR", min(1.0, float(conf.get("MIN_RR", 1.0))))))
+            if use_real_001_tp
+            else conf
+        )
         sl_tp_recheck = validate_sl_tp_and_rr(
             direction=direction,
             entry_price=exec_price,
@@ -568,7 +574,7 @@ class MT5ExecutionEngine:
             ask=ask,
             is_market_order=is_market,
             symbol=symbol,
-            cfg=conf,
+            cfg=sl_tp_cfg,
         )
         if not sl_tp_recheck.get("valid"):
             rc_sl = str(sl_tp_recheck.get("reason_code"))
@@ -598,9 +604,10 @@ class MT5ExecutionEngine:
             cur_ord = list(self.mt5.orders_get(symbol=symbol) or ())
         comment = encode_order_comment(setup_id, entry_mode)
         if sm is not None and zone_id:
+            canon_zid = canonical_zone_key(zone_id)
             s1_active_seen = 0
             for s_rec in sm.get_all_setups().values():
-                if str(s_rec.get("zone_id") or "") != zone_id:
+                if canonical_zone_key(str(s_rec.get("zone_id") or "")) != canon_zid:
                     continue
                 s_st = str(s_rec.get("state") or "").upper()
                 if is_scale_in:
@@ -632,6 +639,8 @@ class MT5ExecutionEngine:
                     }
         max_pos_pre = int(conf.get("MAX_ACTIVE_POSITIONS", 1))
         eff_max_pos_pre = (max(2, max_pos_pre) if (is_scale_in and max_pos_pre > 0) else max_pos_pre)
+        min_layer_dist = float(conf.get("MIN_SAME_DIR_LAYER_DISTANCE_USD", 4.0))
+        buy_pos_code = getattr(self.mt5, "ORDER_TYPE_BUY", 0)
         scanner_pos_now = [x for x in cur_pos if is_scanner_owned_item(x, magic)]
         for p in scanner_pos_now:
             if str(getattr(p, "comment", "")) == comment or (eff_max_pos_pre > 0 and len(scanner_pos_now) >= eff_max_pos_pre):
@@ -642,6 +651,19 @@ class MT5ExecutionEngine:
                     "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
                     "reason_text": "Posisi scanner sudah mencapai batas aktif di MT5", "setup_id": setup_id,
                 }
+            # Cegah penumpukan multi-layer searah di area harga yang berdekatan (kecuali Scale-In 2-Stage resmi)
+            if not is_scale_in and conf.get("PREVENT_DUPLICATE_ORDER", True) and min_layer_dist > 0.0:
+                p_dir = "BUY" if int(getattr(p, "type", 0) or 0) == buy_pos_code else "SELL"
+                p_open = float(getattr(p, "price_open", 0.0) or 0.0)
+                if p_dir == direction and p_open > 0.0 and abs(p_open - exec_price) < min_layer_dist - 1e-9:
+                    msg_ov = f"Proteksi anti-layering: posisi {direction} aktif @ {p_open:.2f} terlalu dekat dengan entry {exec_price:.2f} (< {min_layer_dist:.2f} USD)"
+                    if sm is not None:
+                        sm.update_setup_state(setup_id, STATE_BLOCKED, reason_code=REASON_DUPLICATE_SETUP, reason_text=msg_ov, zone_id=zone_id)
+                    return {
+                        "executed": False, "simulated": False, "state": STATE_BLOCKED,
+                        "execution_status": STATE_BLOCKED, "reason_code": REASON_DUPLICATE_SETUP,
+                        "reason_text": msg_ov, "setup_id": setup_id,
+                    }
         if not is_market:
             scanner_ords = [o for o in cur_ord if is_scanner_owned_item(o, magic)]
             dup_price_tol = max(float(getattr(sym_info, "point", 0.01) or 0.01) * 5.0, 0.15)

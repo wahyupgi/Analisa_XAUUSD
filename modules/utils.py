@@ -1295,6 +1295,51 @@ def _save_trade_plan_state() -> None:
 _SETUP_ORDER_LINKS: Dict[str, List[int]] = {}
 
 
+def is_zone_sl_breached_or_invalidated(zone_obj: Any, default_source: str = "SNR") -> bool:
+    """
+    Cek apakah sebuah zona (dict atau objek Zone) sudah batal / ketembus SL (`SL_BREACHED` / `INVALID` / `BROKEN`),
+    baik dari atribut lifecycle zona maupun dari registri `_INVALIDATED_SETUP_VERSIONS` pada `state_zone_tracker.json`.
+    """
+    if zone_obj is None:
+        return True
+    g = (lambda k, d=None: zone_obj.get(k, d)) if isinstance(zone_obj, dict) else (lambda k, d=None: getattr(zone_obj, k, d))
+    if (
+        g("is_valid") is False
+        or g("is_active") is False
+        or g("is_broken") is True
+        or g("is_invalidated") is True
+    ):
+        return True
+    inv_t = str(g("invalidation_type") or "").strip().upper()
+    if inv_t in ("SETUP_INVALID_SL_BREACHED", "ZONE_STRUCTURALLY_INVALID", "SL_BREACHED"):
+        return True
+    for st_k in ("lifecycle_status", "status", "zone_status", "setup_status"):
+        st_v = str(g(st_k) or "").strip().upper()
+        if st_v in ("INVALID", "INVALIDATED", "BROKEN", "SL_BREACHED", "EXPIRED", "MITIGATED", "MITIGATED_FULL", "STRUCTURALLY_INVALID"):
+            return True
+    zid = str(g("zone_id") or "").strip()
+    if not zid or zid == "N/A":
+        return False
+    _load_trade_plan_state_once()
+    src = str(g("source") or default_source or "SNR").strip().upper()
+    tf = str(g("timeframe") or "").strip().upper()
+    try:
+        ver = max(1, int(g("setup_version") or 1))
+    except (TypeError, ValueError):
+        ver = 1
+    vk = _trade_plan_version_key(src, tf, zid, ver) if tf else ""
+    if vk and vk in _INVALIDATED_SETUP_VERSIONS:
+        rec = _INVALIDATED_SETUP_VERSIONS.get(vk) or {}
+        if str(rec.get("status") or "").upper() in _TERMINAL_PLAN_STATUSES or str(rec.get("setup_status") or "").upper() in _TERMINAL_PLAN_STATUSES:
+            return True
+    suffix = f":{zid}:v{ver}"
+    for k_inv, rec_inv in _INVALIDATED_SETUP_VERSIONS.items():
+        if str(k_inv).endswith(suffix) and isinstance(rec_inv, dict):
+            if str(rec_inv.get("status") or "").upper() in _TERMINAL_PLAN_STATUSES or str(rec_inv.get("setup_status") or "").upper() in _TERMINAL_PLAN_STATUSES:
+                return True
+    return False
+
+
 def link_mt5_ticket_to_setup(source: str, timeframe: str, zone_id: str, setup_version: int, ticket: Any) -> None:
     """Simpan mapping eksplisit ticket/position_id/order_id MT5 ke setup version tertentu (read-only tracking)."""
     _load_trade_plan_state_once()

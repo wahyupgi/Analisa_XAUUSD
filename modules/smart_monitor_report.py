@@ -628,6 +628,9 @@ def _smart_monitor_context(cycle_result):
             or str(candidate.get("grade") or "").upper() == "REJECTED"
         ):
             return False
+        from modules.utils import is_zone_sl_breached_or_invalidated
+        if is_zone_sl_breached_or_invalidated(candidate, default_source="SNR" if _is_snr_zone_obj(candidate) else "SMC"):
+            return False
         status = str(candidate.get("lifecycle_status") or candidate.get("status") or "ACTIVE").upper()
         freshness_status = str(candidate.get("freshness") or candidate.get("freshness_status") or "FRESH").upper()
         rel_status = str(candidate.get("zone_relevance") or "").upper()
@@ -2751,6 +2754,34 @@ def _build_monitor_invalid_why(z_obj, smc_h4=None, snr_h4=None, smc_h1=None, snr
     return format_smc_invalid_why(z_obj, h4_bias=smc_h4, h1_bias=smc_h1)
 
 
+def _resolve_pantau_amd_info(cycle_result, snapshot):
+    """Ambil ringkasan & objek PO3/AMD untuk dashboard/report/detail `pantau` secara otomatis tanpa fetch MT5 baru."""
+    cyc = cycle_result if isinstance(cycle_result, dict) else {}
+    amd_obj = cyc.get("session_amd") if isinstance(cyc.get("session_amd"), dict) else None
+    amd_sum = str(cyc.get("session_amd_summary") or "").strip()
+    if amd_sum and isinstance(amd_obj, dict) and amd_obj.get("available"):
+        return amd_sum, amd_obj
+    try:
+        from modules.session_amd_engine import analyze_session_amd, format_session_amd
+        snap_d = snapshot if isinstance(snapshot, dict) else (cyc.get("snapshot") if isinstance(cyc.get("snapshot"), dict) else {})
+        fr = snap_d.get("frames") if isinstance(snap_d, dict) else None
+        if isinstance(fr, dict) and (fr.get("M5") is not None or fr.get("M15") is not None):
+            amd_obj = analyze_session_amd(fr.get("M5"), frames=fr)
+            if amd_obj.get("available"):
+                amd_sum = format_session_amd(amd_obj, detailed=False).replace("SESI & AMD: ", "", 1)
+                lv = amd_obj.get("levels") or []
+                if lv:
+                    lv_s = " ".join(
+                        f"{x['name'].replace(' High', 'H').replace(' Low', 'L')}:{x['price']:.2f}[{x['status'][0]}]"
+                        for x in lv
+                    )
+                    amd_sum = f"{amd_sum} | {lv_s}"
+                return amd_sum, amd_obj
+    except Exception:
+        pass
+    return "", (amd_obj or {})
+
+
 def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
     """
     Dashboard terpadu TradingView-style Price Widget + Smart Monitor untuk in-place refresh `pantau`.
@@ -3075,9 +3106,11 @@ def format_smart_monitor_dashboard_with_meta(cycle_result, recent_events=None):
         include_id=False,
         active_zone_id=_act_zid_dash,
     ) if best_tp_dash else []
+    amd_dash_line, _ = _resolve_pantau_amd_info(cycle_result, snapshot)
     body_lines = [
         dash_div,
         *wrap_dashboard_field(" MARKET BIAS : ", f"H4={h4} {h1_dir_dash} {m30_dir_dash} M5={m5}", term_w, max_lines=None),
+        *(wrap_dashboard_field(" SESSION/AMD : ", amd_dash_line, term_w, max_lines=None) if amd_dash_line else []),
         *wrap_dashboard_field(" ENTRY STATUS: ", entry_status_dash, term_w, max_lines=None),
         *_tp_dash_lines,
         *(wrap_dashboard_field(" PENDING PLAN: ", _pend_txt_d, term_w, max_lines=None) if (_pend_txt_d and not _pend_same_dash) else []),
@@ -3381,12 +3414,14 @@ def format_smart_monitor_report(cycle_result):
         include_id=False,
         active_zone_id=_act_zid_rep,
     ) if best_tp_rep else []
+    amd_rep_line, _ = _resolve_pantau_amd_info(cycle_result, snapshot)
     lines = [
         div_rep,
         "XAUUSD SMART MONITOR",
         div_rep,
         *wrap_dashboard_field("MARKET       : ", f"{mkt_lbl} | {price_txt} | {snap_ts_rep}{id_sfx}", term_w_rep, max_lines=None),
         *wrap_dashboard_field("MARKET BIAS  : ", f"H4={h4} {h1_dir_rep} {m30_dir_rep} M5={m5}", term_w_rep, max_lines=None),
+        *(wrap_dashboard_field("SESSION/AMD  : ", amd_rep_line, term_w_rep, max_lines=None) if amd_rep_line else []),
         *wrap_dashboard_field("ENTRY STATUS : ", entry_line, term_w_rep, max_lines=None),
         *_tp_rep_lines,
         *(wrap_dashboard_field("PENDING PLAN : ", pend_line, term_w_rep, max_lines=None) if (pend_line and not _pend_same_rep) else []),
@@ -3592,6 +3627,13 @@ def format_smart_monitor_detail(cycle_result):
                 lines.append(f"  - [{ga.get('topic', 'Gold')} | {g_sent}] {g_hl} ({ga.get('publisher', 'N/A')})")
         for na in news_al_det:
             lines.append(na)
+    _, amd_det_obj = _resolve_pantau_amd_info(cycle_result, snapshot)
+    if isinstance(amd_det_obj, dict) and amd_det_obj.get("available"):
+        try:
+            from modules.session_amd_engine import format_session_amd
+            lines.extend(["", format_session_amd(amd_det_obj, detailed=True)])
+        except Exception:
+            pass
     auto_panel_det = str((cycle_result or {}).get("auto_execution_panel") or "").strip() if isinstance(cycle_result, dict) else ""
     if auto_panel_det:
         lines.extend(["", auto_panel_det])

@@ -126,6 +126,23 @@ REASON_BROKER_CONSTRAINTS = "BROKER_CONSTRAINTS"
 REASON_UNPROTECTED_POSITION_NO_SL = "UNPROTECTED_POSITION_NO_SL"
 REASON_EXECUTION_REJECTED = "EXECUTION_REJECTED"
 REASON_EXECUTION_AMBIGUOUS = "EXECUTION_AMBIGUOUS"
+# Session + PO3/AMD guard (hanya menahan EARLY_PENDING; ADAPTIVE_ENTRY saat sentuh zona tidak terpengaruh)
+REASON_AMD_COUNTER_PHASE = "AMD_COUNTER_PHASE"
+REASON_AMD_LIQUIDITY_EXPOSED = "AMD_LIQUIDITY_EXPOSED"
+
+
+def canonical_zone_key(zone_id: str) -> str:
+    """
+    Normalisasi wrapper zone_id (mis. TF_PB_SNR_... atau TF_BR_SNR_...) ke zone_id sumber aslinya
+    agar satu zona fisik tidak pernah dieksekusi ganda lewat jalur SMC/TF dan SNR sekaligus.
+    """
+    zid = str(zone_id or "").strip()
+    for prefix in ("TF_PB_", "TF_BR_"):
+        if zid.startswith(prefix):
+            inner = zid[len(prefix):]
+            if inner.startswith(("SNR_", "ZONE_", "SMC_")):
+                return inner
+    return zid
 
 
 def make_setup_id(zone_id: str, direction: str, symbol: str = SYMBOL) -> str:
@@ -134,7 +151,12 @@ def make_setup_id(zone_id: str, direction: str, symbol: str = SYMBOL) -> str:
     Ketiga jalur entry (EARLY_PENDING, ADAPTIVE_ENTRY, CONFIRMED_ENTRY) berbagi setup_id
     yang sama pada zona yang sama agar saling eksklusif dan anti-duplicate.
     """
-    zid = str(zone_id or "").strip()
+    raw_zid = str(zone_id or "").strip()
+    if "::SCALE_IN" in raw_zid:
+        base_part, suffix = raw_zid.split("::SCALE_IN", 1)
+        zid = f"{canonical_zone_key(base_part)}::SCALE_IN{suffix}"
+    else:
+        zid = canonical_zone_key(raw_zid)
     dir_u = str(direction or "").strip().upper()
     sym_u = str(symbol or SYMBOL).strip().upper()
     raw = f"{sym_u}|{zid}|{dir_u}"
@@ -439,6 +461,17 @@ class ExecutionStateManager:
     # -------------------------------------------------------------------------
     # IN-FLIGHT EXECUTION LOCK & DUPLICATE PROTECTION
     # -------------------------------------------------------------------------
+    @staticmethod
+    def _is_unfilled_expired_pending(rec: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(rec, dict):
+            return False
+        if rec.get("stopped_out") or rec.get("position_ticket"):
+            return False
+        st = str(rec.get("state") or "").upper()
+        if st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE, STATE_COMPLETED, STATE_INVALIDATED):
+            return False
+        return int(rec.get("order_ticket") or 0) == 0 or st == STATE_EXPIRED
+
     def try_acquire_setup_execution(self, setup_id: str) -> Tuple[bool, str]:
         """
         Atomic check-and-lock untuk memastikan dua loop monitoring paralel tidak pernah
@@ -458,7 +491,7 @@ class ExecutionStateManager:
                     return False, REASON_DUPLICATE_SETUP
                 if rec.get("stopped_out"):
                     return False, REASON_STOPPED_OUT_SETUP
-            if sid in set(self.state.get("executed_setup_ids") or []):
+            if sid in set(self.state.get("executed_setup_ids") or []) and not self._is_unfilled_expired_pending(rec):
                 return False, REASON_DUPLICATE_SETUP
             self._inflight_setups.add(sid)
             self.update_setup_state(sid, state=STATE_EXECUTING, save_now=False)
@@ -484,7 +517,7 @@ class ExecutionStateManager:
         - Jika Stage-2 sudah pernah jalan / selesai / stopped out -> (None, True).
         - Jika zona tercatat stopped_out_Zones -> (None, True).
         """
-        zid = str(zone_id or "").strip()
+        zid = canonical_zone_key(zone_id)
         dir_u = str(direction or "").strip().upper()
         if not zid:
             return None, True
@@ -496,7 +529,8 @@ class ExecutionStateManager:
             exec_ids = set(self.state.get("executed_setup_ids") or [])
             if stage2_sid in exec_ids:
                 return None, True
-            if zid in (self.state.get("stopped_out_Zones") or {}):
+            stopped_keys = {canonical_zone_key(k) for k in (self.state.get("stopped_out_Zones") or {}).keys()}
+            if zid in stopped_keys:
                 return None, True
 
             setups = self.state.get("setups") or {}
@@ -510,7 +544,7 @@ class ExecutionStateManager:
             for rec in setups.values():
                 if not isinstance(rec, dict):
                     continue
-                if str(rec.get("zone_id") or "") != zid:
+                if canonical_zone_key(str(rec.get("zone_id") or "")) != zid:
                     continue
                 st = str(rec.get("state") or "").upper()
                 if st in (STATE_ORDER_PLACED, STATE_EXECUTING):
@@ -521,6 +555,8 @@ class ExecutionStateManager:
                 if rec.get("is_scale_in") and st in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE, STATE_COMPLETED):
                     return None, True
                 if st == STATE_POSITION_ACTIVE and not rec.get("is_scale_in"):
+                    if str(rec.get("entry_mode") or "").upper() != "EARLY_PENDING":
+                        continue
                     r_dir = str(rec.get("direction") or "").upper()
                     if dir_u and r_dir and r_dir != dir_u:
                         continue
@@ -538,14 +574,14 @@ class ExecutionStateManager:
         allow_scale_in_stage2: bool = False,
     ) -> Tuple[bool, str]:
         sid = str(setup_id or "").strip()
-        zid = str(zone_id or "").strip()
+        zid = canonical_zone_key(zone_id)
         with self._lock:
             if sid in self._inflight_setups:
                 return True, REASON_DUPLICATE_SETUP
-            if sid and sid in set(self.state.get("executed_setup_ids") or []):
-                return True, REASON_DUPLICATE_SETUP
             setups = self.state.get("setups") or {}
             rec = setups.get(sid) if sid else None
+            if sid and sid in set(self.state.get("executed_setup_ids") or []) and not self._is_unfilled_expired_pending(rec):
+                return True, REASON_DUPLICATE_SETUP
             if isinstance(rec, dict):
                 st = str(rec.get("state") or "").upper()
                 if st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE, STATE_COMPLETED):
@@ -558,7 +594,7 @@ class ExecutionStateManager:
                 for other_sid, other_rec in setups.items():
                     if not isinstance(other_rec, dict):
                         continue
-                    if str(other_rec.get("zone_id") or "") == zid:
+                    if canonical_zone_key(str(other_rec.get("zone_id") or "")) == zid:
                         o_st = str(other_rec.get("state") or "").upper()
                         if allow_scale_in_stage2:
                             if o_st in (STATE_EXECUTING, STATE_ORDER_PLACED):
@@ -575,12 +611,13 @@ class ExecutionStateManager:
                             if o_st in (STATE_EXECUTING, STATE_ORDER_PLACED, STATE_POSITION_ACTIVE):
                                 return True, REASON_DUPLICATE_SETUP
                 stopped_map = self.state.get("stopped_out_Zones") or {}
-                if zid in stopped_map:
-                    prev_stop = stopped_map[zid] or {}
-                    prev_bos = str(prev_stop.get("bos_time") or "")
-                    # Jangan buka ulang setup yang sama setelah terkena SL kecuali terdapat pembentukan struktur baru
-                    if not zone_bos_time or not prev_bos or zone_bos_time == prev_bos:
-                        return True, REASON_STOPPED_OUT_SETUP
+                for stop_zid, prev_stop_raw in stopped_map.items():
+                    if canonical_zone_key(stop_zid) == zid:
+                        prev_stop = prev_stop_raw or {}
+                        prev_bos = str(prev_stop.get("bos_time") or "")
+                        # Jangan buka ulang setup yang sama setelah terkena SL kecuali terdapat pembentukan struktur baru
+                        if not zone_bos_time or not prev_bos or zone_bos_time == prev_bos:
+                            return True, REASON_STOPPED_OUT_SETUP
             return False, REASON_OK
 
     # -------------------------------------------------------------------------
@@ -708,6 +745,9 @@ class ExecutionStateManager:
                 for k, v in extra.items():
                     rec[k] = v
 
+            if st_u == STATE_ORDER_PLACED and prev_state != STATE_ORDER_PLACED:
+                rec["order_placed_epoch"] = time.time()
+
             if st_u in (STATE_ORDER_PLACED, STATE_POSITION_ACTIVE):
                 exec_list = self.state.setdefault("executed_setup_ids", [])
                 if sid and sid not in exec_list:
@@ -715,6 +755,10 @@ class ExecutionStateManager:
                     if len(exec_list) > 500:
                         del exec_list[:-500]
                 rec["needs_reconciliation"] = False
+            elif self._is_unfilled_expired_pending(rec):
+                exec_list = self.state.get("executed_setup_ids")
+                if isinstance(exec_list, list) and sid in exec_list:
+                    exec_list.remove(sid)
 
             if prev_state != st_u:
                 hist = rec.setdefault("history", [])

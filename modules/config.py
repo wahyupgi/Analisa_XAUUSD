@@ -499,28 +499,40 @@ SCALE_IN_MIN_SCORE = _env_cfg("SCALE_IN_MIN_SCORE", 80.0, float)
 
 def is_scale_in_80plus_zone(
     zone=None,
+    grade: str = None,
     score: float = None,
     cfg: dict = None,
 ) -> bool:
     """
     Cek apakah zona memenuhi syarat 2-Tahap (Scout Pending Limit 0.01 lot -> setelah terjemput,
-    tunggu konfirmasi M5 valid untuk Scale-In Market Order +0.02 / +0.03 lot maksimal 1x per zona).
+    tunggu konfirmasi M5 close valid untuk Scale-In Market Order +0.02 / +0.03 lot maksimal 1x per zona):
+    - Berlaku untuk zona berlabel Grade A / A+ (dengan skor >= GRADE_A_MIN_SCORE, default 75.0), ATAU
+    - Zona dengan skor >= SCALE_IN_MIN_SCORE (default 80.0).
+    Zona Grade B/C/D dengan skor < 80 mengembalikan False (hanya 1x entry tanpa Scale-In).
     """
+    def _g(obj, key, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
     c = cfg if isinstance(cfg, dict) else {}
     if not bool(c.get("SCALE_IN_80PLUS_ENABLED", _env_cfg("SCALE_IN_80PLUS_ENABLED", True, bool))):
         return False
     min_sc = float(c.get("SCALE_IN_MIN_SCORE", _env_cfg("SCALE_IN_MIN_SCORE", 80.0, float)))
-    if score is not None:
-        sc_raw = score
-    elif isinstance(zone, dict):
-        sc_raw = zone.get("score")
-    else:
-        sc_raw = getattr(zone, "score", None)
+    min_a = float(c.get("GRADE_A_MIN_SCORE", _env_cfg("GRADE_A_MIN_SCORE", 75.0, float)))
+    grd = str(grade if grade is not None else (_g(zone, "grade", "") or "")).strip().upper()
+    sc_raw = score if score is not None else _g(zone, "score", None)
     try:
         sc_val = float(sc_raw) if sc_raw is not None and sc_raw != "" else None
     except (TypeError, ValueError):
         sc_val = None
-    return bool(sc_val is not None and sc_val >= min_sc - 1e-9)
+    if sc_val is not None and sc_val >= min_sc - 1e-9:
+        return True
+    if grd.startswith("A") and (sc_val is None or sc_val >= min_a - 1e-9):
+        return True
+    return False
 
 
 def is_grade_a_wait_confirm_zone(
@@ -728,6 +740,7 @@ def _apply_loose_overrides(conf: dict) -> dict:
         "NEWS_FILTER": False,
         "ALLOW_NEUTRAL_H1": True,
         "CONFLICT_MIDZONE_LIMIT_ENABLED": False,
+        "BASE_MIN_RR": float(conf.get("MIN_RR", 1.0)),
     })
     return conf
 
@@ -795,6 +808,7 @@ def _build_auto_trading_config() -> dict:
         "REQUIRE_TAKE_PROFIT": _env_cfg("REQUIRE_TAKE_PROFIT", True, bool),
         "JOURNAL_LOG_BLOCKED_EVENTS": _env_cfg("JOURNAL_LOG_BLOCKED_EVENTS", False, bool),
         "PREVENT_DUPLICATE_ORDER": _env_cfg("PREVENT_DUPLICATE_ORDER", True, bool),
+        "MIN_SAME_DIR_LAYER_DISTANCE_USD": _env_cfg("MIN_SAME_DIR_LAYER_DISTANCE_USD", 4.0, float),
         "AUTO_CANCEL_INVALID_ZONE": _env_cfg("AUTO_CANCEL_INVALID_ZONE", True, bool),
         "AUTO_CANCEL_EXPIRED_SETUP": _env_cfg("AUTO_CANCEL_EXPIRED_SETUP", True, bool),
         "AUTO_CANCEL_FAR_PENDING": _env_cfg("AUTO_CANCEL_FAR_PENDING", True, bool),
@@ -853,3 +867,27 @@ def _build_auto_trading_config() -> dict:
     }
 
 
+
+
+# =============================================================================
+# SESSION & PO3/AMD ENGINE (modules/session_amd_engine.py) — semua ambang configurable via .env
+# =============================================================================
+def get_amd_config() -> dict:
+    """Konfigurasi Session + PO3/AMD Engine (sumber tunggal; membaca .env secara live)."""
+    return {
+        "AMD_ENGINE_ENABLED": _env_cfg("AMD_ENGINE_ENABLED", True, bool),
+        "AMD_EARLY_PENDING_GUARD_ENABLED": _env_cfg("AMD_EARLY_PENDING_GUARD_ENABLED", True, bool),
+        "AMD_ANALYSIS_TF_MIN": _env_cfg("AMD_ANALYSIS_TF_MIN", 15, int),
+        "AMD_MIN_BARS": _env_cfg("AMD_MIN_BARS", 40, int),
+        "AMD_ACC_RANGE_ATR": _env_cfg("AMD_ACC_RANGE_ATR", 4.0, float),            # lebar kotak maks (x ATR)
+        "AMD_ACC_MIN_RANGE_ATR": _env_cfg("AMD_ACC_MIN_RANGE_ATR", 1.5, float),    # lebar kotak min (x ATR) agar sweep berarti
+        "AMD_ACC_MAX_EFFICIENCY": _env_cfg("AMD_ACC_MAX_EFFICIENCY", 0.35, float),  # |net move| / path (chop)
+        "AMD_SWEEP_MIN_PEN_ATR": _env_cfg("AMD_SWEEP_MIN_PEN_ATR", 0.25, float),    # penetrasi minimal sweep
+        "AMD_SWEEP_MAX_EXC_ATR": _env_cfg("AMD_SWEEP_MAX_EXC_ATR", 2.5, float),     # ekskursi maks agar dianggap false break
+        "AMD_RECLAIM_MAX_BARS": _env_cfg("AMD_RECLAIM_MAX_BARS", 8, int),           # bar maks untuk close kembali ke dalam
+        "AMD_EXPANSION_CONFIRM_ATR": _env_cfg("AMD_EXPANSION_CONFIRM_ATR", 0.25, float),
+        "AMD_DISP_BODY_ATR": _env_cfg("AMD_DISP_BODY_ATR", 1.0, float),             # body displacement (x ATR)
+        "AMD_DIST_MIN_ATR": _env_cfg("AMD_DIST_MIN_ATR", 1.5, float),               # progres distribusi minimal (x ATR)
+        "AMD_MAX_EVENT_AGE_BARS": _env_cfg("AMD_MAX_EVENT_AGE_BARS", 48, int),      # event lebih tua dianggap basi
+        "AMD_LIQUIDITY_NEAR_ATR": _env_cfg("AMD_LIQUIDITY_NEAR_ATR", 1.0, float),   # likuiditas "tepat di balik zona"
+    }

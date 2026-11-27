@@ -216,11 +216,21 @@ class PendingOrderManager:
                 cancel_code = REASON_DAILY_LOSS_LIMIT
                 cancel_reason = "Daily loss limit tercapai; membatalkan pending order scanner"
 
-            # 3. Cek Expiration waktu setup
+            # 3. Cek Expiration waktu pending order (wajib dihitung sejak ORDER_PLACED, BUKAN sejak zona pertama masuk radar kemarin!)
             elif conf.get("AUTO_CANCEL_EXPIRED_SETUP", True):
-                created_ep = float(rec.get("created_epoch") or 0.0)
+                placed_ep = float(rec.get("order_placed_epoch") or 0.0)
                 ord_exp = int(getattr(ord_obj, "time_expiration", 0) or 0)
-                if (created_ep > 0 and (now_epoch - created_ep) > max_ttl_sec) or (0 < ord_exp <= int(now_epoch)):
+                tick_ref_ts = 0
+                try:
+                    with MT5_IPC_LOCK:
+                        _tk = self.mt5.symbol_info_tick(symbol)
+                    tick_ref_ts = int(getattr(_tk, "time", 0) or 0) if _tk is not None else 0
+                except Exception:
+                    tick_ref_ts = 0
+                exp_expired = bool(0 < ord_exp <= (tick_ref_ts if tick_ref_ts > 0 else int(now_epoch))) and (
+                    placed_ep <= 0.0 or (now_epoch - placed_ep) > 60.0
+                )
+                if (placed_ep > 0.0 and (now_epoch - placed_ep) > max_ttl_sec) or exp_expired:
                     cancel_code = REASON_ZONE_EXPIRED
                     cancel_reason = f"Pending order #{tkt} melewati batas waktu kedaluwarsa"
 
@@ -346,11 +356,12 @@ class PendingOrderManager:
                         new_st = STATE_INVALIDATED
                     if sid:
                         with self.state_mgr.lock:
-                            if cancel_code in (REASON_ZONE_TOO_FAR, REASON_NEWS_BLACKOUT, REASON_GRADE_A_WAIT_CONFIRM):
+                            cur_rec_c = self.state_mgr.get_setup(sid) or {}
+                            if not cur_rec_c.get("position_ticket") and not cur_rec_c.get("stopped_out"):
                                 exec_ids = self.state_mgr.state.get("executed_setup_ids") or []
                                 if sid in exec_ids:
                                     exec_ids.remove(sid)
-                                if zid and cancel_code == REASON_GRADE_A_WAIT_CONFIRM:
+                                if zid:
                                     canon_sid = make_setup_id(zid, direction, symbol=symbol)
                                     if canon_sid in exec_ids:
                                         exec_ids.remove(canon_sid)

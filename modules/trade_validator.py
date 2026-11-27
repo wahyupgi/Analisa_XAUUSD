@@ -318,7 +318,15 @@ def validate_zone_quality_layer(
             f"Zona {zone.zone_id} sudah termitigasi ({z_touches}x sentuhan)",
         )
 
-    if frames:
+    is_snr_zone = (
+        str(getattr(zone, "zone_id", "") or "").upper().startswith(("SNR_", "TF_PB_SNR_", "TF_BR_SNR_"))
+        or str((getattr(zone, "origin_bos", None) or {}).get("tipe") or "").upper() == "SNR_STRUCTURE"
+    )
+    if is_snr_zone:
+        from modules.utils import is_zone_sl_breached_or_invalidated
+        if is_zone_sl_breached_or_invalidated(zone, default_source="SNR"):
+            return False, STATE_INVALIDATED, REASON_ZONE_INVALIDATED, f"Setup zona SNR {zone.zone_id} sudah batal (SL_BREACHED / INVALID)"
+    if frames and not is_snr_zone:
         closed_inv, closed_rsn, _, _, _ = evaluate_smc_zone_closed_invalidation(zone, frames)
         if closed_inv:
             return False, STATE_INVALIDATED, REASON_ZONE_INVALIDATED, closed_rsn or f"Zona {zone.zone_id} ditembus candle close"
@@ -440,6 +448,11 @@ def select_candidate_zones(
     snr_r = snr_result or {}
     seen = set()
     ordered: List[Dict[str, Any]] = []
+    rejected_by_id: Dict[str, Dict[str, Any]] = {
+        str(rz.get("zone_id")).strip(): rz
+        for rz in (sc.get("rejected_zones") or [])
+        if isinstance(rz, dict) and str(rz.get("zone_id") or "").strip()
+    }
 
     def _add(z_item: Any):
         if z_item is None:
@@ -450,6 +463,8 @@ def select_candidate_zones(
         zid = str(zd.get("zone_id") or "").strip()
         if not zid or zid in seen or str(zd.get("timeframe") or "").upper() == "ACTIVE_SIGNAL":
             return
+        if zid in rejected_by_id:
+            zd = dict(rejected_by_id[zid])
         seen.add(zid)
         ordered.append(zd)
 
@@ -493,8 +508,11 @@ def select_candidate_zones(
     from modules.snr.entry_validator import _is_live_active_snr_zone
 
     def _snr_live_ok(sz_item: Any) -> bool:
-        # Hanya zona SNR yang masih aktif secara lifecycle & valid terhadap harga live yang jadi kandidat eksekusi
+        # Hanya zona SNR yang masih aktif secara lifecycle, belum SL_BREACHED, & valid terhadap harga live yang jadi kandidat eksekusi
         if not isinstance(sz_item, dict):
+            return False
+        from modules.utils import is_zone_sl_breached_or_invalidated
+        if is_zone_sl_breached_or_invalidated(sz_item, default_source="SNR"):
             return False
         zt = str(sz_item.get("zone_type") or "").upper()
         exp_t = "SUPPORT" if zt in ("SUPPORT", "DEMAND") else "RESISTANCE"
@@ -502,6 +520,17 @@ def select_candidate_zones(
 
     if isinstance(snr_dec.get("target_zone"), dict) and _snr_live_ok(snr_dec.get("target_zone")):
         _add(_snr_zone_to_candidate_dict(snr_dec.get("target_zone"), symbol=sym_ref))
+    locked_snr_focus_id = ""
+    try:
+        from modules.config import read_shared_zone_state
+        _ztrk_s = read_shared_zone_state()
+        for _fk_s in ("UNIFIED", "SNR"):
+            _fz_s = (((_ztrk_s or {}).get("decision_tracker") or {}).get("focus") or {}).get(_fk_s) or ((_ztrk_s or {}).get("focus") or {}).get(_fk_s)
+            if isinstance(_fz_s, dict) and _fz_s.get("zone_id"):
+                locked_snr_focus_id = str(_fz_s["zone_id"])
+                break
+    except Exception:
+        locked_snr_focus_id = ""
     snr_ranked = snr_scan.get("ranked_zones") if isinstance(snr_scan.get("ranked_zones"), dict) else {}
     snr_zones_dict = snr_scan.get("zones") if isinstance(snr_scan.get("zones"), dict) else {}
     snr_cand_lists = [
@@ -522,6 +551,7 @@ def select_candidate_zones(
                 snr_pool_merged.append(sz)
     snr_pool_merged.sort(
         key=lambda z: (
+            0 if (locked_snr_focus_id and str(z.get("zone_id") or "") == locked_snr_focus_id) else 1,
             -float(z.get("score") or 0.0),
             float(z.get("distance_points") or z.get("distance") or 9999.0),
         )
@@ -698,12 +728,24 @@ def validate_trade_candidate(
         "invalidation_price": inval_px,
     }
 
+    amd_summary = "-"
+    try:
+        from modules.session_amd_engine import analyze_session_amd, format_session_amd
+        df5_b = frames.get("M5") if isinstance(frames, dict) else None
+        if df5_b is not None or (isinstance(frames, dict) and frames.get("M15") is not None):
+            amd_b = analyze_session_amd(df5_b, frames=frames, cfg=conf)
+            if amd_b.get("available"):
+                amd_summary = format_session_amd(amd_b, detailed=False).replace("SESI & AMD: ", "", 1)
+    except Exception:
+        amd_summary = "-"
+
     market_bias = {
         "direction": direction,
         "H4": h4_bias,
         "H1": h1_bias,
         "M30": m30_status,
         "M5": triggers["primary_trigger"] if triggers["any_valid"] else ("ZONE TOUCHED" if touch["touched"] else "WAITING"),
+        "SESSION_AMD": amd_summary,
     }
 
     # Cek apakah setup ini memang SUDAH berstatus ORDER_PLACED / POSITION_ACTIVE pada broker
@@ -952,10 +994,11 @@ def validate_trade_candidate(
             )
         if p_code == REASON_PRICE_LEFT_ENTRY_RANGE:
             return _build_result(STATE_BLOCKED, REASON_PRICE_LEFT_ENTRY_RANGE, p_msg, val_chk="BLOCKED")
+        is_amd_hold = p_code in ("AMD_COUNTER_PHASE", "AMD_LIQUIDITY_EXPOSED")
         if touch["touched"]:
-            return _build_result(STATE_WAIT_TRIGGER, REASON_WAIT_TRIGGER, p_msg, val_chk="WAIT")
+            return _build_result(STATE_WAIT_TRIGGER, p_code if is_amd_hold else REASON_WAIT_TRIGGER, p_msg, val_chk="WAIT")
         if touch["is_approaching"]:
-            return _build_result(STATE_APPROACHING, REASON_WAIT_ZONE_TOUCH, p_msg, val_chk="WAIT")
+            return _build_result(STATE_APPROACHING, p_code if is_amd_hold else REASON_WAIT_ZONE_TOUCH, p_msg, val_chk="WAIT")
         return _build_result(STATE_RADAR, p_code, p_msg, val_chk="WAIT")
 
     # =========================================================================
@@ -1082,7 +1125,8 @@ def validate_trade_candidate(
         )
 
     # Khusus akun REAL dalam mode FULL_AUTO (`auto real`) dengan final_lot == 0.01:
-    # Kunci TP pada jarak tetap (default 110 pips = 11.00 USD) dan validasi ulang terhadap MIN_RR / LOOSE_RR aktif!
+    # Kunci TP pada jarak tetap (default 110 pips = 11.00 USD) dan validasi ulang terhadap BASE_MIN_RR (default 1.0)
+    # agar aturan TP tetap 110 pips tidak bentrok dengan LOOSE_RR=2.0 ketika jarak SL struktural > 5.50 USD!
     final_lot_val = float(lot_res["final_lot"])
     if should_use_real_lot_001_fixed_tp(acc_mode_u, eff_trading_mode, final_lot_val, cfg=conf):
         tp_digits = int(sl_tp_res.get("digits") or 2)
@@ -1094,6 +1138,7 @@ def validate_trade_candidate(
             if ((direction == "BUY" and tp2_px > fixed_tp1) or (direction == "SELL" and 0.0 < tp2_px < fixed_tp1))
             else 0.0
         )
+        cfg_001_rr = dict(conf, MIN_RR=float(conf.get("BASE_MIN_RR", conf.get("MIN_RR", 1.5))))
         sl_tp_res = validate_sl_tp_and_rr(
             direction=direction,
             entry_price=sl_tp_res["entry"],
@@ -1106,7 +1151,7 @@ def validate_trade_candidate(
             ask=ask if ask > 0 else None,
             is_market_order=is_market_order,
             symbol=symbol,
-            cfg=conf,
+            cfg=cfg_001_rr,
         )
         actual_rr = float(sl_tp_res.get("actual_rr") or 0.0)
         trade_plan.update({

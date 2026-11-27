@@ -35,6 +35,7 @@ import modules.snr as _m_snr
 import modules.unified_monitor as _m_unified
 import modules.us_news_radar as _m_news
 import modules.execution_monitor as _m_auto
+import modules.session_amd_engine as _m_amd
 from modules.terminal_ui import print_terminal
 
 # Expose every function, variable, and helper (including _catat_error, _tutup_mt5, etc.)
@@ -95,6 +96,7 @@ def format_command_menu_help():
         "- audit            : Audit fakta akun MT5, pending order & status ADR",
         "- refresh          : Perbarui analisis dengan data market MT5 terkini",
         "- news             : Kalender Ekonomi AS + Gold Market News (news detail / news refresh)",
+        "- amd              : Sesi trading + fase Power of Three/AMD berbasis harga aktual (amd detail)",
         "- help             : Menampilkan panduan dan daftar perintah ini",
         "- exit             : Keluar dari aplikasi (q / quit / keluar)",
         "",
@@ -409,6 +411,13 @@ def main():
             print_terminal("Selesai. Semoga trading Anda lancar!")
             break
 
+        if cmd in ("amd", "amd detail", "sesi", "sesi amd", "po3"):
+            try:
+                print_terminal("\n" + _m_amd.format_session_amd(_m_amd.scan_session_amd(), detailed=True))
+            except Exception as e_amd_cli:
+                print_terminal(f"\n[ERROR AMD COMMAND]: {e_amd_cli}")
+            continue
+
         if cmd == "auto" or cmd.startswith("auto "):
             try:
                 res_auto_cli = _m_auto.handle_auto_cli_command(tanya, input_fn=input)
@@ -511,6 +520,13 @@ def main():
                     and _m_unified.parse_monitor_command(tanya).get("mode") != "legacy_manual"
                 )
             )
+            if cmd.split()[0] in ("scan", "scanner", "zona", "zone", "smc", "snr", "snd"):
+                try:
+                    _amd_ln = _m_amd.context_lines()
+                    if _amd_ln:
+                        print_terminal("\n" + "\n".join(_amd_ln))
+                except Exception:
+                    pass
             if not _is_unified_cmd and cmd.split()[0] in ("scan", "scanner", "zona", "zone", "smc", "snr", "snd", "pantau", "watch"):
                 print_terminal("\n" + "\n".join(_m_news.context_lines()))
         except Exception:

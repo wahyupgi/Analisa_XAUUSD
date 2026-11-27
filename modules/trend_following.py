@@ -1429,8 +1429,10 @@ def build_trend_following_candidates(
             inv_p = round(min(float(imp["origin_price"]) + 0.3 * atr_m30, hi_p + max(3.0, 1.5 * atr_m30)), 2)
         dist_p = 0.0 if lo_p <= current_price <= hi_p else min(abs(current_price - lo_p), abs(current_price - hi_p))
         if dist_p <= max(6.0, 2.5 * atr_m30):
+            imp_orig = float(imp.get("origin_price") or lo_p)
+            imp_extr = float(imp.get("extreme_price") or hi_p)
             _dedup_push_candidate(cands, {
-                "zone_id": f"TF_PB_DYNAMIC_{direction}_{lo_p:.2f}_{hi_p:.2f}",
+                "zone_id": f"TF_PB_DYNAMIC_{direction}_{imp_orig:.2f}_{imp_extr:.2f}",
                 "setup_type": "TREND_PULLBACK",
                 "source_kind": "DYNAMIC_OTE_EMA",
                 "timeframe": "M30",
@@ -1526,15 +1528,28 @@ def build_trend_following_candidates(
         # Bangun shelf / M5 FVG atau continuation shelf di sekitar harga breakout / pullback kecil terbaru
         cont_fvg = [fv for fv in _detect_fvgs(df_m5, "M5", min_atr_ratio=0.15) if fv["direction"] == direction]
         half_c = min(1.2, max(0.55, 0.75 * atr_m5))
+        cont_anchor = ""
+        cont_form_time = None
         if cont_fvg:
             cf = cont_fvg[-1]
             c_lo, c_hi = float(cf["low"]), float(cf["high"])
+            cont_form_time = str(cf["time"])
+            cont_anchor = f"FVG_{cont_form_time}"
         elif str((m30_info or {}).get("status") or "").upper() == "CONFIRMED":
             c_now_m5 = float(df_m5["Close"].iloc[-1])
             c_lo = round(current_price - half_c, 2) if direction == "BUY" else round(current_price - 0.3 * half_c, 2)
             c_hi = round(current_price + 0.3 * half_c, 2) if direction == "BUY" else round(current_price + half_c, 2)
             if abs(c_now_m5 - current_price) > 2.5 * atr_m5:
                 c_lo = c_hi = 0.0
+            elif recent_m5_bos:
+                cont_form_time = str(recent_m5_bos[-1]["time"])
+                cont_anchor = f"BOS_{cont_form_time}"
+            elif df_m30 is not None and len(df_m30) > 0:
+                cont_form_time = str(df_m30.index[-1])
+                cont_anchor = f"M30_{cont_form_time}"
+            else:
+                cont_form_time = str(df_m5.index[-1])
+                cont_anchor = f"M5_{cont_form_time}"
         else:
             c_lo = c_hi = 0.0
         if c_lo > 0 and c_hi >= c_lo and (recent_m5_bos or (m30_info or {}).get("condition") == "CONSOLIDATION_BREAKOUT"):
@@ -1555,10 +1570,11 @@ def build_trend_following_candidates(
                     anchor_sl = recent_highs[-1] if recent_highs else float(df_m5["High"].iloc[-8:].max())
                     inv_c = round(max(c_hi, anchor_sl) + max(0.5, 0.4 * atr_m5), 2)
                 _dedup_push_candidate(cands, {
-                    "zone_id": f"TF_CONT_{direction}_{c_lo:.2f}_{c_hi:.2f}",
+                    "zone_id": f"TF_CONT_{direction}_{cont_anchor or f'{c_lo:.2f}_{c_hi:.2f}'}",
                     "setup_type": "TREND_CONTINUATION",
                     "source_kind": "M30_M5_CONTINUATION",
                     "timeframe": "M30",
+                    "formation_time": cont_form_time,
                     "zone_type": ztype,
                     "direction": direction,
                     "price_low": round(c_lo, 2),

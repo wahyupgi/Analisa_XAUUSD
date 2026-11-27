@@ -614,25 +614,39 @@ class SnrAlertTracker:
                     else:
                         _emit(f"[SNR] RETEST FAILED{rt_suffix}{_ts_tag(rt_ts)}", category="MARKET_ALERT", zone_id=curr_state["retest_zone_id"], zone_label=rt_zone or None, timestamp=rt_ts)
 
-        # 5. Alert Interaksi S1 & R1 (Approaching / Touch)
-        if (curr_state["s1_state"], curr_state["s1_id"], curr_state["s1_inside"]) != (
+        # 5. Alert Interaksi S1 & R1 (Approaching / Touch — abaikan penuh bila zona sudah ketembus SL / invalid)
+        from modules.utils import is_zone_sl_breached_or_invalidated
+        s1_invalid_sl = bool(s1 and is_zone_sl_breached_or_invalidated(s1, default_source="SNR"))
+        r1_invalid_sl = bool(r1 and is_zone_sl_breached_or_invalidated(r1, default_source="SNR"))
+
+        if (not s1_invalid_sl) and (curr_state["s1_state"], curr_state["s1_id"], curr_state["s1_inside"]) != (
             self.last_state.get("s1_state"), self.last_state.get("s1_id"), self.last_state.get("s1_inside")
         ):
             s1_lbl = f"S1 {s1['low']:.2f}-{s1['high']:.2f}" if s1.get("low") is not None else None
+            s1_retouch = int(safe_float(s1.get("touch_count"), 0)) >= 1 or str(s1.get("lifecycle_event") or "").upper() in ("TOUCHED", "SWEEP")
             if curr_state["s1_state"] == "TOUCH" and s1.get("low") is not None:
-                label = "HARGA DI SUPPORT S1" if s1.get("price_inside") else "HARGA DEKAT SUPPORT S1"
+                label = (
+                    ("HARGA DISENTUH KEMBALI SUPPORT S1" if s1_retouch else "HARGA DI SUPPORT S1")
+                    if s1.get("price_inside")
+                    else "HARGA DEKAT SUPPORT S1"
+                )
                 _emit(f"[SNR] {label} ({s1['low']:.2f}-{s1['high']:.2f})", category="MARKET_ALERT", zone_id=s1.get("zone_id"), zone_label=s1_lbl)
             elif curr_state["s1_state"] == "RECENT_TOUCH" and s1.get("low") is not None:
                 _emit(f"[SNR] SUPPORT S1 DISENTUH M5; HARGA DI LUAR ZONA ({s1['low']:.2f}-{s1['high']:.2f})", category="MARKET_ALERT", zone_id=s1.get("zone_id"), zone_label=s1_lbl)
             elif curr_state["s1_state"] == "APPROACHING" and s1.get("low") is not None:
                 _emit(f"[SNR] HARGA DEKAT SUPPORT S1 ({s1['low']:.2f}-{s1['high']:.2f})", category="MARKET_ALERT", zone_id=s1.get("zone_id"), zone_label=s1_lbl)
 
-        if (curr_state["r1_state"], curr_state["r1_id"], curr_state["r1_inside"]) != (
+        if (not r1_invalid_sl) and (curr_state["r1_state"], curr_state["r1_id"], curr_state["r1_inside"]) != (
             self.last_state.get("r1_state"), self.last_state.get("r1_id"), self.last_state.get("r1_inside")
         ):
             r1_lbl = f"R1 {r1['low']:.2f}-{r1['high']:.2f}" if r1.get("low") is not None else None
+            r1_retouch = int(safe_float(r1.get("touch_count"), 0)) >= 1 or str(r1.get("lifecycle_event") or "").upper() in ("TOUCHED", "SWEEP")
             if curr_state["r1_state"] == "TOUCH" and r1.get("low") is not None:
-                label = "HARGA DI RESISTANCE R1" if r1.get("price_inside") else "HARGA DEKAT RESISTANCE R1"
+                label = (
+                    ("HARGA DISENTUH KEMBALI RESISTANCE R1" if r1_retouch else "HARGA DI RESISTANCE R1")
+                    if r1.get("price_inside")
+                    else "HARGA DEKAT RESISTANCE R1"
+                )
                 _emit(f"[SNR] {label} ({r1['low']:.2f}-{r1['high']:.2f})", category="MARKET_ALERT", zone_id=r1.get("zone_id"), zone_label=r1_lbl)
             elif curr_state["r1_state"] == "RECENT_TOUCH" and r1.get("low") is not None:
                 _emit(f"[SNR] RESISTANCE R1 DISENTUH M5; HARGA DI LUAR ZONA ({r1['low']:.2f}-{r1['high']:.2f})", category="MARKET_ALERT", zone_id=r1.get("zone_id"), zone_label=r1_lbl)

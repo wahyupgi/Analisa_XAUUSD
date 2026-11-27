@@ -211,3 +211,55 @@ class SnrCandidateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_sl_breached_snr_zone_suppressed_from_touch_alerts_and_candidates_and_retouch_labeled(self):
+        import modules.utils as u
+        from modules.snr.radar import SnrAlertTracker, evaluate_snr_radar
+
+        r1_breached = {
+            "zone_id": "SNR_H1_RES_2026-11-24T12:00:00_364680",
+            "zone_type": "RESISTANCE",
+            "timeframe": "H1",
+            "rank_label": "R1",
+            "low": 3640.93,
+            "high": 3646.80,
+            "score": 76.0,
+            "grade": "B",
+            "lifecycle_status": "ACTIVE",
+            "price_inside": True,
+            "ref_atr": 6.0,
+        }
+        vk = "SNR:H1:SNR_H1_RES_2026-11-24T12:00:00_364680:v1"
+        u._load_trade_plan_state_once()
+        old_rec = u._INVALIDATED_SETUP_VERSIONS.get(vk)
+        try:
+            u._INVALIDATED_SETUP_VERSIONS[vk] = {
+                "status": "SL_BREACHED",
+                "setup_status": "SL_BREACHED",
+                "zone_status": "ACTIVE",
+                "reason": "SL_BREACHED",
+            }
+            # 1) Zona yang sudah SL_BREACHED wajib dianggap invalid & tidak masuk kandidat Auto Exec
+            self.assertTrue(u.is_zone_sl_breached_or_invalidated(r1_breached, default_source="SNR"))
+            scan = {"symbol": "XAUUSDc", "current_price": 3646.80}
+            snr = {"scan_result": {"symbol": "XAUUSDc", "resistances": [r1_breached]}, "decision": {"target_zone": r1_breached}}
+            self.assertEqual(select_candidate_zones(scan, {}, snr_result=snr), [])
+
+            # 2) SnrAlertTracker TIDAK boleh menerbitkan alert sentuh pada R1 yang sudah SL_BREACHED
+            trk = SnrAlertTracker()
+            rad = evaluate_snr_radar({"active_resistances": [r1_breached]}, {"signal": "WAIT", "market_status": "OPEN"}, current_price=3646.80)
+            out_al = trk.evaluate({"ranked_zones": {"active_resistances": [r1_breached]}, "radar": rad, "decision": {"signal": "WAIT", "market_status": "OPEN"}, "price_action": {}})
+            self.assertFalse(any("3640.93-3646.80" in a for a in out_al["alerts"]), out_al["alerts"])
+        finally:
+            if old_rec is None:
+                u._INVALIDATED_SETUP_VERSIONS.pop(vk, None)
+            else:
+                u._INVALIDATED_SETUP_VERSIONS[vk] = old_rec
+
+        # 3) Untuk zona yang MASIH VALID tapi sudah pernah disentuh sebelumnya (touch_count >= 1), labelnya "HARGA DISENTUH KEMBALI"
+        r1_retouch = dict(r1_breached, zone_id="SNR_H1_RES_VALID_RETOUCH_999", touch_count=1)
+        trk2 = SnrAlertTracker()
+        rad2 = evaluate_snr_radar({"active_resistances": [r1_retouch]}, {"signal": "WAIT", "market_status": "OPEN"}, current_price=3644.00)
+        out_al2 = trk2.evaluate({"ranked_zones": {"active_resistances": [r1_retouch]}, "radar": rad2, "decision": {"signal": "WAIT", "market_status": "OPEN"}, "price_action": {}})
+        self.assertTrue(any("HARGA DISENTUH KEMBALI RESISTANCE R1" in a for a in out_al2["alerts"]), out_al2["alerts"])
